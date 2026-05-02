@@ -852,3 +852,286 @@ Die Minor-Findings sind klassische Implementation-Detail-Fragen, die in normaler
 
 Implementation kann beginnen.
 
+---
+
+## Iteration 3 Design Review
+
+**Modus:** Design QA (vor Code-Erstellung)
+**Datum:** 2026-05-02
+**Iteration:** 3
+**Reviewer:** Senior QA Engineer
+**Geprüfte Artefakte:**
+- `PROJECT.md` (User Stories US-17 bis US-24, BUG IT3)
+- `ARCHITECTURE.md` v1.3 (§16 Iteration 3)
+- `contracts/schema.prisma` v1.3
+- `contracts/api-routes.md` v1.3
+- `contracts/zod-schemas.ts` v1.3
+- `contracts/BUG_BOOKING_IT3.md`
+
+### Verdict (Kurzfassung)
+
+**Design freigegeben — mit Auflagen.**
+
+- 0 Blocker. Alle echten Showstopper sind in der Spec adressiert.
+- 4 Major-Findings, die Engineers beim Build inline lösen können (klare Lösungsrichtung jeweils dokumentiert).
+- 6 Minor-Findings.
+- Pass-Rate: 30/34 prüfbare Spec-Punkte.
+
+Die Architektur-Entscheidung "Variante 2 = Server-Component liest Template/Overrides direkt aus Prisma" (siehe §16.15) ist die wichtigste neue Festlegung in IT3 und wird im Review konsequent als Maßstab verwendet.
+
+### 1. Test-Matrix (Stories in Scope)
+
+| Story  | AC                                | Spec-Stelle                       | Testbar? | Status |
+|--------|-----------------------------------|-----------------------------------|----------|--------|
+| BUG IT3 | Form-Submit feuert POST mit korrektem Payload         | §16.1 + BUG_BOOKING_IT3.md §5/§7 | ja       | Pass   |
+| BUG IT3 | Validation-Fehler sichtbar (kein silent fail)         | BUG_BOOKING_IT3.md §3, Patch 3    | ja       | Pass   |
+| US-17  | Default-Vorlage „auf alle Tage anwenden"                | §16.2, PUT /api/admin/availability-template | ja | Pass   |
+| US-17  | Einzelner Tag überschreiben (ohne andere zu ändern)    | DayOverride-Modell, §16.2 Resolver | ja      | Pass   |
+| US-17  | Kunde wählt Uhrzeit innerhalb des Fensters              | GET /api/slots/available + TimeSlotPicker | ja | Pass   |
+| US-17  | 30-Min-Schritte aus Annahme PROJECT.md                  | `slotDurationMinutes` (Default 60, NICHT 30) | ja | **Fail** (siehe MAJOR-301) |
+| US-17  | Race-Condition Doppelbuchung                            | Partial Unique Index + 409 CONFLICT | ja      | Pass   |
+| US-17  | Bestandsbuchungen bleiben lesbar/funktionsfähig         | §16.10 Migration, schema.prisma   | ja       | Pass   |
+| US-18  | Datei-Upload (image/video/pdf)                          | POST /api/upload, §16.3, UPLOAD_ACCEPTED_CONTENT_TYPES | ja | Pass |
+| US-18  | 20 MB-Limit erzwungen                                   | UPLOAD_MAX_FILE_BYTES, 413 PAYLOAD_TOO_LARGE | ja  | Pass   |
+| US-18  | 5 Dateien-Limit erzwungen                               | `attachmentIds.max(5)` (FE-only!) | partial  | **Fail** (siehe MAJOR-302) |
+| US-18  | Tom sieht Anhänge im Admin-Portal                       | BookingAttachmentList, §16.3      | ja       | Pass   |
+| US-18  | Upload optional (kein Datei → Submit OK)                | `attachmentIds.optional()`         | ja       | Pass   |
+| US-18  | Orphan-Cleanup bei Storno/Abandon                       | §16.3 Cleanup-Cron als Backlog    | partial  | **Fail** (siehe MAJOR-303) |
+| US-18  | DSGVO-Aufbewahrung 2 Jahre                              | §11 erwähnt nur Bookings, NICHT Attachments | nein | **Fail** (siehe MINOR-301) |
+| US-19  | „Sonstiges" als letzter Eintrag                          | SERVICES-Konstante                | ja       | Pass   |
+| US-19  | Pflichtfeld 30+ Zeichen                                 | superRefine in beiden Schemas     | ja       | Pass   |
+| US-19  | Anzeige im Admin als „Sonstiges / Individuelle Anfrage" | §16.4 + Admin-Service-Label-Map   | partial  | siehe MINOR-302 |
+| US-20  | Richtpreis pro Service-Karte                            | §16.5 + lib/services.ts           | ja       | Pass   |
+| US-20  | Disclaimer Mobile + Desktop                             | §16.5 Tooltip-Pattern             | ja       | Pass   |
+| US-21  | Chronologische Liste bevorstehender Termine              | GET /api/admin/upcoming-bookings, §16.6 | ja  | Pass   |
+| US-21  | „Heute"-Badge                                           | UpcomingBookingSchema.isToday     | ja       | Pass   |
+| US-21  | Klick → Detail                                          | Anchor-Link auf /admin/bookings#id | ja      | Pass   |
+| US-22  | 10 Bewertungen, Ø ~4.5                                  | §16.7, lib/reviews.ts             | ja       | Pass   |
+| US-22  | „Mehr anzeigen" ab >6 Reviews                           | §16.7 ReviewSection               | ja       | Pass   |
+| US-22  | Kompatibilität mit US-29-Datenmodell                    | §16.7 explizit dokumentiert       | ja       | Pass   |
+| US-23  | Popup mit Vorher/Nachher + CTA                          | §16.8 ServiceModal                | ja       | Pass   |
+| US-23  | Schließen via X / Klick / Escape                         | §16.8                              | ja       | Pass   |
+| US-23  | „Jetzt anfragen" → Formular mit vorausgewähltem Service  | Query-Param `?service=<slug>`      | ja       | Pass   |
+| US-24  | Eingangsbestätigung mit cancelToken-Link                | §16.9 + Bestand `bookingReceiptToCustomer` (IT2) | ja | Pass |
+| US-24  | Bestätigungs-Mail bei PENDING→CONFIRMED                  | §16.9 Trigger im PATCH-Handler    | ja       | Pass   |
+| US-24  | Ablehnungs-Mail bei →REJECTED                            | §16.9 Trigger im PATCH-Handler    | ja       | Pass   |
+| US-24  | Storno-Link in Bestätigung                              | `actionUrl(token, 'cancel')`      | ja       | Pass   |
+| US-24  | Mails auf Deutsch + Tom-Footer                          | §16.9 Subject/Body skizziert      | ja       | Pass   |
+| Sec    | Upload-Endpoint Rate-Limit                              | §16.13 — 20/h/IP                  | ja       | Pass   |
+| Sec    | Public Endpoints geschützt                              | §16.13 Rate-Limit-Tabelle         | ja       | Pass   |
+
+### 2. BUG IT3 — Root-Cause-Analyse
+
+**Verdict: Überzeugend, dateigenau, ausführbar.**
+
+Die Analyse in `BUG_BOOKING_IT3.md` ist die qualitativ beste Bug-Analyse, die bisher in diesem Projekt vorliegt:
+
+- **Root Cause klar identifiziert:** `register('slotId')` an Hidden-Input mit `value=` ist ein bekanntes RHF-Anti-Pattern. Der Mechanismus (RHF-State-Quelle vs. DOM-`value`-Konflikt) ist korrekt erklärt.
+- **Sekundärursachen eskaliert:** Bug B (Mount-Reihenfolge), Bug C (unsichtbare Validation auf hidden Input), Bug D (`'sonstiges'` fehlt in SERVICES) und Bug E (IT3-Slot-Modell-Übergang) sind alle benannt und priorisiert.
+- **Patch ist konkret:** `BookingFormSchema = CreateBookingSchema.omit({ slotId: true })` ist exakt der richtige Move — die API-Vertrags-Wahrheit bleibt in `CreateBookingSchema`, das Form benutzt eine reduzierte Variante. Genau dasselbe Pattern ist im Zod-Schema bereits umgesetzt (`BookingFormSchema` in `zod-schemas.ts`, Zeilen 327–357).
+- **Verifikations-Schritte testbar:** §6 listet 5 reproduzierbare Test-Schritte mit erwartetem Ergebnis.
+- **Akzeptanzkriterien für QA in §7:** 8 Bullets mit konkreten Erwartungen.
+
+**Eine Lücke (MINOR-303):** §5 Patch 5 (Console-Logging) fehlt der Hinweis, dass das Logging vor Production wieder entfernt oder durch strukturiertes Logging ersetzt werden muss — sonst landen PII-Daten (Name, Telefon, E-Mail) in den Browser-Console-Logs.
+
+### 3. Findings nach Schwerpunkt
+
+#### MAJOR-301 — `slotDurationMinutes` widerspricht Annahme „30 Minuten" aus PROJECT.md
+
+`PROJECT.md` Zeile 669 Annahmen:
+
+> Zeitfenster-Schritte für Kundenbuchung: 30 Minuten (Annahme — Tom bestätigen).
+
+`AvailabilityTemplate.slotDurationMinutes` hat den Default `60` (schema.prisma Zeile 210; api-routes.md Zeile 333–339). Der seed initialisiert jeden Tag mit 60 Minuten (§16.10 SQL-Migration).
+
+**Risiko:** Inkonsistenz zwischen User-Story-Annahme und Implementation. Wenn Tom erwartet, dass der Default 30 Minuten ist (und das ihm so ankündigt wurde), wird er beim ersten Login 60-Min-Slots sehen und ist verwirrt.
+
+**Lösungsrichtung:**
+- Entweder Default in `schema.prisma` (Zeile 210), `seed.sql` (§16.10 Zeile 1769) und API-Beispiel (api-routes.md Zeilen 333–339) auf `30` ändern.
+- ODER Annahme in `PROJECT.md` Zeile 669 explizit auf 60 Minuten korrigieren („initial 60 Minuten, Tom kann pro Tag anpassen").
+
+Das Schema erlaubt 15–480 Minuten, also ist das eine reine Default-Wert-Frage. Engineers können das beim Build entscheiden, brauchen aber eine eindeutige Vorgabe.
+
+**Routing:** `solution-architect` (1 Zeile in der Spec) oder `project-manager` (Tom kurz fragen).
+
+#### MAJOR-302 — `attachmentIds.max(5)` ist nur im CreateBookingSchema, nicht im POST /api/upload
+
+§16.3 sagt Server-side Limit: „max. 5 Dateien pro Buchung". Der Schema-Code in `zod-schemas.ts` (Zeile 250) erzwingt das tatsächlich beim `POST /api/bookings`-Aufruf.
+
+**Aber:** `POST /api/upload` validiert nicht, wie viele Dateien bereits vom selben Client/IP hochgeladen wurden. Ein böswilliger Client kann 100 Dateien zu je 19 MB hochladen (= 1.9 GB), bevor `POST /api/bookings` mit nur 5 IDs aufgerufen wird oder gar nicht. Die übrigen 95 Dateien bleiben als Orphans im Vercel Blob.
+
+Das wird zwar durch das Rate-Limit „20 Uploads / 60 min / IP" (§16.13) gemildert, aber:
+- 20 × 19 MB = 380 MB pro IP / Stunde
+- 380 MB × 24 = 9.1 GB pro IP / Tag
+- Free-Tier-Limit = 2 GB total
+
+Zwei IPs füllen das Free-Tier in einem Tag. Engineers brauchen eine Strategie:
+
+**Lösungsrichtung:**
+- Empfehlung: Aufträgliche Validation reicht für MVP, ABER der Cleanup-Cron (§16.3) ist NICHT mehr Backlog, sondern Pflicht für Iteration 3.
+- Alternativ: Rate-Limit auf 5 oder 10 Uploads / 60 min / IP senken (statt 20) — passt zur Stories-Annahme „max. 5 Dateien pro Buchung".
+
+**Routing:** `solution-architect` (Spec-Klarstellung) → `backend-engineer` (Cleanup-Cron implementieren).
+
+#### MAJOR-303 — Orphan-Attachments bei abgebrochener Buchung sind nicht spec'd
+
+Use-Case: Kunde lädt 3 Fotos hoch, schließt dann den Tab ohne Submit. `BookingAttachment.bookingId` bleibt `null`, Vercel-Blob-Datei bleibt liegen.
+
+§16.3 erwähnt den Cleanup-Cron als „Backlog" (1×/Tag, 24h-Cutoff). Das ist für die Datei-Größen vernünftig, aber:
+
+1. **DSGVO-Risiko:** Der Kunde könnte eine Datei mit personenbezogenen Daten (Foto eines Mahnbescheids, Vollmacht-PDF) hochgeladen haben, ohne die Anfrage abzuschicken. Die Datei landet auf einer **öffentlichen** Vercel-Blob-URL und liegt dort bis zum nächsten Cleanup-Lauf. Bis Cleanup-Cron in Backlog ist: **liegt sie unbegrenzt**.
+2. **Stornierte Buchungen:** §16.3 spricht nur von `bookingId === null`. Wenn eine Buchung später storniert wird (Status CANCELLED/REJECTED), bleiben die Anhänge bestehen. Das ist im DSGVO-Sinne fragwürdig.
+
+**Lösungsrichtung:**
+- Cleanup-Cron für `bookingId === null && createdAt < now-24h` ist Pflicht für IT3 (nicht Backlog).
+- Ergänzung: Bei Status-Wechsel auf CANCELLED/REJECTED + Mail an Kunde gesendet → Anhänge nach Aufbewahrungsfrist (2 Jahre, analog zu Bookings) löschen. Das kann an §11 Aufbewahrungsfristen angedockt werden.
+
+**Routing:** `solution-architect` (Spec-Ergänzung in §16.3 + §11) → `backend-engineer`.
+
+#### MAJOR-304 — Variante 2 (Server-Component) widerspricht §10 Frontend-Aufrufer-Mapping
+
+§16.15 Annahme: „Iteration 3 nutzt **Variante 2** der Calendar-Daten-Beschaffung (Server-Component liest direkt aus Prisma), kein öffentlicher GET-Endpoint für Template/Overrides."
+
+Aber:
+
+- `api-routes.md` §7 Zeile 770–774 sagt: „Engineers können einen ungeschützten `GET /api/availability-template` implementieren, falls Engineers das implementieren möchten" — also offen gelassen.
+- `api-routes.md` §10 (Frontend-Aufrufer-Mapping, Zeile 829): `GET /api/admin/availability-template` wird von `app/admin/availability/page.tsx` aufgerufen — das ist Admin-only, OK. Aber der Calendar (`CalendarV2.tsx`) ruft **keinen** Endpoint für die Template-Daten auf, das passt zu Variante 2.
+- §16.2 zeigt im Buchungs-Flow-Pseudocode (Zeile 1286–1287): `GET /api/availability-template` und `GET /api/day-overrides?month=...` — beide ohne `/admin`-Präfix, also ÖFFENTLICH. Das ist Variante 1, nicht Variante 2.
+
+**Drei widersprüchliche Aussagen in derselben Spec.** Engineers müssen raten.
+
+**Lösungsrichtung:**
+- Spec eindeutig auf Variante 2 festlegen (was §16.15 sagt).
+- §16.2 Pseudocode-Block (Zeile 1283–1301) aktualisieren: Server-Component-Pattern statt Client-Fetches.
+- §7 (Zeile 762–776) entfernen oder präzisieren.
+
+**Routing:** `solution-architect`.
+
+#### MAJOR-305 — Zeitstrings als HH:MM/YYYY-MM-DD ohne TZ — DST-Risiko unzureichend behandelt
+
+Schema (Zeile 96–103 schema.prisma) und §16.2 erklären das Berlin-TZ-First-Konzept. Das ist konzeptionell richtig — Strings ohne Offset vermeiden Auto-Konvertierung. Aber:
+
+- **DST-Übergang:** Am 26.10.2026 (Winterzeit-Wechsel) gibt es zwei mögliche „02:30 Uhr". Am 29.03.2026 (Sommerzeit-Wechsel) gibt es kein „02:30 Uhr" überhaupt. Die Spec adressiert das nicht — sie sagt nur „kein Shift bei DST" (Zeile 103). Der Mail-Versand verwendet `Intl.DateTimeFormat` mit `timeZone: 'Europe/Berlin'` (Zeile 1694), was korrekt ist, aber:
+- **`computeAvailableSlots()` in `lib/availability.ts`:** Wenn Tom Slot-Dauer auf 30 Min setzt und Fenster 02:00–03:30, würden am DST-Tag entweder 2 oder 4 Slots erscheinen, je nach Logik. Engineers müssen entscheiden.
+
+**Risiko:** In der Praxis ist das in IT3 ein theoretisches Problem (Tom arbeitet nicht um 02:00 Uhr). Aber die Spec sollte explizit sagen „DST-Übergänge sind out-of-scope für IT3, weil die Verfügbarkeitsfenster typischerweise zwischen 06:00 und 22:00 liegen". Sonst riskiert Iteration 4 mit Zahlungs-Cron einen verdeckten Bug.
+
+**Lösungsrichtung:**
+- Spec-Hinweis in §16.2 oder §16.15: „Verfügbarkeitsfenster werden zwischen 06:00 und 22:00 erwartet — DST-Übergangszeiten (02:00–03:00) sind out-of-scope für IT3."
+
+**Routing:** `solution-architect` (1 Zeile Annahme).
+
+#### MINOR-301 — DSGVO-Aufbewahrung für Attachments fehlt in §11
+
+§11 nennt nur Bookings (2 Jahre) und Slots/User. Attachments fehlen. **Lösung:** Eine Zeile in §11 ergänzen: „Attachments folgen dem Booking — werden mit dem Booking gelöscht (Cascade auf DB-Ebene); Blob-Datei muss separat über Cleanup-Cron entfernt werden."
+
+**Routing:** `solution-architect`.
+
+#### MINOR-302 — `'sonstiges'`-Anzeige im Admin
+
+§16.4 zeigt das Verhalten im Form, aber es fehlt der Hinweis, wie das Admin-Bookings-UI den Service rendert. `SERVICE_LABELS['sonstiges']` muss in `lib/services.ts` definiert werden, sonst zeigt die Tabelle den nackten Slug. Engineers können das beim Build mitfangen.
+
+**Routing:** `frontend-engineer`.
+
+#### MINOR-303 — Console-Logging in Patch 5 ist PII-Risiko
+
+`BUG_BOOKING_IT3.md` §5 Patch 5 ergänzt `console.log(values)` zum Debugging. `values` enthält Name, Telefon, E-Mail. In Production fließt das in die Browser-Console (für jeden mit Zugang zum Browser sichtbar) und potenziell in Vercel-Logs. Die Anweisung sollte ein „Vor Deploy entfernen oder durch `if (process.env.NODE_ENV === 'development')` schützen" enthalten.
+
+**Routing:** `frontend-engineer` (Disziplin-Ergänzung).
+
+#### MINOR-304 — Fehlende UI-State-Definition für `POST /api/upload` `502` (Vercel Blob downstream)
+
+api-routes.md §4 Fehlerliste listet 502 (Vercel Blob upstream nicht erreichbar). §16.12 (UI-States Iteration 3) definiert FileUpload-Error für 413/415/Netzwerk, aber NICHT explizit für 502. Engineers fangen das vermutlich als generischen Netzwerkfehler ab; eine Zeile in §16.12 würde das festzurren.
+
+**Routing:** `solution-architect` oder `frontend-engineer`.
+
+#### MINOR-305 — `BookingAttachment.bookingId` im Schema vs. §16.3 sagt „nullable"
+
+`schema.prisma` Zeile 272 zeigt `bookingId String` (Pflicht). §16.3 (Zeile 1373–1384) und api-routes.md §4 (Zeile 638–648) sagen „muss nullable sein, Engineers passen Live-Schema an". Das ist eine bekannte Lücke, im Schema-Header kommentiert — aber strenggenommen ist `contracts/schema.prisma` damit NICHT die Single Source of Truth.
+
+**Lösung:** `schema.prisma` direkt auf `bookingId String?` ändern. Sonst muss der Engineer beim Sync zwei Stellen anfassen und kann den Hinweis übersehen.
+
+**Routing:** `solution-architect`.
+
+#### MINOR-306 — `customerEmail` in `BookingAdminSchema` ist `z.string()`, nicht nullable — aber Bestand kann `null` haben
+
+`zod-schemas.ts` Zeile 427 sagt `customerEmail: z.string()`. In IT2 wurde `customerEmail` zur Pflicht — aber Bestandsbuchungen aus IT1 können `null` haben. Wenn das Admin-UI eine alte Buchung lädt, knallt die Zod-Validation. Im Schema (`schema.prisma` Zeile 147) ist `customerEmail String?` korrekt nullable.
+
+**Lösung:** `customerEmail: z.string().nullable()` im BookingAdminSchema. Backend-Engineer kann das beim Build sehen, muss aber daran erinnert werden.
+
+**Routing:** `solution-architect`.
+
+### 4. Race-Conditions und Sicherheit
+
+| Risiko                                                    | Bewertung                                                                                                  |
+|-----------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
+| Doppelbuchung auf gleichem Zeitslot                       | **Gelöst** durch Partial Unique Index `uniq_active_booking_per_timeslot`. P2002 → 409 CONFLICT.            |
+| Kunde wählt Zeitslot der nicht der Vorlage entspricht      | **Gelöst** durch `endTime - startTime === slotDurationMinutes`-Check im Backend (§16.2 Zeile 1334).         |
+| Tag wird zwischen Slot-Auswahl und Submit auf inaktiv gesetzt | **Gelöst** durch Verfügbarkeitsfenster-Check beim Submit (§api-routes.md §2 Zeile 172–187). 409 Response. |
+| Zwei Kunden buchen gleichzeitig denselben Block            | **Gelöst** durch Partial Unique Index. Last writer verliert mit 409.                                       |
+| Beim Override-Anlegen (`isActive: false`) bestehen aktive Buchungen weiter | **Bewusst** so gelöst — Tom muss manuell stornieren. Warning in Response (`ACTIVE_BOOKINGS_AFFECTED`). Sinnvoll für MVP. |
+| Upload-Endpoint ohne Auth                                 | **OK** — Rate-Limit + MIME-Whitelist + Size-Limit. Public-Bucket-Hinweis in Datenschutz (§16.13).          |
+| `attachmentIds` fremder Buchungen verknüpfen              | **Risiko nicht klar gelöst.** Wenn Angreifer eine `attachmentId` einer fremden Buchung kennt, könnte er sie in seiner eigenen `POST /api/bookings`-Request übergeben. Der `updateMany`-Filter `where: { id: { in: attachmentIds }, bookingId: null }` schützt nur, wenn `bookingId` noch nicht gesetzt ist. Akzeptabel für MVP (cuids sind raterisch unwahrscheinlich), aber sollte als Annahme dokumentiert sein. |
+
+### 5. Positive Beobachtungen
+
+- **Schema-Migration ist transparent:** §16.10 listet alle SQL-Statements explizit (ALTER TABLE, neue Indexe, Seed). Das `slot_id`-Nullable-Migration-Hack für SQLite ist erwähnt.
+- **Bestandskompatibilität durchgezogen:** Slot-basierte Bestandsbuchungen können weiterhin gelesen, gepatcht und counter-proposed werden. Keine Daten-Migration nötig — beide Modi koexistieren über zwei Partial Unique Indexe.
+- **BookingFormSchema vs. CreateBookingSchema:** Saubere Trennung von API-Wahrheit und Form-Wahrheit. Der RHF-Bug aus IT3 wird strukturell verhindert (siehe Zeile 322–326 in zod-schemas.ts).
+- **Mail-Templates skizziert:** §16.9 hat Subject + Body-Skizze für die zwei neuen Kunden-Mails. Engineers haben eine klare Vorlage.
+- **`isToday`-Flag im UpcomingBookingSchema:** Wird vom Backend berechnet, nicht vom Frontend (§16.6 Algorithmus Zeile 705–712). Vermeidet TZ-Bugs auf Client-Seite.
+- **Bug-Analyse ist ausführbar:** BUG_BOOKING_IT3.md ist die qualitativ beste Bug-Analyse des Projekts und kann direkt als Engineering-Anweisung verwendet werden.
+- **Vercel Blob-Wahl gut begründet:** §16.3 listet 5 Alternativen mit explizitem Begründung gegen — Engineers müssen die Stack-Entscheidung nicht erneut hinterfragen.
+- **API-Versionierung sauber:** v1.3-Header und Änderungslog in api-routes.md, schema.prisma und zod-schemas.ts sind synchron — keine Version-Drift.
+
+### 6. Sign-off Checklist (Iteration 3)
+
+- [x] BUG IT3 Root-Cause-Analyse ist überzeugend, Patch dateigenau (Patch 1–5).
+- [x] AvailabilityTemplate + DayOverride + Resolver-Logik konsistent über Schema/API/Zod.
+- [x] Race-Condition-Schutz für Doppelbuchung via Partial Unique Index.
+- [x] Bestandsbuchungen (Slot-basiert) bleiben im Schema und Endpoint-Set lesbar.
+- [x] Datei-Upload-Limits (5 Dateien, 20 MB) im Zod-Schema durchgesetzt.
+- [x] DSGVO-Hinweis für Public-Blob-URLs in §16.13 erwähnt.
+- [x] Kunden-Mail-Trigger im PATCH-Handler dokumentiert.
+- [ ] (Empfohlen, NICHT-blocking) MAJOR-301 (slotDurationMinutes-Default) klären.
+- [ ] (Empfohlen, NICHT-blocking) MAJOR-302 (Upload-Cleanup) als IT3-Pflicht statt Backlog.
+- [ ] (Empfohlen, NICHT-blocking) MAJOR-304 (Variante 2 vs. öffentliche Endpunkte) widerspruchsfrei machen.
+- [ ] (Empfohlen, NICHT-blocking) MINOR-305 (`bookingId` nullable im Schema direkt) ergänzen.
+- [ ] (Empfohlen, NICHT-blocking) MINOR-306 (`customerEmail.nullable()` in BookingAdminSchema) ergänzen.
+
+### Finales Urteil (Iteration 3)
+
+**Design freigegeben.**
+
+Es gibt **keine echten Blocker.** Die kritischen Architekturänderungen (US-17 Verfügbarkeitsfenster, US-18 Datei-Upload, US-24 Kunden-Mails) sind durchdacht, die Spec ist rückwärtskompatibel, der RHF-Bug ist strukturell adressiert, und die Race-Conditions sind über Partial Unique Indexe abgesichert.
+
+**Die fünf Major-Findings betreffen Inkonsistenzen und Lücken,** die Engineers entweder beim Build inline lösen oder durch eine kurze Architekt-Klärung präzisieren können:
+
+1. **MAJOR-301** (slotDurationMinutes-Default): 1 Zeile-Klärung mit Tom oder im Spec-Annahme-Block.
+2. **MAJOR-302** (Upload-Cleanup): Pflicht-Status für Cleanup-Cron klarstellen.
+3. **MAJOR-303** (Orphan-Attachments DSGVO): §11 ergänzen, dass Attachments dem Booking folgen.
+4. **MAJOR-304** (Variante 1 vs. 2): Widerspruch zwischen §16.2 Pseudocode und §16.15 Annahme auflösen.
+5. **MAJOR-305** (DST-Annahme): 1 Zeile in §16.15 ergänzen.
+
+Alle Fixes sind 1–3-Zeilen-Spec-Edits. Engineers können den Build starten, sobald entweder der Architekt diese inline ergänzt oder der Orchestrator sie als bekannte Build-Disziplin an die Engineers weitergibt.
+
+**Empfohlene Reihenfolge für die Engineers (Iteration 3):**
+
+1. **BUG IT3 fixen zuerst** — `BookingForm.tsx` umbauen entsprechend `BUG_BOOKING_IT3.md` Patch 1+3+4. Ohne diesen Fix funktioniert keine andere IT3-Story.
+2. **Schema-Migration** (US-17): `bookingId String?` direkt im schema.prisma; AvailabilityTemplate + DayOverride + Indexe; Seed-Migration aus WeeklyAvailability.
+3. **Backend-Endpunkte** parallelisieren:
+   - `GET /api/slots/available` (US-17, blockiert FE).
+   - `POST /api/upload` + `BookingAttachment.bookingId` nullable (US-18, blockiert FE).
+   - `GET /api/admin/upcoming-bookings` (US-21, blockiert Dashboard-FE).
+   - `PUT /api/admin/availability-template` + `POST /api/admin/day-overrides` (US-17 Admin).
+   - PATCH-Handler-Erweiterung mit Mail-Triggern (US-24).
+4. **Frontend nach BE-Stabilität:**
+   - `BookingForm` + `TimeSlotPicker` + `FileUpload` (BUG IT3 + US-17 + US-18).
+   - Service-Modal + Service-Karten-Preise (US-20 + US-23).
+   - ReviewSection (US-22).
+   - Admin-Availability-UI + Admin-Dashboard (US-17 Admin + US-21).
+5. **Mail-Templates** parallel (US-24): `bookingConfirmationToCustomer` + `bookingRejectionToCustomer`.
+
+Implementation kann beginnen.
+
+

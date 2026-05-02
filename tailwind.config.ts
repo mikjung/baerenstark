@@ -19,6 +19,10 @@ const config: Config = {
           leaf: '#4A7C59',
           charcoal: '#2C2C2C',
         },
+        // Top-level Iteration-2-Tokens (Kalender, Counter-Proposal-Badges).
+        leaf: '#4A7C59',
+        // amber bleibt der Default-Tailwind-Farbumfang, hier expliziter Akzent-Wert.
+        'amber-accent': '#F59E0B',
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],

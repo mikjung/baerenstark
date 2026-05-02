@@ -1,8 +1,36 @@
 # Architektur — Bärenstark Hausservice Website
 
-**Version:** 1.2 (Iteration 2 — Counter-Proposal, Storno, Wochentag-Verfügbarkeit, Kalender)
+**Version:** 1.3 (Iteration 3 — Verfügbarkeitsfenster, Datei-Upload, Preise, Reviews, Popups, Kunden-Mails)
 **Stand:** 2026-05-02
 **Autor:** Solution Architect
+
+---
+
+## Änderungslog v1.3 (Iteration 3)
+
+Auslöser: Iteration-3-Stories US-17 bis US-24 plus Blocker-Bug
+**BUG IT3** ("Buchungsformular schlägt erneut fehl"). Diese Version
+dokumentiert das neue Verfügbarkeitsfenster-Modell, Datei-Upload via
+Vercel Blob, Preis-Datenstruktur, Feedback-Sektion, Service-Popups und
+die erweiterten Kunden-E-Mails.
+
+| ID                | Bereich       | Erweiterung / Fix                                                                                |
+| ----------------- | ------------- | ------------------------------------------------------------------------------------------------ |
+| BUG-IT3 Fix       | Frontend      | `BookingForm.tsx` umgebaut: `slotId`/Date/Time werden außerhalb von RHF gehalten (siehe `BUG_BOOKING_IT3.md`). |
+| US-17 Datenmodell | Schema        | `AvailabilityTemplate` (7 Wochentage mit startTime/endTime/slotDurationMinutes), `DayOverride` (individuelle Tages-Überschreibung). |
+| US-17 Booking     | Schema        | `Booking.date / startTime / endTime` neu (nullable). `slotId` wird nullable (Bestand). Neuer Partial Unique Index `uniq_active_booking_per_timeslot`. |
+| US-17 API         | Endpunkte     | `GET/PUT /api/admin/availability-template`, `GET/POST /api/admin/day-overrides`, `DELETE /api/admin/day-overrides/:id`, `GET /api/slots/available`. |
+| US-18 Storage     | Storage       | Vercel Blob als Datei-Storage (kostenfrei bis 2 GB). `BookingAttachment`-Modell, `POST /api/upload`. |
+| US-19 Service     | Konstante     | `'sonstiges'` zu `SERVICES` hinzugefügt; bei diesem Service zwingt `CreateBookingSchema` `description ≥ 30` Zeichen. |
+| US-20 Preise      | Frontend      | Statische Preisangaben in `lib/services.ts` (`priceFrom`, `priceUnit`, `priceNote`). Anzeige auf Service-Karten + Popups. |
+| US-21 Dashboard   | API + UI      | `GET /api/admin/upcoming-bookings`. Neue Sektion oben auf `/admin` Dashboard. |
+| US-22 Reviews     | Frontend      | Statische Bewertungen in `lib/reviews.ts`. Neue Section auf Startseite. |
+| US-23 Popups      | Frontend      | Service-Karten-Klick öffnet Modal; Inhalt aus `lib/services.ts.details`. |
+| US-24 Mails       | Mail          | 2 neue Templates: `bookingConfirmationToCustomer` (PENDING→CONFIRMED), `bookingRejectionToCustomer` (PENDING→REJECTED). Trigger in `PATCH /api/bookings/:id`. Eingangsbestätigung an Kunden ist bereits IT2 vorhanden. |
+| Neue ENV          | Operational   | `BLOB_READ_WRITE_TOKEN` (Vercel Blob).                                                            |
+| Neue Fehlercodes  | API           | `PAYLOAD_TOO_LARGE` (413), `UNSUPPORTED_MEDIA_TYPE` (415) für `POST /api/upload`.                |
+
+Detaillierte Iteration-3-Spezifikation: siehe **§16** in diesem Dokument.
 
 ---
 
@@ -1149,3 +1177,748 @@ HTTPS gegen 2^120 Möglichkeiten ist statistisch chancenlos. Token werden
 **niemals** in URLs gelogged (Vercel-Logs maskieren Query-Params nicht
 automatisch — Engineers achten darauf, Token in `console.log`-Calls zu
 truncaten oder zu hashen).
+
+---
+
+## 16. Iteration 3 — Detail-Spec (US-17 bis US-24, BUG IT3)
+
+### 16.1 BUG IT3 (Zusammenfassung)
+
+Vollständige Analyse + Patch-Anweisungen: **`contracts/BUG_BOOKING_IT3.md`**.
+
+**Kurzfassung:**
+
+Das Buchungsformular schlägt fehl, weil `register('slotId')` an einen
+Hidden-Input mit explizit gesetztem `value=` gebunden wurde — RHF ignoriert
+DOM-Werte, der Form-State bleibt auf `''`. Zod-Validation auf `slotId.min(1)`
+schlägt fehl, der Submit-Handler-Body wird nie erreicht, der Benutzer
+sieht keinen sichtbaren Fehler (hidden Input hat kein Error-Element).
+
+**Fix:** `slotId` (bzw. IT3: `date/startTime/endTime`) komplett aus dem
+RHF-Form-Schema entfernen. Stattdessen externes React-State und beim
+Submit programmatisch in `createBooking()`-Payload mergen. Siehe
+`BookingFormSchema` in `contracts/zod-schemas.ts`.
+
+### 16.2 Verfügbarkeitsfenster-Modell (US-17)
+
+#### Konzept
+
+Statt vorab manuell Slots anzulegen (IT1/IT2-Modell), definiert Tom in
+IT3:
+
+- **`AvailabilityTemplate`**: pro Wochentag (0–6) ein Standardfenster
+  `(isActive, startTime, endTime, slotDurationMinutes)`.
+- **`DayOverride`**: pro konkretem Datum eine Überschreibung
+  `(date, isActive, startTime?, endTime?, reason?)`.
+
+#### Resolver-Logik (`lib/availability.ts`)
+
+```ts
+// Pseudocode
+async function resolveDay(date: string): Promise<ResolvedDay> {
+  const tz = 'Europe/Berlin';
+
+  // 1. Vergangenheit?
+  if (date < todayInBerlin()) return { isActive: false };
+
+  // 2. Override?
+  const override = await prisma.dayOverride.findUnique({ where: { date } });
+  const weekday = getWeekdayInTz(date, tz); // 0..6
+  const template = await prisma.availabilityTemplate.findUnique({
+    where: { dayOfWeek: weekday },
+  });
+
+  if (override) {
+    if (!override.isActive) {
+      return { isActive: false, reason: override.reason ?? null };
+    }
+    // Override-Zeiten ODER Template-Defaults
+    return {
+      isActive: true,
+      startTime: override.startTime ?? template?.startTime ?? '08:00',
+      endTime: override.endTime ?? template?.endTime ?? '17:00',
+      slotDurationMinutes: template?.slotDurationMinutes ?? 60,
+    };
+  }
+
+  if (!template || !template.isActive) return { isActive: false };
+
+  return {
+    isActive: true,
+    startTime: template.startTime,
+    endTime: template.endTime,
+    slotDurationMinutes: template.slotDurationMinutes,
+  };
+}
+
+async function computeAvailableSlots(date: string): Promise<AvailableSlotsResponse> {
+  const day = await resolveDay(date);
+  if (!day.isActive) {
+    return { date, isDayActive: false, slots: [], overrideReason: day.reason ?? null };
+  }
+
+  const blocks = generateBlocks(day.startTime, day.endTime, day.slotDurationMinutes);
+
+  const activeBookings = await prisma.booking.findMany({
+    where: {
+      date,
+      status: { in: ['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED'] },
+    },
+    select: { startTime: true, endTime: true },
+  });
+
+  const taken = new Set(activeBookings.map((b) => `${b.startTime}-${b.endTime}`));
+
+  const slots = blocks.map((b) => ({
+    ...b,
+    available: !taken.has(`${b.startTime}-${b.endTime}`),
+  }));
+
+  return { date, isDayActive: true, slots };
+}
+```
+
+#### Buchungs-Flow (Iteration 3)
+
+```
+User öffnet /buchung
+  └→ ClientCalendar lädt:
+       GET /api/availability-template     (alle 7 Wochentage — Cache 60 s)
+       GET /api/day-overrides?month=YYYY-MM (Override-Liste — Cache 60 s)
+     Daraus Monatskalender-Rendering (rot/grün/Heute) ohne Backend-Roundtrip.
+
+User klickt grünen Tag
+  └→ TimeSlotPicker:
+       GET /api/slots/available?date=YYYY-MM-DD
+     → Liste von { startTime, endTime, available } anzeigen.
+     User klickt einen verfügbaren Block.
+
+User füllt Formular aus + Upload-Files (siehe §16.3)
+  └→ Form-Submit:
+       POST /api/upload (per Datei, vor Submit)  → attachmentIds[]
+       POST /api/bookings { date, startTime, endTime, ..., attachmentIds }
+     → 201, Eingangsbestätigung-Mail wird fire-and-forget versendet.
+```
+
+**Wichtig — öffentlicher Read-Endpoint für Availability-Template:**
+
+Der Calendar-Renderer braucht die Template-Daten ohne Admin-Login.
+Engineers haben zwei Optionen:
+
+1. **(empfohlen)** Den Endpoint `GET /api/availability-template`
+   öffentlich machen (read-only) — gleiche Response wie
+   `/api/admin/availability-template`, aber kein Auth-Check. Day-Overrides
+   ebenfalls als `GET /api/day-overrides?month=...`.
+2. **Alternative:** Server-Component auf `/buchung` rendert die Daten
+   direkt aus der DB (Prisma) und übergibt sie an den Client — kein
+   öffentlicher API-Endpoint nötig.
+
+Diese Architektur empfiehlt **Variante 2** (Server-Component), weil sie
+keinen weiteren öffentlichen Endpunkt erfordert und das Caching
+automatisch über Next.js abgebildet wird.
+
+#### Race-Condition-Schutz
+
+Der Partial Unique Index
+```sql
+CREATE UNIQUE INDEX uniq_active_booking_per_timeslot
+  ON bookings(date, start_time, end_time)
+  WHERE date IS NOT NULL
+    AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
+```
+verhindert Doppelbuchung auf DB-Ebene. Verstoß → SQLite P2002 →
+Handler wandelt in 409 `CONFLICT` um.
+
+**Beachte:** Der Index wirkt auf exakte Tupel `(date, startTime, endTime)`.
+Wenn das Frontend NUR die vom Backend angebotenen Blöcke wählen darf
+(was per Schema-Validation `endTime - startTime === slotDurationMinutes`
+erzwungen wird), passt das. Wenn Tom später die `slotDurationMinutes`
+ändert, können Bestandsbuchungen mit alter Dauer parallel zu neuen
+Buchungen mit neuer Dauer existieren — das ist im MVP akzeptabel
+(Tom moderiert Doppel-Konflikte manuell).
+
+### 16.3 Datei-Upload (US-18)
+
+#### Stack-Entscheidung: Vercel Blob
+
+| Alternative      | Begründung gegen                                              |
+| ---------------- | ------------------------------------------------------------- |
+| AWS S3           | Account-Setup, IAM, Kosten ab Day 1.                          |
+| Cloudflare R2    | DNS-Verifikation, kein Vercel-Integration.                    |
+| Lokales FS       | Vercel hat read-only FS, nicht möglich.                       |
+| Base64 in DB     | DB-Bloat, 33 % Overhead, keine direkten URLs.                 |
+| **Vercel Blob**  | **Native Integration, 2 GB free, Public-URL-Support, kein Setup.** |
+
+#### Architektur
+
+```
+[BookingForm]  →  selectFiles()
+       │
+       ├─→ FileUpload-Komponente:
+       │     for each file:
+       │       client-side check (size, type)
+       │       POST /api/upload (multipart) → { attachmentId, url, ... }
+       │     attachmentIds[] sammeln
+       │
+       └─→ Submit:
+             POST /api/bookings { ..., attachmentIds }
+             Backend: prisma.bookingAttachment.updateMany({
+               where: { id: { in: attachmentIds }, bookingId: null },
+               data:  { bookingId: newBookingId }
+             })
+```
+
+#### Schema-Anpassung Engineers
+
+`BookingAttachment.bookingId` muss nullable sein (in `prisma/schema.prisma`
+und `schema.sql`), damit Upload vor Booking-Insert möglich ist. Cascade-
+Delete bleibt erhalten — greift nur, wenn `bookingId` gesetzt ist.
+
+```prisma
+model BookingAttachment {
+  // ...
+  bookingId String?
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  // ...
+}
+```
+
+#### Cleanup orphan attachments (Backlog)
+
+Vercel Cron 1×/Tag:
+```ts
+// pseudocode (app/api/cron/cleanup-attachments/route.ts)
+const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+const orphans = await prisma.bookingAttachment.findMany({
+  where: { bookingId: null, createdAt: { lt: cutoff } },
+});
+for (const o of orphans) {
+  await del(o.url);  // Vercel Blob delete
+  await prisma.bookingAttachment.delete({ where: { id: o.id } });
+}
+```
+
+Im MVP nicht zwingend — die paar verwaisten Dateien kosten <1 ¢/Monat.
+
+#### Limits & Validation
+
+- **Client-side (BookingForm/FileUpload.tsx):**
+  - max. 5 Dateien.
+  - max. 20 MB pro Datei.
+  - Akzeptierte MIME-Types (siehe `UPLOAD_ACCEPTED_CONTENT_TYPES`).
+- **Server-side (`POST /api/upload`):**
+  - Doppelt validiert (Browser-Manipulation umgehen).
+  - 413 `PAYLOAD_TOO_LARGE` bei Größenverstoß.
+  - 415 `UNSUPPORTED_MEDIA_TYPE` bei MIME-Verstoß.
+  - Rate-Limit 20/h/IP.
+
+#### Sichtbarkeit für Tom
+
+`/admin/bookings` zeigt pro Booking eine Attachment-Liste mit:
+- Vorschaubild (für `image/*`).
+- Datei-Icon + Dateiname für PDF/Video.
+- Klick → öffnet `url` in neuem Tab (Public-Blob, kein Auth-Token nötig).
+
+### 16.4 Service-Erweiterung "Sonstiges" (US-19)
+
+In `lib/services.ts` und `contracts/zod-schemas.ts` wird `'sonstiges'`
+zur SERVICES-Liste hinzugefügt:
+
+```ts
+export const SERVICES = [
+  'entruempelung', 'entkernung', 'reinigung',
+  'gruenflaechenpflege', 'muelltonnenservice', 'entsorgung',
+  'sonstiges',  // IT3
+] as const;
+```
+
+UI-Verhalten (BookingForm):
+
+```tsx
+const watchService = watch('service');
+const isCustom = watchService === 'sonstiges';
+
+<Textarea
+  label={isCustom ? 'Beschreiben Sie Ihr Anliegen *' : 'Beschreibung'}
+  required
+  rows={isCustom ? 6 : 4}
+  hint={isCustom ? 'Mindestens 30 Zeichen, damit Tom Ihr Anliegen einschätzen kann.' : undefined}
+  error={errors.description?.message}
+  {...register('description')}
+/>
+```
+
+`CreateBookingSchema.superRefine` und `BookingFormSchema.superRefine`
+erzwingen `description.length >= 30` bei `service === 'sonstiges'`.
+
+### 16.5 Preise (US-20)
+
+Statische Anreicherung von `lib/services.ts`:
+
+```ts
+export interface ServiceInfo {
+  slug: Service;
+  label: string;
+  short: string;
+  description: string;
+  icon: string;
+  // IT3:
+  priceFrom: number | null;            // null bei 'sonstiges'
+  priceUnit: 'hour' | 'task' | null;   // 'hour' = "ab X €/h", 'task' = "ab X €/Entleerung"
+  priceNote: string;                    // freier Disclaimer-Text
+  // US-23:
+  details: ServiceDetails;
+}
+
+export interface ServiceDetails {
+  before: string;
+  after: string;
+  includes: string[];
+}
+```
+
+Preise (Richtwerte Darmstadt):
+
+| Slug                  | priceFrom | priceUnit | priceNote                                                      |
+| --------------------- | --------- | --------- | -------------------------------------------------------------- |
+| entruempelung         | 35        | hour      | "ab 35 €/Std., final nach Besichtigung"                        |
+| entkernung            | 45        | hour      | "ab 45 €/Std., individuell nach Aufwand"                       |
+| reinigung             | 25        | hour      | "ab 25 €/Std."                                                 |
+| gruenflaechenpflege   | 30        | hour      | "ab 30 €/Std."                                                 |
+| muelltonnenservice    | 20        | task      | "ab 20 €/Entleerung"                                           |
+| entsorgung            | 40        | hour      | "ab 40 €/Std., zzgl. Materialwert"                             |
+| sonstiges             | null      | null      | "Auf Anfrage — wir machen Ihnen ein individuelles Angebot."    |
+
+UI-Anzeige auf Service-Karte:
+
+```
+[Icon]
+Entrümpelungen
+Wohnungen, Keller, Dachböden, Garagen.
+🪙 ab 35 €/Std.
+[Mehr erfahren]
+```
+
+Mit Disclaimer (sichtbar auf Mobile, Hover/Aria-Tooltip auf Desktop):
+"Richtpreis für die Region Darmstadt. Finale Preise nach Besichtigung
+oder auf Anfrage."
+
+### 16.6 Admin-Dashboard "Heute & Bevorstehend" (US-21)
+
+`app/admin/page.tsx` (Dashboard) bekommt **oben** eine neue Sektion
+`<UpcomingBookingsList />`:
+
+```tsx
+// Server-Component
+async function UpcomingBookingsList() {
+  const bookings = await fetchUpcomingBookings({ limit: 10 });
+  return (
+    <section className="...">
+      <h2 className="...">Heute & Bevorstehend</h2>
+      {bookings.length === 0 && <Banner tone="info">Keine bevorstehenden Termine.</Banner>}
+      <ul>
+        {bookings.map((b) => (
+          <li key={b.id}>
+            {b.isToday && <Badge tone="warning">Heute</Badge>}
+            <Link href={`/admin/bookings#${b.id}`}>
+              {formatDate(b.date)} — {b.startTime}–{b.endTime} · {b.customerName} · {SERVICE_LABELS[b.service]}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+```
+
+Daten: `GET /api/admin/upcoming-bookings?limit=10` (siehe API-Spec §5).
+
+Klick auf Eintrag → Anchor-Link auf den Eintrag in `/admin/bookings#<id>`.
+Engineers ergänzen einen passenden `id={...}` auf Booking-Rows.
+
+### 16.7 Feedback-Sektion (US-22)
+
+Statische Daten in `lib/reviews.ts`:
+
+```ts
+export interface Review {
+  id: string;
+  customerName: string;       // "Maria M."
+  service: Service | 'allgemein';
+  stars: 1 | 2 | 3 | 4 | 5;
+  text: string;               // Kurztext, max ~300 Zeichen
+  date: string;               // "2026-03-15", für Sortierung
+}
+
+export const REVIEWS: readonly Review[] = [
+  // 4× 5-Sterne, 5× 4-Sterne, 1× 4-Sterne — Ø ~4.4
+  // (Spec sagt "Ø ~4.5"; 4×5 + 6×4 = 44/10 = 4.4 — Engineers
+  // dürfen die Verteilung leicht justieren, um näher an 4.5 zu kommen,
+  // z.B. 5×5 + 4×4 + 1×4 = 4.4, oder 6×5 + 4×4 = 4.6).
+];
+
+export const REVIEWS_AVERAGE = computeAverage(REVIEWS); // ~4.5
+```
+
+UI-Komponente `components/home/ReviewSection.tsx`:
+
+- Initial 6 Bewertungen sichtbar, "Mehr anzeigen"-Button für die übrigen.
+- Sterne als 5 Span-Elemente mit gefülltem/leeren Bär-Icon (oder
+  ⭐ Unicode für MVP).
+- Karten-Layout (Mobile: 1 Col, Tablet: 2, Desktop: 3).
+- Header mit Durchschnitt: "★★★★★ 4,5 von 5 — basierend auf 10 Bewertungen".
+
+Auf Startseite (`app/page.tsx`) zwischen `ServiceGrid` und Footer
+einbinden.
+
+**Hinweis Iteration 4 (US-29):** Die `Review`-Datenstruktur ist
+zukunftskompatibel mit dem späteren Backend-Modell — Engineers achten
+darauf, identische Felder zu verwenden, sodass nur die Datenquelle
+gewechselt werden muss.
+
+### 16.8 Service-Popups (US-23)
+
+`components/home/ServiceModal.tsx`:
+
+- Klick auf Service-Karte (oder "Mehr erfahren"-Button) öffnet das
+  Modal mit:
+  - Service-Titel, Icon.
+  - Lange Beschreibung (`description` aus `services.ts`).
+  - "Vorher / Nachher"-Block (Platzhalter-Bilder + Texte aus
+    `details.before` / `details.after`).
+  - "Was wir tun" — Liste aus `details.includes` (Aufzählung).
+  - Preis-Block (siehe US-20).
+  - CTA "Jetzt anfragen" → schließt Modal, scrollt zu Buchungssektion
+    UND setzt `service` im Form vorausgewählt (via `?service=<slug>`-
+    Query-Parameter und `BookingForm.useEffect`).
+- Schließen via X-Button, Hintergrund-Klick (`onOverlayClick`),
+  Escape-Taste.
+- Focus-Trap im Modal (a11y).
+- Animation: Tailwind `transition-opacity` + `transition-transform`
+  (~150 ms).
+
+Daten in `lib/services.ts.SERVICE_LIST[i].details`:
+
+```ts
+{
+  slug: 'entruempelung',
+  // ...
+  details: {
+    before: 'Vollgestellte Räume, jahrelang gewachsene Sammlungen, schwere Möbel.',
+    after: 'Besenrein übergebene Räume, fachgerecht entsorgt, alles wiederverwertbar wo möglich.',
+    includes: [
+      'Sortierung wertvoller Gegenstände',
+      'Demontage von Möbeln',
+      'Fachgerechte Entsorgung (Sperrmüll, Wertstoff, Sondermüll)',
+      'Besenreine Übergabe',
+    ],
+  },
+}
+```
+
+Bilder: Platzhalter `images/popups/<slug>-before.jpg` /
+`<slug>-after.jpg` (8 Dateien). Tom liefert echte Bilder nach Iteration 3.
+
+### 16.9 Kunden-E-Mails (US-24)
+
+#### Templates (3 neue + 1 Bestand = 4 Mails an Kunden in IT3)
+
+| Template-Key                     | Trigger                                 | Status            |
+| -------------------------------- | --------------------------------------- | ----------------- |
+| `bookingReceiptToCustomer`       | `POST /api/bookings`                    | **Bestand IT2**   |
+| `bookingConfirmationToCustomer`  | `PATCH /api/bookings/:id` (PENDING→CONFIRMED) | **NEU IT3** |
+| `bookingRejectionToCustomer`     | `PATCH /api/bookings/:id` (PENDING→REJECTED, CONFIRMED→REJECTED) | **NEU IT3** |
+| `counterProposalToCustomer`      | `POST /api/bookings/:id/counter-proposal` | **Bestand IT2** |
+
+#### Implementation in `lib/mail.ts`
+
+Engineers ergänzen zwei neue Funktionen analog zu den IT2-Mails:
+
+```ts
+export interface BookingConfirmationMailPayload {
+  customerName: string;
+  customerEmail: string;
+  service: Service;
+  date: string;       // "YYYY-MM-DD"
+  startTime: string;  // "HH:MM"
+  endTime: string;    // "HH:MM"
+  cancelToken: string;
+}
+
+export async function sendBookingConfirmationToCustomer(
+  p: BookingConfirmationMailPayload,
+): Promise<MailResult> {
+  // Subject: "Ihr Termin am DD.MM.YYYY ist bestätigt"
+  // Body: Datum, Uhrzeit, Service, Adresse/Telefon Tom (0157-74787512),
+  //       Storno-Link (`actionUrl(token, 'cancel')`).
+  return sendWithRetry({ ... });
+}
+
+export interface BookingRejectionMailPayload {
+  customerName: string;
+  customerEmail: string;
+  service: Service;
+  // Optional: Original-Termin für Kontext im Mail-Text.
+  date?: string;
+  startTime?: string;
+  endTime?: string;
+}
+
+export async function sendBookingRejectionToCustomer(
+  p: BookingRejectionMailPayload,
+): Promise<MailResult> {
+  // Subject: "Leider können wir Ihren Termin nicht wahrnehmen"
+  // Body: Höfliche Absage, Telefon-CTA für Rückfrage,
+  //       Hinweis auf neue Anfrage (Link zur Buchungsseite).
+  return sendWithRetry({ ... });
+}
+```
+
+#### Trigger-Integration in `PATCH /api/bookings/:id`
+
+```ts
+// app/api/bookings/[id]/route.ts (PATCH, vereinfacht)
+const before = await prisma.booking.findUnique({ where: { id } });
+const updated = await prisma.booking.update({
+  where: { id },
+  data: { status: nextStatus },
+});
+
+// IT3: Kunden-Mail bei Status-Wechsel
+if (updated.customerEmail) {
+  if (before.status === 'PENDING' && updated.status === 'CONFIRMED') {
+    void sendBookingConfirmationToCustomer({
+      customerName: updated.customerName,
+      customerEmail: updated.customerEmail,
+      service: updated.service as Service,
+      date: updated.date ?? formatDateInTz(updated.slot.startsAt, 'Europe/Berlin'),
+      startTime: updated.startTime ?? formatTimeInTz(updated.slot.startsAt, 'Europe/Berlin'),
+      endTime: updated.endTime ?? formatTimeInTz(updated.slot.endsAt, 'Europe/Berlin'),
+      cancelToken: updated.cancelToken,
+    }).catch((err) => console.warn('[mail] confirm failed', err));
+  } else if (
+    (before.status === 'PENDING' || before.status === 'CONFIRMED') &&
+    updated.status === 'REJECTED'
+  ) {
+    void sendBookingRejectionToCustomer({
+      customerName: updated.customerName,
+      customerEmail: updated.customerEmail,
+      service: updated.service as Service,
+      date: updated.date,
+      startTime: updated.startTime,
+      endTime: updated.endTime,
+    }).catch((err) => console.warn('[mail] reject failed', err));
+  }
+}
+```
+
+Fire-and-forget — der PATCH-Handler antwortet sofort 200, unabhängig
+vom Mail-Ergebnis.
+
+### 16.10 Datenmodell-Migration (Iteration 3)
+
+#### Neue Tabellen
+
+1. `availability_template` (siehe Schema).
+2. `day_overrides` (siehe Schema).
+3. `booking_attachments` (siehe Schema).
+
+#### Neue Booking-Felder
+
+```sql
+ALTER TABLE bookings ADD COLUMN date TEXT NULL;
+ALTER TABLE bookings ADD COLUMN start_time TEXT NULL;
+ALTER TABLE bookings ADD COLUMN end_time TEXT NULL;
+-- slot_id muss zu nullable migriert werden:
+-- SQLite-Hack: neue Tabelle erstellen, Daten migrieren, alte droppen
+-- (wird von Prisma migrate-dev automatisch ausgeführt).
+```
+
+#### Index-Anpassungen
+
+```sql
+-- Bestand: nur greifen, wenn slot_id gesetzt
+DROP INDEX IF EXISTS uniq_active_booking_per_slot;
+CREATE UNIQUE INDEX uniq_active_booking_per_slot
+  ON bookings(slot_id)
+  WHERE slot_id IS NOT NULL
+    AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
+
+-- NEU IT3
+CREATE UNIQUE INDEX uniq_active_booking_per_timeslot
+  ON bookings(date, start_time, end_time)
+  WHERE date IS NOT NULL
+    AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
+
+-- Performance-Indexe
+CREATE INDEX idx_bookings_date_status        ON bookings(date, status);
+CREATE INDEX idx_bookings_status_date_time   ON bookings(status, date, start_time);
+```
+
+#### Seed (Iteration 3)
+
+Migration `iteration3_seed_availability_template/migration.sql`:
+
+```sql
+-- Übernimmt isActive aus weekly_availability (falls vorhanden), sonst Defaults.
+INSERT INTO availability_template (id, day_of_week, is_active, start_time, end_time, slot_duration_minutes)
+SELECT
+  hex(randomblob(12)) AS id,
+  d.day_of_week,
+  COALESCE((SELECT is_active FROM weekly_availability WHERE day_of_week = d.day_of_week), 0),
+  '08:00', '17:00', 60
+FROM (
+  SELECT 0 AS day_of_week UNION ALL
+  SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL
+  SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6
+) d
+WHERE NOT EXISTS (SELECT 1 FROM availability_template WHERE day_of_week = d.day_of_week);
+```
+
+### 16.11 Frontend-Architektur Iteration 3
+
+#### Neue / geänderte Komponenten
+
+| Pfad                                                     | Status   | Zweck                                                                          |
+| -------------------------------------------------------- | -------- | ------------------------------------------------------------------------------ |
+| `components/booking/BookingForm.tsx`                     | UMGEBAUT | BUG IT3 Fix; Date/Time/Attachments via React-State außerhalb von RHF.          |
+| `components/booking/TimeSlotPicker.tsx`                  | NEU      | Zeigt verfügbare Blöcke nach Tag-Auswahl (US-17).                              |
+| `components/booking/FileUpload.tsx`                      | NEU      | Drag-and-Drop + Datei-Picker mit Vorschau (US-18).                             |
+| `components/booking/CalendarV2.tsx`                      | NEU      | IT3-Kalender: Template + Overrides als Datenquelle.                            |
+| `components/admin/AvailabilityTemplateForm.tsx`          | NEU      | 7 Wochentage konfigurieren (US-17).                                            |
+| `components/admin/DayOverrideManager.tsx`                | NEU      | Liste + Anlegen/Löschen von Tages-Überschreibungen (US-17).                    |
+| `components/admin/UpcomingBookingsList.tsx`              | NEU      | Dashboard-Top-Sektion (US-21).                                                 |
+| `components/admin/BookingAttachmentList.tsx`             | NEU      | Anhang-Anzeige in Booking-Detail (US-18).                                      |
+| `components/home/ReviewSection.tsx`                      | NEU      | Feedback-Sektion (US-22).                                                      |
+| `components/home/ServiceModal.tsx`                       | NEU      | Service-Popup (US-23).                                                          |
+| `components/home/ServiceGrid.tsx`                        | ERWEITERT | Klick-Handler für Modal; Preis-Anzeige (US-20).                              |
+| `lib/services.ts`                                        | ERWEITERT | `'sonstiges'`, `priceFrom/priceUnit/priceNote`, `details`.                    |
+| `lib/reviews.ts`                                         | NEU      | 10 statische Review-Datensätze (US-22).                                        |
+| `lib/availability.ts`                                    | NEU      | `resolveDay()`, `computeAvailableSlots()`, Helper für Berlin-TZ-Datum/Zeit.    |
+| `lib/api-client.ts`                                      | ERWEITERT | `fetchAvailableSlots()`, `uploadFile()`, `fetchUpcomingBookings()`, `fetchAvailabilityTemplate()`, `updateAvailabilityTemplate()`, `fetchDayOverrides()`, `createDayOverride()`, `deleteDayOverride()`. |
+| `lib/mail.ts`                                            | ERWEITERT | `sendBookingConfirmationToCustomer`, `sendBookingRejectionToCustomer`.        |
+
+#### Neue Pages
+
+- `/admin/availability` wird umgebaut: alte
+  `WeeklyAvailabilityForm` durch `AvailabilityTemplateForm` +
+  `DayOverrideManager` ersetzt (Tabs oder Stack-Layout).
+
+### 16.12 UI-States Iteration 3
+
+#### `/buchung` (umgebaut für IT3)
+
+| State                | Trigger                                                  | UI                                                                    |
+| -------------------- | -------------------------------------------------------- | --------------------------------------------------------------------- |
+| Calendar-Loading     | Initial-Load                                              | Skeleton-Grid für 5–6 Wochenreihen.                                   |
+| Calendar-Ready       | Template + Overrides geladen                              | Klickbare grüne Tage, ausgegraute rote Tage.                           |
+| TimeSlotsLoading     | `GET /api/slots/available` läuft                          | Spinner-Liste in TimeSlotPicker.                                       |
+| TimeSlotsReady       | Slots geladen                                             | Verfügbare Blöcke als klickbare Buttons; belegte als ausgegraut.       |
+| TimeSlotsEmpty       | `isDayActive: false` mit/ohne reason                      | Hinweis "Tag nicht verfügbar" + ggf. Override-Reason.                  |
+| FileUpload-Pending   | `POST /api/upload` läuft pro Datei                        | Liste mit Progressbar pro Datei; "Hochladen 2/3...".                   |
+| FileUpload-Error     | 413 / 415 / Netzwerk                                      | Inline-Fehler beim betreffenden Eintrag, andere bleiben gültig.        |
+| Submit-Conflict      | `POST /api/bookings` → 409 (Tag inaktiv oder Slot belegt) | Banner "Termin nicht mehr verfügbar"; TimeSlotPicker neu laden.        |
+| Submit-Validation    | Service=sonstiges + Beschreibung < 30                     | Inline-Fehler unter Beschreibungs-Feld.                                |
+
+#### `/admin` (Dashboard, IT3 erweitert)
+
+`<UpcomingBookingsList>` oben:
+
+| State        | UI                                                        |
+| ------------ | --------------------------------------------------------- |
+| Loading      | Skeleton mit 3 Zeilen.                                    |
+| Empty        | "Keine bevorstehenden bestätigten Termine."               |
+| Today-Badge  | Termine mit `isToday: true` mit gelb-orange Badge.        |
+
+#### `/admin/availability` (IT3 umgebaut)
+
+| Tab/Section                | UI                                                             |
+| -------------------------- | -------------------------------------------------------------- |
+| Default-Vorlage (US-17)    | 7 Karten (Mo–So) mit Toggle, Start/End-Time, Slot-Dauer-Select. |
+| Tages-Überschreibungen     | Kalender-Picker, Liste der bestehenden Overrides, Edit/Delete. |
+
+#### `/admin/bookings` (IT3 erweitert)
+
+- Spalte "Termin" zeigt jetzt entweder
+  `formatDate(date) startTime–endTime` (IT3-Buchungen) ODER
+  `formatSlotRange(slot.startsAt, slot.endsAt)` (Bestand).
+- Neue Spalte "Anhänge": Anzahl + Klick öffnet Lightbox-/Liste.
+
+### 16.13 Sicherheit Iteration 3
+
+#### Datei-Upload-Hardening (US-18)
+
+- **Server-side MIME-Check via `file.type`.** Browser kann
+  manipuliert werden — daher zusätzlich Magic-Byte-Check empfohlen
+  (Engineers: optional `file-type`-Lib, im MVP genügt `file.type`).
+- **Public-Bucket-Risiko:** Vercel Blob ist standardmäßig öffentlich.
+  Engineers sollten:
+  - Dateinamen mit `cuid()` randomisieren (kein erratbare Paths).
+  - Sensible Dokumente NICHT erlauben (z.B. keine Excel/Word — wird
+    durch MIME-Whitelist verhindert).
+  - Im Datenschutz-Hinweis explizit darauf hinweisen, dass Anhänge
+    auf einer öffentlichen URL liegen.
+- **Größenlimit:** 20 MB hart durchgesetzt (Vercel Blob hat eigenes
+  Limit von 500 MB — wir liegen weit darunter).
+- **Total-Quota-Sicht:** 2 GB Free-Tier. Bei ~10 Buchungen/Tag mit
+  ~5 MB Anhängen wären das 50 MB/Tag = 1.5 GB/Monat. Engineers
+  monitoren über Vercel Dashboard. Bei Annäherung an Limit:
+  Cleanup-Cron (siehe §16.3) priorisieren.
+
+#### Rate-Limits Iteration 3
+
+| Endpoint                                  | Rate-Limit                                              |
+| ----------------------------------------- | ------------------------------------------------------- |
+| `POST /api/upload`                        | 20 Anfragen / 60 min / IP.                              |
+| `POST /api/bookings` (mit Attachments)    | Bestand: 10 / 60 min / IP.                              |
+| `GET /api/slots/available`                | Kein Limit (öffentlich, Read-Only).                     |
+| `GET /api/admin/upcoming-bookings`        | Kein Limit (Admin-Session).                             |
+| `PUT /api/admin/availability-template`    | Kein Limit (Admin-Session).                             |
+| `POST /api/admin/day-overrides`           | Kein Limit (Admin-Session).                             |
+
+### 16.14 ENV-Variablen Iteration 3
+
+| Variable                  | Pflicht | Wert / Beispiel                                | Zweck                              |
+| ------------------------- | ------- | ---------------------------------------------- | ---------------------------------- |
+| `BLOB_READ_WRITE_TOKEN`   | ja      | `vercel_blob_rw_xxxxxxxxxxxx`                  | Vercel Blob (US-18).               |
+
+`.env.example` entsprechend ergänzen.
+
+### 16.15 Offene Punkte / Annahmen Iteration 3
+
+- **Annahme:** `BookingAttachment.bookingId` wird nullable, damit
+  Upload vor Booking-Insert möglich ist (siehe §16.3). Engineers
+  passen das Live-Schema entsprechend an.
+- **Annahme:** Counter-Proposal-Flow (US-13) bleibt im Bestand-Modus
+  (Slot-basiert) — neue IT3-Buchungen ohne `slotId` können in IT3
+  noch nicht counter-proposed werden. Diese Lücke ist akzeptabel,
+  weil Tom in der Praxis selten Counter-Proposals sendet und im
+  Worst Case manuell anrufen kann. Vollständige IT3-Counter-Proposal-
+  Logik ist Iteration 4.
+- **Annahme:** Vercel Blob-Region ist EU (DSGVO-konform). Engineers
+  setzen das beim Provisionieren über Vercel Dashboard.
+- **Annahme:** Statische Review-Daten (US-22) werden später durch
+  Backend-Modell ersetzt (Iteration 4 / US-29) — Datenstruktur ist
+  schon kompatibel.
+- **Annahme:** Service-Popup-Bilder (Vorher/Nachher) sind Platzhalter
+  in IT3; Tom liefert echte Fotos nach.
+- **Annahme:** Iteration 3 nutzt **Variante 2** der Calendar-Daten-
+  Beschaffung (Server-Component liest direkt aus Prisma), kein
+  öffentlicher GET-Endpoint für Template/Overrides.
+- **Annahme:** "Sonstiges"-Beschreibung wird mit 30 Zeichen
+  (`CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH`) abgesichert. Tom kann
+  diesen Wert später anpassen.
+
+### 16.16 Akzeptanzkriterien-Mapping IT3
+
+| Story | Erfüllt durch                                                                                                              |
+| ----- | -------------------------------------------------------------------------------------------------------------------------- |
+| BUG IT3 | `BookingForm.tsx`-Refactor (siehe `BUG_BOOKING_IT3.md`); slot/date/time aus RHF-Form-Schema entfernt.                   |
+| US-17 | `AvailabilityTemplate` + `DayOverride` Schemas; `GET /api/slots/available` als öffentlicher Calc-Endpoint; Admin-UI unter `/admin/availability`. |
+| US-18 | Vercel Blob via `POST /api/upload`; `BookingAttachment`-Modell; `FileUpload.tsx` + `BookingAttachmentList.tsx`.            |
+| US-19 | `'sonstiges'` in `SERVICES`; `superRefine` zwingt 30-Zeichen-Beschreibung.                                                |
+| US-20 | Statische Preise in `lib/services.ts` (`priceFrom`/`priceUnit`/`priceNote`); UI-Anzeige auf Service-Karten + Popups.       |
+| US-21 | `GET /api/admin/upcoming-bookings`; `<UpcomingBookingsList>` auf Dashboard-Page.                                          |
+| US-22 | `lib/reviews.ts` mit 10 statischen Datensätzen; `<ReviewSection>` auf Startseite.                                         |
+| US-23 | `<ServiceModal>` mit Vorher/Nachher, Inhalt aus `services.ts.details`.                                                    |
+| US-24 | `bookingConfirmationToCustomer` + `bookingRejectionToCustomer` in `lib/mail.ts`; Trigger im `PATCH /api/bookings/:id`.    |

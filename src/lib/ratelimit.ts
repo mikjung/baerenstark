@@ -67,6 +67,11 @@ export const loginLimiter = makeLimiter(15 * 60, 5, 'rl:login');
 // 10 Buchungs-Anfragen / 60 Minuten / IP (BUG-004).
 export const bookingLimiter = makeLimiter(60 * 60, 10, 'rl:booking');
 
+// 10 Datei-Uploads / 60 Sekunden / IP (Iteration 3 / US-18).
+// Spec sagt 10/Min für die Auftragsstellung; Architektur-Doku 20/h.
+// Wir nutzen das engere Limit, das im Aufgaben-Brief vorgegeben wurde.
+export const uploadLimiter = makeLimiter(60, 10, 'rl:upload');
+
 /**
  * Liefert die anfragende IP aus den üblichen Vercel-Headern.
  * Fallback: 'unknown' (alle Anfragen ohne Header werden gemeinsam gezählt —

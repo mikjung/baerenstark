@@ -216,7 +216,7 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 
 ---
 
-### Iteration 2 (aktuell)
+### Iteration 2 (abgeschlossen)
 
 ---
 
@@ -346,6 +346,213 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 
 ---
 
+### Iteration 3 (aktuell)
+
+---
+
+#### BUG: Buchungsformular-Übermittlung schlägt fehl
+
+**Beschreibung:** Das Absenden des Buchungsformulars schlägt serverseitig fehl — Anfragen erscheinen nicht im Admin-Portal, Tom erhält keine Benachrichtigungs-E-Mail und der Kunde bekommt keine Rückmeldung über Erfolg oder Misserfolg.
+
+**Erwartetes Verhalten:** Nach erfolgreichem Absenden erscheint die Anfrage sofort im Admin-Portal, Tom erhält eine E-Mail, der Kunde sieht eine Erfolgsmeldung. Bei Fehler: verständliche deutschsprachige Fehlermeldung.
+
+**Priorität:** Blocker — wird als erstes behoben.
+
+---
+
+#### US-17: Zeitfenster-Redesign — Verfügbarkeitsfenster mit Default-Vorlage
+
+**Als** Admin (Tom)  
+**möchte ich** pro Wochentag ein Von/Bis-Verfügbarkeitsfenster definieren und eine Default-Vorlage auf alle Tage anwenden,  
+**damit** Kunden innerhalb dieser Fenster einen konkreten Wunschtermin auswählen können, ohne dass ich jeden Slot manuell anlegen muss.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne „Verfügbarkeit" im Admin-Bereich, **When** ich eine Default-Vorlage (z.B. Mo–Fr 08:00–17:00) definiere und auf „Auf alle Tage anwenden" klicke, **Then** werden alle sieben Wochentage mit diesem Fenster befüllt.
+- **Given** die Default-Vorlage wurde angewendet, **When** ich einen einzelnen Tag manuell auf ein anderes Fenster ändere, **Then** überschreibt die Änderung nur diesen Tag; alle anderen Tage bleiben unberührt.
+- **Given** ich habe Fenster gesetzt, **When** ein Kunde einen verfügbaren Tag auswählt, **Then** kann er im Buchungsformular eine Uhrzeit innerhalb des Fensters in 30-Minuten-Schritten wählen.
+
+**Hinweis:** Ersetzt das manuelle Slot-Modell aus US-05. Bestehende verfügbar/nicht-verfügbar-Einstellungen aus US-15 bleiben erhalten.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-18: Datei-Upload im Buchungsformular
+
+**Als** Kunde  
+**möchte ich** beim Ausfüllen der Buchungsanfrage Fotos, Videos oder Dokumente hochladen können,  
+**damit** Tom meine Situation besser einschätzen kann, bevor er den Termin bestätigt.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich befinde mich im Buchungsformular, **When** ich auf „Dateien hinzufügen" klicke, **Then** kann ich Bilder (jpg, png, webp), Videos (mp4, mov) und Dokumente (pdf) auswählen.
+- **Given** eine Datei überschreitet 20 MB, **When** ich sie auswähle, **Then** erscheint eine Fehlermeldung „Datei zu groß (max. 20 MB)".
+- **Given** Dateien wurden hochgeladen und die Anfrage wird abgeschickt, **When** Tom die Anfrage im Admin-Portal öffnet, **Then** sieht er die Dateien als klickbare Links oder Vorschaubilder.
+- **Given** kein Upload gewünscht, **When** das Formular abgeschickt wird, **Then** funktioniert die Übermittlung ohne Anhänge problemlos (Upload ist optional).
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-19: Individuelle Serviceanfrage als Formularoption
+
+**Als** Kunde  
+**möchte ich** im Buchungsformular „Sonstige / Individuelle Anfrage" als Service-Option auswählen können,  
+**damit** ich auch für nicht gelistete Leistungen unkompliziert anfragen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne die Service-Auswahl im Formular, **When** ich die Liste aufklappe, **Then** erscheint „Sonstige / Individuelle Anfrage" als letzter Eintrag.
+- **Given** ich wähle diese Option, **When** die Auswahl getroffen ist, **Then** erscheint ein Pflichtfeld „Beschreiben Sie Ihr Anliegen".
+- **Given** die Anfrage wurde abgeschickt, **When** Tom sie im Admin-Portal öffnet, **Then** wird der Service als „Sonstige / Individuelle Anfrage" angezeigt mit dem Freitext in einem eigenen Feld.
+
+**Priorität:** Must Have | **Story Points:** 2
+
+---
+
+#### US-20: Preise für Serviceleistungen anzeigen
+
+**Als** Besucher  
+**möchte ich** Richtwerte für die Stundensätze der einzelnen Services sehen,  
+**damit** ich vor einer Anfrage eine erste Preiseinschätzung erhalten kann.
+
+**Richtwerte (Darmstadt-Region):**
+
+| Service                       | Richtpreis         |
+|-------------------------------|--------------------|
+| Entrümpelungen                | ab 35 €/h          |
+| Entkernungsarbeiten           | ab 45 €/h          |
+| Reinigungsarbeiten            | ab 25 €/h          |
+| Grünflächenpflege             | ab 30 €/h          |
+| Mülltonnenservice             | ab 20 €/h          |
+| Entsorgung Schrott / Metalle  | ab 40 €/h / Gewicht|
+
+**Akzeptanzkriterien:**
+
+- **Given** ich betrachte die Service-Karten, **When** die Seite geladen ist, **Then** sehe ich bei jedem Service den Richtpreis.
+- **Given** ich lese den Preishinweis, **When** ich ihn hover (Desktop) oder direkt sehe (Mobile), **Then** ist ein Disclaimer sichtbar: „Richtpreis für die Region Darmstadt. Finale Preise nach Besichtigung / auf Anfrage."
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-21: Admin-Dashboard — Übersicht bevorstehende Termine
+
+**Als** Admin (Tom)  
+**möchte ich** auf einen Blick alle bevorstehenden bestätigten Termine chronologisch sehen,  
+**damit** ich meinen Arbeitstag planen kann, ohne jeden Eintrag einzeln aufrufen zu müssen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne das Admin-Dashboard, **When** die Seite geladen ist, **Then** sehe ich alle zukünftigen bestätigten Termine sortiert nach Datum mit Uhrzeit, Kundenname und Service.
+- **Given** heute Termine anstehen, **When** das Dashboard geladen ist, **Then** sind diese mit einem „Heute"-Label visuell hervorgehoben.
+- **Given** ich klicke auf einen Termin, **When** der Klick verarbeitet ist, **Then** navigiere ich zur vollständigen Anfrage-Detailseite.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-22: Feedback-Sektion mit Kundenbewertungen
+
+**Als** Besucher  
+**möchte ich** Kundenbewertungen mit Sternebewertung lesen,  
+**damit** ich Vertrauen in Bärenstark aufbaue, bevor ich anfrage.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich scrolle zur Feedback-Sektion, **When** die Sektion geladen ist, **Then** sehe ich 10 Bewertungen mit Kundename, Service, Text und Sternen (visuell).
+- **Given** die Beispieldaten eingebaut sind, **When** ich die Sektion aufrufe, **Then** ist der sichtbare Gesamtdurchschnitt 4 von 5 Sternen.
+- **Given** mehr als 6 Bewertungen vorhanden sind, **When** die Sektion geladen ist, **Then** werden initial 4–6 angezeigt mit einem „Mehr anzeigen"-Button.
+
+**Hinweis:** Ersetzt und erfüllt US-10 (Backlog). US-10 gilt als abgeschlossen. Datenstruktur muss kompatibel mit US-29 (Iteration 4) sein.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-23: Service-Popups mit Vorher/Nachher-Darstellung
+
+**Als** Besucher  
+**möchte ich** bei jedem Service ein interaktives Popup mit Vorher/Nachher-Beispielen und Leistungsdetails öffnen können,  
+**damit** ich besser verstehe, was mich bei Bärenstark erwartet.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich klicke auf eine Service-Karte oder „Mehr erfahren", **When** das Popup öffnet, **Then** sehe ich Servicename, ausführliche Beschreibung, mindestens ein Vorher/Nachher-Bildpaar und einen CTA „Jetzt anfragen".
+- **Given** das Popup geöffnet ist, **When** ich auf X klicke, den Hintergrund anklicke oder Escape drücke, **Then** schließt sich das Popup.
+- **Given** ich klicke auf „Jetzt anfragen" im Popup, **When** der Klick verarbeitet ist, **Then** schließt sich das Popup und das Buchungsformular öffnet sich mit vorausgewähltem Service.
+- **Given** sechs Services existieren, **When** Iteration 3 abgeschlossen ist, **Then** hat jeder Service ein eigenes Popup mit individuellem Inhalt.
+
+**Hinweis:** Vorher/Nachher-Bilder sind für IT3 Platzhalter. Tom liefert echte Fotos nach. Design muss Braun/Beige/Holz-Palette nutzen.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-24: Bestätigungs- und Storno-E-Mail an Kunden (ohne Portal)
+
+**Als** Kunde  
+**möchte ich** nach jeder relevanten Statusänderung meiner Anfrage eine E-Mail erhalten — mit Eingangsbestätigung, Terminbestätigung und Stornierungslink —,  
+**damit** ich jederzeit informiert bin und meine Anfrage ohne Kundenportal verwalten kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich habe eine Anfrage mit E-Mail abgeschickt, **When** das Formular verarbeitet wurde, **Then** erhalte ich eine Eingangsbestätigung mit Anfragedaten und cancelToken-Link.
+- **Given** Tom bestätigt eine Anfrage, **When** der Status auf „bestätigt" gesetzt wird, **Then** erhalte ich eine Terminbestätigungs-E-Mail mit Datum, Uhrzeit, Service und Stornierungslink.
+- **Given** Tom lehnt eine Anfrage ab, **When** der Status auf „abgelehnt" gesetzt wird, **Then** erhalte ich eine E-Mail mit dem Hinweis und einer Einladung, neu anzufragen.
+- **Given** alle E-Mails versendet werden, **When** sie ankommen, **Then** sind sie auf Deutsch, vom Absender „Bärenstark Hausservice" und enthalten Toms Kontaktdaten im Footer.
+
+**Hinweis:** Verbindet und schließt US-11 (Backlog) ab. Ergänzt den cancelToken-Mechanismus aus US-14.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+### Iteration 4 (geplant — nach Iteration 3)
+
+---
+
+#### US-25: Kundenportal — Optionale Registrierung und Login
+
+**Als** Kunde möchte ich optional ein Kundenkonto anlegen und mich einloggen können, damit ich meine Aufträge zentral verwalten kann — ohne zur Buchung gezwungen zu sein.
+
+**Priorität:** Must Have | **Story Points:** 8
+
+---
+
+#### US-26: Kundenportal — Auftragsübersicht
+
+**Als** eingeloggter Kunde möchte ich alle meine Aufträge (vergangene und bevorstehende) in einer Übersicht sehen, damit ich Status und Details jederzeit nachverfolgen kann.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-27: Kundenportal — Stornierung über Portal
+
+**Als** eingeloggter Kunde möchte ich einen bevorstehenden Auftrag direkt im Portal stornieren, damit ich keine E-Mail mit Stornierungslink suchen muss.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-28: Zahlungsabwicklung PayPal und Apple Pay
+
+**Als** Kunde möchte ich nach Bestätigung meines Auftrags per PayPal oder Apple Pay bezahlen, damit keine Banküberweisung nötig ist.
+
+**Priorität:** Must Have | **Story Points:** 8
+
+---
+
+#### US-29: Kundenportal — Feedback und Bewertung abgeben
+
+**Als** eingeloggter Kunde mit abgeschlossenem Auftrag möchte ich eine Bewertung (1–5 Sterne + Text) hinterlassen, damit andere Besucher von meiner Erfahrung profitieren.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
 ### Backlog (nach MVP)
 
 ---
@@ -427,21 +634,41 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 | US-07      | Admin-Login                                   | Must Have    | Iteration 1 (abgeschlossen)          |
 | US-08      | E-Mail-Benachrichtigung bei neuer Anfrage     | Must Have    | Iteration 1 (abgeschlossen)          |
 | US-12      | Impressum & Datenschutz                       | Must Have    | Iteration 1 (abgeschlossen, Content) |
-| BUG US-04  | Buchungsanfrage absenden schlägt fehl         | Blocker      | Iteration 2 (aktuell)                |
-| US-13      | Alternativtermin vorschlagen (Admin)          | Must Have    | Iteration 2 (aktuell)                |
-| US-14      | Anfrage stornieren (Kunde)                    | Must Have    | Iteration 2 (aktuell)                |
-| US-15      | Wochentag-basierte Verfügbarkeit (Admin)      | Must Have    | Iteration 2 (aktuell)                |
-| US-16      | Kalenderansicht für Kunden                    | Must Have    | Iteration 2 (aktuell)                |
+| BUG US-04  | Buchungsanfrage absenden schlägt fehl         | Blocker      | Iteration 2 (abgeschlossen)          |
+| US-13      | Alternativtermin vorschlagen (Admin)          | Must Have    | Iteration 2 (abgeschlossen)          |
+| US-14      | Anfrage stornieren (Kunde)                    | Must Have    | Iteration 2 (abgeschlossen)          |
+| US-15      | Wochentag-basierte Verfügbarkeit (Admin)      | Must Have    | Iteration 2 (abgeschlossen)          |
+| US-16      | Kalenderansicht für Kunden                    | Must Have    | Iteration 2 (abgeschlossen)          |
+| BUG IT3    | Buchungsformular-Übermittlung                 | Blocker      | Iteration 3 (aktuell)                |
+| US-17      | Zeitfenster-Redesign (Von/Bis + Default)      | Must Have    | Iteration 3 (aktuell)                |
+| US-18      | Datei-Upload im Buchungsformular              | Must Have    | Iteration 3 (aktuell)                |
+| US-19      | Individuelle Serviceanfrage                   | Must Have    | Iteration 3 (aktuell)                |
+| US-20      | Preise für Serviceleistungen                  | Must Have    | Iteration 3 (aktuell)                |
+| US-21      | Admin-Dashboard Terminübersicht               | Must Have    | Iteration 3 (aktuell)                |
+| US-22      | Feedback-Sektion mit Bewertungen              | Must Have    | Iteration 3 (aktuell)                |
+| US-23      | Service-Popups Vorher/Nachher                 | Must Have    | Iteration 3 (aktuell)                |
+| US-24      | Bestätigungs- und Storno-E-Mail               | Must Have    | Iteration 3 (aktuell)                |
+| US-25      | Kundenportal Registrierung/Login              | Must Have    | Iteration 4 (geplant)                |
+| US-26      | Kundenportal Auftragsübersicht                | Must Have    | Iteration 4 (geplant)                |
+| US-27      | Kundenportal Stornierung                      | Must Have    | Iteration 4 (geplant)                |
+| US-28      | Zahlungsabwicklung PayPal / Apple Pay         | Must Have    | Iteration 4 (geplant)                |
+| US-29      | Kundenportal Feedback/Bewertung               | Must Have    | Iteration 4 (geplant)                |
 | US-09      | Instagram-Feed einbinden                      | Should Have  | Backlog                              |
-| US-10      | Kundenbewertungen anzeigen                    | Should Have  | Backlog                              |
-| US-11      | Bestätigungs-E-Mail an Kunden                 | Should Have  | Backlog                              |
+| US-10      | Kundenbewertungen anzeigen                    | Should Have  | Ersetzt durch US-22                  |
+| US-11      | Bestätigungs-E-Mail an Kunden                 | Should Have  | Ersetzt durch US-24                  |
 
 ---
 
 ## Annahmen
 
 - Das Admin-Interface ist eine einfache, passwortgeschützte Web-Oberfläche (keine nativen Apps).
-- Die Buchungsanfrage erfordert keine sofortige automatische Bestätigung — Tom prüft und antwortet manuell (US-11 im Backlog).
-- Zahlungsabwicklung ist nicht Teil des Scopes (Abrechnung offline).
+- Die Buchungsanfrage erfordert keine sofortige automatische Bestätigung — Tom prüft und antwortet manuell.
+- Zahlungsabwicklung ist nicht Teil von Iteration 3 — folgt in Iteration 4 (US-28).
 - Das Impressum wird inhaltlich von Tom geliefert; technisch ist es eine statische Unterseite.
-- Instagram-Verlinkung im Footer ist MVP; ein eingebetteter Feed (US-09) ist Backlog.
+- Instagram-Verlinkung im Footer ist MVP; ein eingebetteter Feed (US-09) bleibt im Backlog.
+- Zeitfenster-Schritte für Kundenbuchung: 30 Minuten (Annahme — Tom bestätigen).
+- Maximale Dateianzahl pro Buchungsanfrage: 5 Dateien, max. 20 MB pro Datei, 50 MB gesamt (Annahme).
+- Preise in US-20 sind Richtwerte — Tom gibt finale Werte vor Go-Live frei.
+- Bewertungsmoderation (US-29, Iteration 4): Tom entscheidet, ob er Bewertungen vor Veröffentlichung freigeben möchte.
+- Stornierungsfrist im Kundenportal (US-27): 24 Stunden angenommen — Tom bestätigen.
+- Zahlungsauslöser (US-28): Betrag wird manuell von Tom hinterlegt — automatische Preisberechnung ist Backlog.

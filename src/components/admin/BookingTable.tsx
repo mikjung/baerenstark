@@ -12,35 +12,54 @@ import {
   resendBookingMail,
   updateBookingStatus,
 } from '@/lib/api-client';
-import { formatDateTime, formatSlotRangeCompact } from '@/lib/format';
+import {
+  formatBerlinDateShort,
+  formatDateTime,
+  formatSlotRangeCompact,
+} from '@/lib/format';
 import type { BookingAdmin, BookingStatus } from '@/lib/schemas';
 import { getServiceLabel } from '@/lib/services';
+import { CounterProposalDialog } from './CounterProposalDialog';
 
 type StatusFilter = 'ALL' | BookingStatus;
 
 const FILTERS: ReadonlyArray<{ value: StatusFilter; label: string }> = [
   { value: 'ALL', label: 'Alle' },
   { value: 'PENDING', label: 'Offen' },
+  { value: 'COUNTER_PROPOSED', label: 'Vorschlag offen' },
   { value: 'CONFIRMED', label: 'Bestätigt' },
   { value: 'REJECTED', label: 'Abgelehnt' },
+  { value: 'CANCELLED', label: 'Storniert' },
 ];
 
 const STATUS_LABEL: Record<BookingStatus, string> = {
   PENDING: 'Offen',
   CONFIRMED: 'Bestätigt',
   REJECTED: 'Abgelehnt',
+  COUNTER_PROPOSED: 'Vorschlag ausstehend',
+  CANCELLED: 'Storniert',
 };
 
-const STATUS_TONE: Record<BookingStatus, 'neutral' | 'success' | 'danger'> = {
+type BadgeTone = 'neutral' | 'success' | 'danger' | 'warning' | 'info';
+
+const STATUS_TONE: Record<BookingStatus, BadgeTone> = {
   PENDING: 'neutral',
   CONFIRMED: 'success',
   REJECTED: 'danger',
+  COUNTER_PROPOSED: 'warning',
+  CANCELLED: 'neutral',
 };
 
 interface PendingAction {
   bookingId: string;
   next: 'CONFIRMED' | 'REJECTED';
   customerName: string;
+}
+
+interface CounterProposalTarget {
+  bookingId: string;
+  customerName: string;
+  currentSlot: { id: string; startsAt: string; endsAt: string };
 }
 
 export function BookingTable() {
@@ -53,6 +72,8 @@ export function BookingTable() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [resendingId, setResendingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
+  const [counterProposalTarget, setCounterProposalTarget] =
+    useState<CounterProposalTarget | null>(null);
 
   const load = useCallback(async () => {
     setStatus('loading');
@@ -105,6 +126,11 @@ export function BookingTable() {
         if (err.code === 'CONFLICT') {
           setActionError(
             'Dieser Slot ist inzwischen anderweitig vergeben. Liste wurde aktualisiert.',
+          );
+          void load();
+        } else if (err.code === 'GONE') {
+          setActionError(
+            'Diese Anfrage ist in einem Endstatus — Aktion nicht mehr möglich.',
           );
           void load();
         } else {
@@ -207,9 +233,19 @@ export function BookingTable() {
       ) : (
         <ul role="list" className="space-y-3">
           {filtered.map((b) => {
-            const slotRange = formatSlotRangeCompact(b.slot.startsAt, b.slot.endsAt);
-            const slotDeleted = Boolean(b.slot.deletedAt);
+            // Iteration 3: `slot` ist nullable. Bestand-Buchungen haben einen
+            // Slot, neue IT3-Buchungen haben date/startTime/endTime.
+            const slotRange = b.slot
+              ? formatSlotRangeCompact(b.slot.startsAt, b.slot.endsAt)
+              : b.date && b.startTime && b.endTime
+                ? `${formatBerlinDateShort(b.date)} · ${b.startTime}–${b.endTime}`
+                : '—';
+            const slotDeleted = Boolean(b.slot?.deletedAt);
+            const slotDescription = b.slot?.description ?? null;
             const mailFailed = !b.mailSent;
+            const isCancelled = b.status === 'CANCELLED';
+            const isRejected = b.status === 'REJECTED';
+            const isCounterProposed = b.status === 'COUNTER_PROPOSED';
             return (
               <li key={b.id}>
                 <article
@@ -218,7 +254,11 @@ export function BookingTable() {
                     'rounded-2xl border p-4 shadow-soft sm:p-5',
                     mailFailed
                       ? 'border-red-300 bg-red-50/60'
-                      : 'border-baerenstark-sand bg-white/80',
+                      : isCancelled
+                        ? 'border-baerenstark-sand bg-baerenstark-sand/20 opacity-80'
+                        : isCounterProposed
+                          ? 'border-amber-300 bg-amber-50/40'
+                          : 'border-baerenstark-sand bg-white/80',
                   ].join(' ')}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -238,7 +278,7 @@ export function BookingTable() {
                       <Badge tone={STATUS_TONE[b.status]}>{STATUS_LABEL[b.status]}</Badge>
                       {mailFailed && (
                         <Badge tone="danger" title={b.mailError ?? 'Mail-Versand fehlgeschlagen'}>
-                          ✉️ Mail nicht zugestellt
+                          Mail nicht zugestellt
                         </Badge>
                       )}
                       {slotDeleted && <Badge tone="warning">Slot gelöscht</Badge>}
@@ -250,8 +290,8 @@ export function BookingTable() {
                       <dt className="font-medium text-baerenstark-bark/70">Zeitfenster</dt>
                       <dd>
                         {slotRange}
-                        {b.slot.description && (
-                          <span className="text-baerenstark-bark/60"> · {b.slot.description}</span>
+                        {slotDescription && (
+                          <span className="text-baerenstark-bark/60"> · {slotDescription}</span>
                         )}
                       </dd>
                     </div>
@@ -287,7 +327,61 @@ export function BookingTable() {
                         {b.description}
                       </dd>
                     </div>
+                    {b.attachments && b.attachments.length > 0 && (
+                      <div className="sm:col-span-2">
+                        <dt className="font-medium text-baerenstark-bark/70">
+                          Anhänge ({b.attachments.length})
+                        </dt>
+                        <dd>
+                          <ul role="list" className="mt-1 flex flex-wrap gap-2">
+                            {b.attachments.map((att) => (
+                              <li key={att.id}>
+                                <a
+                                  href={att.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 rounded-md border border-baerenstark-sand bg-white/80 px-2 py-1 text-xs text-baerenstark-bark hover:border-baerenstark-wood hover:bg-baerenstark-sand/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
+                                >
+                                  <span aria-hidden="true">
+                                    {att.contentType.startsWith('image/')
+                                      ? '🖼️'
+                                      : att.contentType === 'application/pdf'
+                                        ? '📄'
+                                        : att.contentType.startsWith('video/')
+                                          ? '🎬'
+                                          : '📎'}
+                                  </span>
+                                  <span className="max-w-[16ch] truncate">
+                                    {att.filename}
+                                  </span>
+                                </a>
+                              </li>
+                            ))}
+                          </ul>
+                        </dd>
+                      </div>
+                    )}
                   </dl>
+
+                  {isCounterProposed && b.counterProposalSlot && (
+                    <div className="mt-4 rounded-lg border-l-4 border-amber-400 bg-amber-50 p-3 text-sm">
+                      <p className="font-medium text-amber-900">
+                        Vorgeschlagener Alternativtermin (wartet auf Kunden-Reaktion):
+                      </p>
+                      <p className="mt-1 text-baerenstark-bark/90">
+                        {formatSlotRangeCompact(
+                          b.counterProposalSlot.startsAt,
+                          b.counterProposalSlot.endsAt,
+                        )}
+                        {b.counterProposalSlot.description && (
+                          <span className="text-baerenstark-bark/60">
+                            {' '}
+                            · {b.counterProposalSlot.description}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  )}
 
                   {mailFailed && b.mailError && (
                     <p className="mt-3 rounded-lg border border-red-200 bg-red-100/50 p-2 text-xs text-red-900">
@@ -296,7 +390,7 @@ export function BookingTable() {
                   )}
 
                   <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
-                    {mailFailed && (
+                    {mailFailed && !isCancelled && (
                       <Button
                         variant="secondary"
                         size="sm"
@@ -306,7 +400,26 @@ export function BookingTable() {
                         Mail erneut senden
                       </Button>
                     )}
-                    {b.status !== 'CONFIRMED' && (
+                    {b.status === 'PENDING' && !slotDeleted && b.slot && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          setCounterProposalTarget({
+                            bookingId: b.id,
+                            customerName: b.customerName,
+                            currentSlot: {
+                              id: b.slot!.id,
+                              startsAt: b.slot!.startsAt,
+                              endsAt: b.slot!.endsAt,
+                            },
+                          })
+                        }
+                      >
+                        Gegenvorschlag senden
+                      </Button>
+                    )}
+                    {!isCancelled && b.status !== 'CONFIRMED' && (
                       <Button
                         variant="primary"
                         size="sm"
@@ -321,7 +434,7 @@ export function BookingTable() {
                         Bestätigen
                       </Button>
                     )}
-                    {b.status !== 'REJECTED' && (
+                    {!isCancelled && !isRejected && (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -371,6 +484,24 @@ export function BookingTable() {
           }
         }}
       />
+
+      {counterProposalTarget && (
+        <CounterProposalDialog
+          open={true}
+          bookingId={counterProposalTarget.bookingId}
+          customerName={counterProposalTarget.customerName}
+          currentSlot={counterProposalTarget.currentSlot}
+          onClose={() => setCounterProposalTarget(null)}
+          onSuccess={() => {
+            setCounterProposalTarget(null);
+            setToast({
+              tone: 'success',
+              message: 'Alternativtermin wurde an den Kunden gesendet.',
+            });
+            void load();
+          }}
+        />
+      )}
 
       {actionError && (
         <Banner tone="error" role="alert">

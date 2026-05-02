@@ -1,29 +1,30 @@
-// Bärenstark Hausservice — Prisma Schema (MVP, v1.2 — Iteration 2)
+// Bärenstark Hausservice — Prisma Schema (MVP, v1.3 — Iteration 3)
 // Single source of truth für das Datenmodell.
 // Live-Schema unter prisma/schema.prisma muss mit dieser Datei synchron bleiben.
 //
+// Änderungen v1.3 (Iteration 3 — US-17 bis US-24):
+//   - **NEU**: AvailabilityTemplate (US-17) — globale Wochentag-Standardzeiten.
+//   - **NEU**: DayOverride (US-17) — individuelle Tages-Überschreibung.
+//   - **NEU**: BookingAttachment (US-18) — Datei-Anhänge an Buchungen.
+//   - Booking erhält neue Felder date/startTime/endTime (US-17): konkrete
+//     gewählte Uhrzeit innerhalb des Verfügbarkeitsfensters. slotId wird
+//     optional (Rückwärtskompatibilität für Bestandsbuchungen).
+//   - WeeklyAvailability bleibt erhalten (Bestandsdaten / Migration), wird
+//     aber für neue Buchungen NICHT mehr genutzt — AvailabilityTemplate ist
+//     ihre Erweiterung mit Zeit-Komponenten.
+//   - Slot wird DEPRECATED (siehe Doku unten). Keine Schema-Änderung am
+//     Slot-Modell selbst — nur die Anwendung ändert sich.
+//   - Service-Slug 'sonstiges' wird in der App-Konstante ergänzt (kein
+//     Schema-Eintrag, weil Service als String persistiert wird).
+//
 // Änderungen v1.2 (Iteration 2 — US-13 bis US-16, BUG US-04):
-//   - Booking.cancelToken (String, unique, @default(cuid())) — für Kunden-Aktionslinks
-//     in E-Mails (US-13/US-14). Token wird beim Anlegen einmalig gesetzt und ist
-//     für den Lebenszeitraum der Buchung gültig.
-//   - Booking.counterProposalSlotId (String?) — Referenz auf den vom Admin
-//     vorgeschlagenen Alternativ-Slot (US-13). NULL, wenn kein Vorschlag aktiv.
+//   - Booking.cancelToken (String, unique, @default(cuid()))
+//   - Booking.counterProposalSlotId (String?)
 //   - BookingStatus erweitert um COUNTER_PROPOSED und CANCELLED.
-//   - Neue Relation Booking.counterProposalSlot ↔ Slot via opposite-side
-//     `proposedForBookings` — damit Admin-View "Slots, die als Vorschlag dienen"
-//     anzeigen kann.
-//   - Neues Modell WeeklyAvailability (US-15) — Wochentag-basierte Verfügbarkeit.
-//   - Booking.customerEmail bleibt String? (nullable) im Schema, aber das
-//     CreateBookingSchema im Application-Layer macht es zum Pflichtfeld
-//     (siehe contracts/zod-schemas.ts).
+//   - Neues Modell WeeklyAvailability (US-15).
 //
 // Änderungen v1.1 (gegenüber v1.0):
-//   - BUG-001/006: Aktive Buchung pro Slot via Partial Unique Index garantiert
-//     (Raw-SQL-Migration, siehe unten). isBooked-Logik schließt PENDING ein.
-//   - BUG-002: mailSent / mailError im Booking-Modell für Mail-Reliability.
-//   - BUG-003: Soft-Delete für Slot via deletedAt; FK auf Booking bleibt CASCADE
-//     entfällt — das Aufräumen offener PENDINGs übernimmt der Handler.
-//   - BUG-015: Composite-Index [startsAt, endsAt] für Range-Queries.
+//   - Partial Unique Index, Soft-Delete für Slot, Mail-Reliability-Felder.
 
 generator client {
   provider = "prisma-client-js"
@@ -37,8 +38,7 @@ datasource db {
 }
 
 /// Admin-Benutzer. Im MVP genau ein Datensatz (Tom).
-/// Wird via Setup-Wizard /admin/setup angelegt (greift nur, wenn keine User
-/// in der DB sind). Tom setzt sein Passwort selbst — kein Insider-Risiko.
+/// Wird via Setup-Wizard /admin/setup angelegt.
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -49,16 +49,23 @@ model User {
   @@map("users")
 }
 
-/// Vom Admin angelegtes Zeitfenster, in dem Bärenstark verfügbar ist.
+/// **DEPRECATED ab Iteration 3 (US-17).** Bestehende Buchungen behalten
+/// ihre Slot-Referenz für Rückwärtskompatibilität; neue Buchungen nutzen
+/// `Booking.date / startTime / endTime` direkt.
 ///
-/// Belegt-Status (`isBooked`) ist abgeleitet:
-///   isBooked = true  ⇔  es existiert eine Booking mit Status PENDING ODER CONFIRMED ODER COUNTER_PROPOSED
-///   (REJECTED- und CANCELLED-Bookings geben den Slot wieder frei).
+/// Das Modell bleibt im Schema, weil es:
+///   - Iteration-1- und Iteration-2-Bestandsdaten hostet,
+///   - der Counter-Proposal-Flow (US-13) noch über Slot-IDs läuft (Bestand),
+///   - die Soft-Delete-Logik weiterhin funktioniert.
 ///
-/// Soft-Delete: `deletedAt != NULL` markiert den Slot als gelöscht. GET-Listen
-/// filtern `deletedAt IS NULL`. Beim Setzen von deletedAt werden alle PENDING-
-/// und COUNTER_PROPOSED-Bookings durch den Handler atomar auf CANCELLED gesetzt
-/// (siehe api-routes.md).
+/// Neue Engineering-Hinweise für IT3:
+///   - `POST /api/slots` und `DELETE /api/slots/:id` bleiben erhalten,
+///     werden aber im Admin-UI versteckt (kein neuer Slot anlegen).
+///   - `GET /api/slots` darf weiterhin abgerufen werden (öffentlich), liefert
+///     nur Bestandsslots — neue Buchungs-UI nutzt `GET /api/slots/available`
+///     (Iteration 3) statt `GET /api/slots`.
+///
+/// Siehe ARCHITECTURE.md §16 für die Migration-Strategie.
 model Slot {
   id          String    @id @default(cuid())
   startsAt    DateTime
@@ -76,10 +83,26 @@ model Slot {
   @@map("slots")
 }
 
-/// Buchungsanfrage eines Kunden für genau einen Slot.
+/// Buchungsanfrage eines Kunden.
 ///
-/// Status-Lebenszyklus (Iteration 2 — siehe ARCHITECTURE.md §15):
+/// **Iteration-3-Datenmodell (US-17):**
+///   Neue Buchungen haben `slotId = null` und stattdessen
+///   `date + startTime + endTime` direkt befüllt. Das ermöglicht den
+///   Verfügbarkeitsfenster-Flow ohne pre-allokierte Slot-Datensätze.
 ///
+///   Bestehende Buchungen (Iteration 1/2) haben `slotId` befüllt und
+///   `date/startTime/endTime` leer.
+///
+/// **Datums-/Zeit-Konvention (Iteration 3, Berlin-TZ-First):**
+///   - `date`:      "YYYY-MM-DD"  (Berlin-Lokalzeit, kein Offset)
+///   - `startTime`: "HH:MM"       (24h, Berlin)
+///   - `endTime`:   "HH:MM"       (24h, Berlin, > startTime)
+///   Begründung: Tom denkt in Berlin-Zeit. Kein Timezone-Shift bei
+///   Sommer/Winterzeit-Übergang (vermeidet "08:00 wird zu 07:00 nach
+///   DST"-Bug). Backend rendert in Mails via `Intl.DateTimeFormat`
+///   mit explizitem Berlin-TZ.
+///
+/// Status-Lebenszyklus (unverändert seit Iteration 2):
 ///   PENDING            → CONFIRMED         (Admin bestätigt)
 ///   PENDING            → REJECTED          (Admin lehnt ab)
 ///   PENDING            → COUNTER_PROPOSED  (Admin schlägt Alternativtermin vor)
@@ -89,71 +112,56 @@ model Slot {
 ///   COUNTER_PROPOSED   → PENDING           (Kunde wählt neuen Slot via Re-Booking-Flow)
 ///   COUNTER_PROPOSED   → CANCELLED         (Kunde storniert per Token-Link)
 ///
-/// Idempotenz: gleicher Status → 200 OK, kein Update (siehe api-routes.md).
+/// **Verfügbarkeits-Belegung (Iteration 3):**
+///   Pro (date, startTime, endTime) darf höchstens EINE aktive Buchung
+///   (Status ∈ {PENDING, CONFIRMED, COUNTER_PROPOSED}) existieren.
+///   Garantie via Partial Unique Index (Raw-SQL-Migration):
 ///
-/// WICHTIG — Race-Condition-Schutz (BUG-006, erweitert v1.2):
-///   Es gibt einen Partial Unique Index, der pro Slot maximal eine Booking mit
-///   Status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED') zulässt. Prisma kann
-///   partielle Indexe nicht deklarativ ausdrücken — die Migration enthält Raw SQL:
+///     CREATE UNIQUE INDEX uniq_active_booking_per_timeslot
+///       ON bookings(date, start_time, end_time)
+///       WHERE date IS NOT NULL
+///         AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
 ///
-///   -- prisma/migrations/<ts>_active_booking_per_slot_v2/migration.sql
-///   DROP INDEX IF EXISTS uniq_active_booking_per_slot;
-///   CREATE UNIQUE INDEX uniq_active_booking_per_slot
-///     ON bookings(slot_id)
-///     WHERE status IN ('PENDING', 'CONFIRMED', 'COUNTER_PROPOSED');
-///
-///   Verletzungen dieses Constraints werden vom Handler in `POST /api/bookings`
-///   und `PATCH /api/bookings/:id` als HTTP 409 CONFLICT (Code: CONFLICT) übersetzt.
-///
-/// Mail-Reliability (BUG-002):
-///   - mailSent: true, sobald Resend mindestens einmal erfolgreich quittiert hat.
-///   - mailError: letzte Fehlermeldung (truncated 500 Zeichen) bei Fehlversuch.
-///   - Retry-Strategie: 3 Versuche, fire-and-forget nach 201-Response (siehe
-///     BUG_US04_ANALYSIS.md). Admin-Dashboard markiert mailSent=false rot.
-///
-/// Token-Sicherheit (US-13/US-14):
-///   - cancelToken ist UNIQUE und wird beim Booking-Anlegen einmalig generiert
-///     (cuid(), 24+ Zeichen, kollisionsarm).
-///   - Aktionen via /api/bookings/respond?token=xxx&action=accept|cancel
-///     greifen ausschließlich über diesen Token zu — kein Login nötig.
-///   - Re-Use eines Tokens nach finalem Status (CONFIRMED/REJECTED/CANCELLED)
-///     wird vom Handler abgelehnt (HTTP 410 GONE oder vergleichbar — siehe API-Spec).
+///   Bestandsindex `uniq_active_booking_per_slot` bleibt erhalten — er
+///   greift nur, wenn `slot_id IS NOT NULL`. Beide Indexe existieren parallel
+///   und decken die jeweiligen Buchungs-Modi ab.
 model Booking {
   id            String        @id @default(cuid())
-  slotId        String
-  // onDelete: Restrict bleibt: Slots werden nicht physisch gelöscht (Soft-Delete).
-  // Zusätzliche Sicherheit, falls jemand am Soft-Delete vorbei delete-en wollte.
-  slot          Slot          @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
 
+  // --- Iteration 1/2: Slot-basierte Buchung (DEPRECATED, nur Bestand) ---
+  // Optional ab Iteration 3. Neue Buchungen lassen das Feld leer.
+  slotId        String?
+  slot          Slot?         @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
+
+  // --- Iteration 3 (US-17): Date/Time-basierte Buchung ---
+  /// "YYYY-MM-DD" im Berlin-TZ. Pflicht für neue Buchungen.
+  date          String?
+  /// "HH:MM" im Berlin-TZ. Pflicht für neue Buchungen.
+  startTime     String?
+  /// "HH:MM" im Berlin-TZ. Pflicht für neue Buchungen, > startTime.
+  endTime       String?
+
+  // --- Kundendaten (unverändert) ---
   customerName  String
   customerPhone String
-  // **Pflichtfeld ab Iteration 2** (US-13/US-14): wird im Application-Layer
-  // (CreateBookingSchema) erzwungen. DB-seitig bleibt es nullable, um die
-  // Migration der Bestandsdaten ohne ALTER-Constraints durchzuführen.
   customerEmail String?
   service       String        // Slug aus SERVICES-Konstante (siehe lib/services.ts)
   description   String
 
   status        BookingStatus @default(PENDING)
 
-  // Mail-Status für Admin-Dashboard-Sichtbarkeit (BUG-002).
+  // --- Mail-Reliability (BUG-002, unverändert) ---
   mailSent      Boolean       @default(false)
   mailError     String?
 
-  // --- Iteration 2 Felder ---
-
-  // Eindeutiger, nicht-rate-limitierender Aktions-Token für Kunden-Links.
-  // Wird einmalig beim Booking-Anlegen erzeugt und bleibt über Status-
-  // Übergänge stabil. Wird in E-Mail-Links verwendet (US-13/US-14).
+  // --- Iteration 2 Felder (unverändert) ---
   cancelToken   String        @unique @default(cuid())
-
-  // Wenn Admin einen Alternativtermin vorschlägt (US-13 → COUNTER_PROPOSED),
-  // wird hier die ID des vorgeschlagenen Slots gespeichert. NULL sonst.
-  // Kein onDelete-Cascade: Falls der Admin den vorgeschlagenen Slot löscht,
-  // bleibt der Verweis bestehen (404 beim nächsten Klick durch den Kunden,
-  // wird im Handler abgefangen).
   counterProposalSlotId String?
   counterProposalSlot   Slot?  @relation("BookingCounterProposalSlot", fields: [counterProposalSlotId], references: [id], onDelete: SetNull)
+
+  // --- Iteration 3 Felder ---
+  /// 0..N hochgeladene Dateien (Fotos, Videos, PDFs) — Vercel Blob (US-18).
+  attachments   BookingAttachment[]
 
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
@@ -161,30 +169,136 @@ model Booking {
   @@index([slotId])
   @@index([status, createdAt])
   @@index([counterProposalSlotId])
-  // Hinweis: Der Partial Unique Index `uniq_active_booking_per_slot` wird per
-  // Raw-SQL-Migration angelegt (siehe Doc-Block oben), nicht über @@unique.
+  // Iteration 3 — Index für Verfügbarkeits-Lookup (GET /api/slots/available).
+  @@index([date, status])
+  // Iteration 3 — Index für Admin-Dashboard (US-21: bevorstehende Termine).
+  @@index([status, date, startTime])
+  // Hinweis: Partial Unique Indexe (`uniq_active_booking_per_slot` und
+  // `uniq_active_booking_per_timeslot`) werden per Raw-SQL-Migration angelegt.
   @@map("bookings")
 }
 
-/// Wochentag-basierte Verfügbarkeit (US-15).
+/// Default-Vorlage pro Wochentag (Iteration 3 / US-17).
 ///
-/// Genau **sieben** Datensätze (dayOfWeek 0–6, 0 = Sonntag, 6 = Samstag — analog zu
-/// JavaScripts Date.getDay()). Werden im Setup-Migrations-Schritt seedweise mit
-/// `isActive: false` für alle Tage angelegt; Admin schaltet die gewünschten Tage
-/// einzeln aktiv.
+/// Tom definiert für jeden Wochentag (0=So..6=Sa) ein Verfügbarkeitsfenster
+/// (z.B. Mo–Fr 08:00–17:00). Genau **sieben** Datensätze (Initial-Seed).
 ///
-/// Wirkung in der Kalenderlogik (US-16):
-///   - Ein Tag gilt als grundsätzlich verfügbar ⇔ WeeklyAvailability(day).isActive = true.
-///   - Verfügbarkeit eines konkreten Datums (US-16):
-///       isAvailable = isActive(weekday) AND (kein CONFIRMED-Slot an diesem Tag) AND (Datum > heute)
-///   - "Rot" sonst.
+/// Beziehung zu DayOverride: Wenn für ein konkretes Datum ein DayOverride
+/// existiert, hat er Vorrang vor der Template. Sonst gilt die Template.
 ///
-/// Default-Strategy:
-///   Initial-Insert via Raw-SQL-Migration (alle 7 Tage, isActive=false). Anschließend
-///   PUT /api/availability nutzen, um einzelne Tage zu togglen.
+/// Beziehung zu WeeklyAvailability (Iteration 2):
+/// AvailabilityTemplate.isActive ersetzt funktional WeeklyAvailability.isActive.
+/// Migration kopiert beim Iteration-3-Deploy die `isActive`-Werte aus
+/// WeeklyAvailability in AvailabilityTemplate. WeeklyAvailability bleibt für
+/// Iteration-2-Bestandsbuchungen lesbar; neue Endpunkte nutzen
+/// AvailabilityTemplate.
+///
+/// `slotDurationMinutes`: Tom kann pro Wochentag steuern, wie lang ein
+/// Buchungs-Block ist (Default 60). Beispiel: Mo 08:00–17:00 mit 60-min-Slots
+/// liefert Slots 08:00, 09:00, 10:00, ..., 16:00 (letzter Slot endet 17:00).
+model AvailabilityTemplate {
+  id                  String   @id @default(cuid())
+  /// 0=Sonntag, 1=Montag, ..., 6=Samstag (analog Date.getDay()).
+  dayOfWeek           Int      @unique
+  /// false = Tag standardmäßig nicht verfügbar (rot im Kalender).
+  isActive            Boolean  @default(false)
+  /// "HH:MM" Beginn des Verfügbarkeitsfensters (Berlin-TZ).
+  startTime           String   @default("08:00")
+  /// "HH:MM" Ende des Verfügbarkeitsfensters (Berlin-TZ), > startTime.
+  endTime             String   @default("17:00")
+  /// Slot-Block-Länge in Minuten. Empfohlene Werte: 30, 60, 90, 120.
+  slotDurationMinutes Int      @default(60)
+  updatedAt           DateTime @updatedAt
+
+  @@index([dayOfWeek])
+  @@map("availability_template")
+}
+
+/// Individuelle Tages-Überschreibung (Iteration 3 / US-17).
+///
+/// Erlaubt Tom, einzelne Tage abweichend zur Default-Vorlage zu konfigurieren:
+///   - `isActive: false` + `startTime/endTime: null` → Tag ist gesperrt
+///     (z.B. Urlaub, Feiertag).
+///   - `isActive: true` + `startTime/endTime: "09:00"/"15:00"` → Tag hat
+///     abweichende Zeiten (kürzeres Fenster).
+///   - `isActive: true` + `startTime/endTime: null` → Tag nutzt die Template-
+///     Zeiten, aber explizit aktiviert (selten genutzt; primär für
+///     "ausnahmsweise samstags geöffnet"-Szenarien).
+///
+/// Auflösungs-Logik im Backend (siehe lib/availability.ts):
+///   1. DayOverride für `date`? Wenn ja → daraus
+///      `(isActive, startTime ?? template.startTime, endTime ?? template.endTime)`
+///      ableiten.
+///   2. Sonst → AvailabilityTemplate für den Wochentag.
+///
+/// `date` ist UNIQUE: pro Datum existiert höchstens ein Override.
+model DayOverride {
+  id        String   @id @default(cuid())
+  /// "YYYY-MM-DD" im Berlin-TZ.
+  date      String   @unique
+  isActive  Boolean
+  /// "HH:MM" oder null (= Template-Default übernehmen).
+  startTime String?
+  /// "HH:MM" oder null.
+  endTime   String?
+  /// Optionale Notiz für Tom: "Urlaub", "Feiertag", "Familienevent".
+  reason    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+  @@map("day_overrides")
+}
+
+/// Datei-Anhang an einer Buchung (Iteration 3 / US-18).
+///
+/// Storage: Vercel Blob (kostenlos bis 2 GB). Frontend lädt Datei via
+/// `POST /api/upload` hoch und erhält eine Public-URL zurück, die im
+/// `BookingAttachment.url` persistiert wird.
+///
+/// Limits (im App-Layer durchgesetzt, nicht in der DB):
+///   - max. 5 Dateien pro Buchung
+///   - max. 20 MB pro Datei
+///   - akzeptierte Content-Types: image/* | video/mp4 | application/pdf
+///
+/// Lifecycle:
+///   - Cascade-Delete: wird die Buchung gelöscht, werden Attachments
+///     mitgelöscht (DB-Eintrag). Die Blob-Datei selbst muss separat über
+///     einen Cleanup-Job (Backlog) entfernt werden — Vercel Blob hat
+///     keine FK-Cascade auf Storage-Ebene.
+///   - Im MVP keine Soft-Delete; gelöscht ist gelöscht.
+model BookingAttachment {
+  id          String   @id @default(cuid())
+  bookingId   String
+  booking     Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  /// Public-URL aus Vercel Blob (https://*.public.blob.vercel-storage.com/...).
+  url         String
+  /// Originaldateiname (sanitized — kein Pfad-Traversal).
+  filename    String
+  /// MIME-Type, wird vom Upload-Endpoint validiert.
+  contentType String
+  /// Größe in Bytes (für UI-Anzeige; redundant zur Blob-Storage-Info).
+  sizeBytes   Int
+  createdAt   DateTime @default(now())
+
+  @@index([bookingId])
+  @@map("booking_attachments")
+}
+
+/// Wochentag-basierte Verfügbarkeit (Iteration 2 / US-15).
+///
+/// **DEPRECATED ab Iteration 3** zugunsten von `AvailabilityTemplate`, das
+/// zusätzlich Zeit-Komponenten und Slot-Dauer enthält.
+///
+/// Bleibt im Schema für:
+///   - Bestand: alte Frontend-Pfade lesen evtl. noch GET /api/availability.
+///   - Migration: Iteration-3-Deploy übernimmt die isActive-Flags 1:1
+///     in AvailabilityTemplate (siehe `prisma/migrations/.../seed.sql`).
+///
+/// Neue Iteration-3-UI nutzt ausschließlich `/api/admin/availability-template`.
 model WeeklyAvailability {
   id        String   @id @default(cuid())
-  dayOfWeek Int      @unique // 0 = Sonntag, 1 = Montag, ..., 6 = Samstag
+  dayOfWeek Int      @unique
   isActive  Boolean  @default(false)
   updatedAt DateTime @updatedAt
 
@@ -193,13 +307,12 @@ model WeeklyAvailability {
 }
 
 /// SQLite kennt kein natives ENUM — Prisma serialisiert es als TEXT.
-/// Werte werden im API-Layer mit Zod validiert.
 ///
-/// Iteration 2: COUNTER_PROPOSED + CANCELLED neu.
+/// Iteration 3: keine Erweiterung an BookingStatus.
 enum BookingStatus {
-  PENDING            // Kunde hat Anfrage gestellt, Admin hat noch nicht reagiert.
-  CONFIRMED          // Admin (oder Kunde via Counter-Proposal-Annahme) hat bestätigt.
-  REJECTED           // Admin hat abgelehnt (oder Bestätigung zurückgezogen).
-  COUNTER_PROPOSED   // Admin hat Alternativtermin vorgeschlagen, Kunde noch nicht reagiert.
-  CANCELLED          // Kunde hat selbst storniert (per Token-Link).
+  PENDING
+  CONFIRMED
+  REJECTED
+  COUNTER_PROPOSED
+  CANCELLED
 }

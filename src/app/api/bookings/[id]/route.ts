@@ -1,26 +1,45 @@
 /**
  * /api/bookings/:id  PATCH (admin) — Status setzen mit State-Machine + Idempotenz.
  *
- * State-Machine (BUG-013):
- *   PENDING   → CONFIRMED | REJECTED
- *   CONFIRMED → REJECTED  (oder identisch CONFIRMED → idempotent, kein Update)
- *   REJECTED  → CONFIRMED | REJECTED (idempotent)
+ * State-Machine (Iteration 2):
+ *   PENDING            → CONFIRMED | REJECTED | CANCELLED
+ *   CONFIRMED          → REJECTED  (oder identisch CONFIRMED → idempotent)
+ *   REJECTED           → CONFIRMED | REJECTED (idempotent)
+ *   COUNTER_PROPOSED   → CONFIRMED | CANCELLED   (Admin-Override; normalerweise via Token)
+ *   CANCELLED          → (jeder)              → 410 GONE
  *
- * Bei REJECTED → CONFIRMED kann der Partial Unique Index zuschlagen, wenn
- * inzwischen ein anderes Booking aktiv ist → 409 CONFLICT.
+ * Iteration 3 (US-24):
+ *   Bei PENDING → CONFIRMED → fire-and-forget bookingConfirmationToCustomer.
+ *   Bei PENDING/CONFIRMED → REJECTED → fire-and-forget bookingRejectionToCustomer.
  */
 
 import type { NextRequest } from 'next/server';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
 import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
-import { UpdateBookingStatusSchema } from '@/lib/schemas';
 import { apiError, apiSuccess, internalError, zodErrorResponse } from '@/lib/api';
+import {
+  sendBookingConfirmationToCustomer,
+  sendBookingRejectionToCustomer,
+} from '@/lib/mail';
+import type { Service } from '@/lib/services';
 import { revalidateTag } from 'next/cache';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+
+const AdminPatchBookingSchema = z.object({
+  status: z.enum(['CONFIRMED', 'REJECTED', 'CANCELLED']),
+});
+
+const ADMIN_ALLOWED_TRANSITIONS: Record<string, ReadonlyArray<string>> = {
+  PENDING: ['CONFIRMED', 'REJECTED', 'CANCELLED'],
+  CONFIRMED: ['REJECTED', 'CANCELLED', 'CONFIRMED'],
+  REJECTED: ['CONFIRMED', 'REJECTED'],
+  COUNTER_PROPOSED: ['CONFIRMED', 'REJECTED', 'CANCELLED', 'COUNTER_PROPOSED'],
+  CANCELLED: [],
+};
 
 export async function PATCH(
   req: NextRequest,
@@ -42,14 +61,23 @@ export async function PATCH(
     if (!json || typeof json !== 'object') {
       return apiError({ code: 'VALIDATION_ERROR', message: 'Body muss JSON sein' });
     }
-    const { status: targetStatus } = UpdateBookingStatusSchema.parse(json);
+    const { status: targetStatus } = AdminPatchBookingSchema.parse(json);
 
-    const existing = await prisma.booking.findUnique({ where: { id } });
+    const existing = await prisma.booking.findUnique({
+      where: { id },
+      include: { slot: true },
+    });
     if (!existing) {
       return apiError({ code: 'NOT_FOUND', message: 'Buchung nicht gefunden.' });
     }
 
-    // Idempotenz: gleicher Status → 200 ohne Update, kein updatedAt-Bump.
+    if (existing.status === 'CANCELLED') {
+      return apiError({
+        code: 'GONE',
+        message: 'Die Buchung wurde storniert; ein Statuswechsel ist nicht mehr möglich.',
+      });
+    }
+
     if (existing.status === targetStatus) {
       return apiSuccess({
         id: existing.id,
@@ -58,14 +86,29 @@ export async function PATCH(
       });
     }
 
+    const allowed = ADMIN_ALLOWED_TRANSITIONS[existing.status] ?? [];
+    if (!allowed.includes(targetStatus)) {
+      return apiError({
+        code: 'CONFLICT',
+        message: `Übergang von ${existing.status} zu ${targetStatus} ist nicht erlaubt.`,
+      });
+    }
+
     let updated;
     try {
+      const data: Prisma.BookingUpdateInput = { status: targetStatus };
+      if (
+        existing.status === 'COUNTER_PROPOSED' &&
+        (targetStatus === 'CANCELLED' || targetStatus === 'REJECTED')
+      ) {
+        data.counterProposalSlot = { disconnect: true };
+      }
+
       updated = await prisma.booking.update({
         where: { id },
-        data: { status: targetStatus },
+        data,
       });
     } catch (err) {
-      // Partial Unique Index → REJECTED → CONFIRMED konkurriert mit aktivem Eintrag.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         return apiError({
           code: 'CONFLICT',
@@ -75,8 +118,48 @@ export async function PATCH(
       throw err;
     }
 
+    // -------------------------------------------------------------------
+    // Iteration 3 / US-24: Kunden-Mail bei Status-Wechsel (fire-and-forget)
+    // -------------------------------------------------------------------
+    if (updated.customerEmail) {
+      const slotForMail = existing.slot
+        ? { startsAt: existing.slot.startsAt, endsAt: existing.slot.endsAt }
+        : null;
+
+      if (existing.status === 'PENDING' && updated.status === 'CONFIRMED') {
+        void sendBookingConfirmationToCustomer({
+          customerName: updated.customerName,
+          customerEmail: updated.customerEmail,
+          service: updated.service as Service,
+          date: updated.date,
+          startTime: updated.startTime,
+          endTime: updated.endTime,
+          slot: slotForMail,
+          cancelToken: updated.cancelToken,
+        }).catch((err) => {
+          console.warn('[mail] booking confirmation failed:', err);
+        });
+      } else if (
+        (existing.status === 'PENDING' || existing.status === 'CONFIRMED') &&
+        updated.status === 'REJECTED'
+      ) {
+        void sendBookingRejectionToCustomer({
+          customerName: updated.customerName,
+          customerEmail: updated.customerEmail,
+          service: updated.service as Service,
+          date: updated.date,
+          startTime: updated.startTime,
+          endTime: updated.endTime,
+          slot: slotForMail,
+        }).catch((err) => {
+          console.warn('[mail] booking rejection failed:', err);
+        });
+      }
+    }
+
     try {
       revalidateTag('slots');
+      revalidateTag('available-slots');
     } catch {
       /* ignore */
     }

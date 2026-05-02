@@ -1,5 +1,18 @@
-// Bärenstark Hausservice — Live Prisma Schema (v1.1)
+// Bärenstark Hausservice — Live Prisma Schema (v1.3 — Iteration 3)
 // Synchron gehalten mit /contracts/schema.prisma.
+//
+// Iteration 3 Änderungen:
+//   - NEU: AvailabilityTemplate (US-17) — globale Wochentag-Standardzeiten.
+//   - NEU: DayOverride (US-17) — individuelle Tages-Überschreibung.
+//   - NEU: BookingAttachment (US-18) — Datei-Anhänge an Buchungen.
+//   - Booking erhält neue Felder date/startTime/endTime (US-17).
+//   - Booking.slotId wird optional (Rückwärtskompatibilität).
+//
+// Iteration 2 Änderungen (Bestand):
+//   - Booking.cancelToken (UNIQUE, default cuid)
+//   - Booking.counterProposalSlotId (FK → Slot.id, ON DELETE SET NULL)
+//   - Status erweitert um COUNTER_PROPOSED, CANCELLED.
+//   - WeeklyAvailability.
 
 generator client {
   provider = "prisma-client-js"
@@ -28,7 +41,8 @@ model Slot {
   createdAt   DateTime  @default(now())
   deletedAt   DateTime?
 
-  bookings    Booking[]
+  bookings                Booking[] @relation("BookingPrimarySlot")
+  counterProposalBookings Booking[] @relation("BookingCounterProposalSlot")
 
   @@index([startsAt])
   @@index([startsAt, endsAt])
@@ -38,11 +52,21 @@ model Slot {
 
 /// SQLite kennt kein natives ENUM. Status wird als TEXT abgelegt; gültige Werte
 /// werden im API-Layer durch Zod (BookingStatusSchema) erzwungen.
-/// Werte: 'PENDING' | 'CONFIRMED' | 'REJECTED'.
+/// Werte: 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'COUNTER_PROPOSED' | 'CANCELLED'.
 model Booking {
   id            String   @id @default(cuid())
-  slotId        String
-  slot          Slot     @relation(fields: [slotId], references: [id], onDelete: Restrict)
+
+  // Iteration 1/2: Slot-basiert (DEPRECATED, nur Bestand). Optional ab IT3.
+  slotId        String?
+  slot          Slot?    @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
+
+  // Iteration 3 (US-17): Date/Time-basierte Buchung.
+  /// "YYYY-MM-DD" Berlin-TZ.
+  date          String?
+  /// "HH:MM" Berlin-TZ.
+  startTime     String?
+  /// "HH:MM" Berlin-TZ, > startTime.
+  endTime       String?
 
   customerName  String
   customerPhone String
@@ -53,12 +77,83 @@ model Booking {
   status        String   @default("PENDING")
 
   mailSent      Boolean  @default(false)
-  mailError     String?
+  mailError    String?
+
+  // Iteration 2 Felder
+  cancelToken           String  @unique @default(cuid())
+  counterProposalSlotId String?
+  counterProposalSlot   Slot?   @relation("BookingCounterProposalSlot", fields: [counterProposalSlotId], references: [id], onDelete: SetNull)
+
+  // Iteration 3: Datei-Anhänge.
+  attachments   BookingAttachment[]
 
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   @@index([slotId])
   @@index([status, createdAt])
+  @@index([counterProposalSlotId])
+  @@index([date, status])
+  @@index([status, date, startTime])
   @@map("bookings")
+}
+
+/// Default-Vorlage pro Wochentag (Iteration 3 / US-17).
+/// Genau 7 Datensätze (dayOfWeek 0–6).
+model AvailabilityTemplate {
+  id                  String   @id @default(cuid())
+  dayOfWeek           Int      @unique
+  isActive            Boolean  @default(false)
+  startTime           String   @default("08:00")
+  endTime             String   @default("17:00")
+  slotDurationMinutes Int      @default(60)
+  updatedAt           DateTime @updatedAt
+
+  @@index([dayOfWeek])
+  @@map("availability_template")
+}
+
+/// Individuelle Tages-Überschreibung (Iteration 3 / US-17).
+model DayOverride {
+  id        String   @id @default(cuid())
+  date      String   @unique
+  isActive  Boolean
+  startTime String?
+  endTime   String?
+  reason    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+  @@map("day_overrides")
+}
+
+/// Datei-Anhang an einer Buchung (Iteration 3 / US-18).
+/// `bookingId` ist nullable, weil der Upload vor dem Booking-Insert passiert.
+/// Beim POST /api/bookings wird die ID nachgepflegt.
+model BookingAttachment {
+  id          String   @id @default(cuid())
+  bookingId   String?
+  booking     Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  url         String
+  filename    String
+  contentType String
+  sizeBytes   Int
+  createdAt   DateTime @default(now())
+
+  @@index([bookingId])
+  @@map("booking_attachments")
+}
+
+/// Wochentag-basierte Verfügbarkeit (Iteration 2 / US-15).
+/// DEPRECATED ab Iteration 3 zugunsten von AvailabilityTemplate.
+model WeeklyAvailability {
+  id        String   @id @default(cuid())
+  dayOfWeek Int      @unique
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([dayOfWeek])
+  @@map("weekly_availability")
 }

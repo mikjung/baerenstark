@@ -77,6 +77,16 @@ export function formatSlotRangeCompact(startsAt: string, endsAt: string): string
 }
 
 /**
+ * Iteration 3 — Formatiert ein "YYYY-MM-DD" (Berlin-TZ-String, ohne Offset)
+ * als deutsches Kurzdatum "DD.MM.YYYY".
+ */
+export function formatBerlinDateShort(date: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return date;
+  return `${m[3]}.${m[2]}.${m[1]}`;
+}
+
+/**
  * Lokale Datetime-Werte aus einem `<input type="datetime-local">` (ohne
  * Zeitzone) interpretieren als Europe/Berlin und in ISO 8601 mit Offset
  * konvertieren — entspricht dem, was das Backend laut api-routes.md akzeptiert.

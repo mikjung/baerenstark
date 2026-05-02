@@ -5,8 +5,10 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { AdminSlotManager } from './AdminSlotManager';
 import { BookingTable } from './BookingTable';
+import { UpcomingBookingsList } from './UpcomingBookingsList';
+import { WeeklyAvailabilityForm } from './WeeklyAvailabilityForm';
 
-type Tab = 'bookings' | 'slots';
+type Tab = 'bookings' | 'slots' | 'availability';
 
 export function AdminDashboard() {
   const [tab, setTab] = useState<Tab>('bookings');
@@ -19,7 +21,7 @@ export function AdminDashboard() {
             Admin-Bereich
           </h1>
           <p className="mt-1 text-sm text-baerenstark-bark/70">
-            Verwalte Zeitfenster und eingegangene Buchungsanfragen.
+            Verwalte Zeitfenster, Verfügbarkeit und eingegangene Buchungsanfragen.
           </p>
         </div>
         <Button
@@ -32,18 +34,28 @@ export function AdminDashboard() {
         </Button>
       </header>
 
-      <div role="tablist" aria-label="Bereich" className="mb-6 inline-flex rounded-lg border border-baerenstark-sand bg-white/60 p-1">
+      <UpcomingBookingsList />
+
+      <div
+        role="tablist"
+        aria-label="Bereich"
+        className="mb-6 inline-flex flex-wrap rounded-lg border border-baerenstark-sand bg-white/60 p-1"
+      >
         <TabButton active={tab === 'bookings'} onClick={() => setTab('bookings')}>
           Buchungsanfragen
         </TabButton>
         <TabButton active={tab === 'slots'} onClick={() => setTab('slots')}>
           Zeitfenster
         </TabButton>
+        <TabButton active={tab === 'availability'} onClick={() => setTab('availability')}>
+          Verfügbarkeit
+        </TabButton>
       </div>
 
       <div role="tabpanel" aria-labelledby={tab}>
         {tab === 'bookings' && <BookingTable />}
         {tab === 'slots' && <AdminSlotManager />}
+        {tab === 'availability' && <WeeklyAvailabilityForm />}
       </div>
     </div>
   );

@@ -1,6 +1,8 @@
+import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { BookingClient } from './BookingClient';
 import { CONTACT } from '@/lib/contact';
+import { SkeletonCard } from '@/components/ui/Skeleton';
 
 export const metadata: Metadata = {
   title: 'Termin buchen',
@@ -28,7 +30,17 @@ export default function BuchungPage() {
           .
         </p>
       </header>
-      <BookingClient />
+      <Suspense
+        fallback={
+          <div className="space-y-4">
+            <SkeletonCard />
+            <SkeletonCard />
+            <SkeletonCard />
+          </div>
+        }
+      >
+        <BookingClient />
+      </Suspense>
     </div>
   );
 }

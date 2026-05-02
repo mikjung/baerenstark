@@ -4,6 +4,21 @@
  * Nutzt die Edge-sichere `auth.config.ts` (kein bcrypt, kein Prisma).
  * API-Routen prüfen Session direkt im Handler, weil dort das einheitliche
  * JSON-Fehlerformat zurückgegeben werden soll.
+ *
+ * Iteration 2: Der `matcher` matcht weiterhin nur `/admin/:path*`. Folgende
+ * neue API-Endpunkte sind explizit öffentlich (kein Auth, Token-basiert):
+ *   - GET  /api/bookings/respond    (Token-Aktion)
+ *   - GET  /api/bookings/rebook     (Token-Lookup)
+ *   - POST /api/bookings/rebook     (Token-Aktion)
+ *   - GET  /api/availability        (Read-only)
+ *   - GET  /api/calendar            (Read-only)
+ *
+ * Admin-only API-Endpunkte (Session-Prüfung im Handler):
+ *   - POST /api/bookings/:id/counter-proposal
+ *   - PUT  /api/availability
+ *   - POST /api/slots, DELETE /api/slots/:id
+ *   - GET/PATCH /api/bookings, /api/bookings/:id
+ *   - POST /api/bookings/:id/resend-mail
  */
 
 import NextAuth from 'next-auth';

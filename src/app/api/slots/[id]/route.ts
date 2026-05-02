@@ -36,7 +36,7 @@ export async function DELETE(
         where: { id },
         include: {
           bookings: {
-            where: { status: { in: ['PENDING', 'CONFIRMED'] } },
+            where: { status: { in: ['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED'] } },
             select: { id: true, status: true },
           },
         },
@@ -53,10 +53,14 @@ export async function DELETE(
 
       const now = new Date();
 
-      // Atomar: Slot soft-löschen UND offene PENDING-Bookings ablehnen.
+      // Iteration 2: PENDING und COUNTER_PROPOSED → CANCELLED beim Soft-Delete.
+      // Vorschläge werden damit zurückgezogen.
       await tx.booking.updateMany({
-        where: { slotId: id, status: 'PENDING' },
-        data: { status: 'REJECTED', updatedAt: now },
+        where: {
+          slotId: id,
+          status: { in: ['PENDING', 'COUNTER_PROPOSED'] },
+        },
+        data: { status: 'CANCELLED', updatedAt: now },
       });
 
       await tx.slot.update({

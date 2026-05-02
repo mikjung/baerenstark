@@ -1,6 +1,7 @@
 import { Hero } from '@/components/home/Hero';
 import { ServiceGrid } from '@/components/home/ServiceGrid';
 import { About } from '@/components/home/About';
+import { ReviewSection } from '@/components/home/ReviewSection';
 
 export default function HomePage() {
   return (
@@ -8,6 +9,7 @@ export default function HomePage() {
       <Hero />
       <ServiceGrid />
       <About />
+      <ReviewSection />
     </>
   );
 }

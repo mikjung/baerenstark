@@ -10,9 +10,18 @@
 
 import type {
   ApiError,
+  AvailabilityTemplateDay,
+  AvailableSlotsResponse,
   BookingAdmin,
+  BookingStatus,
+  CalendarMonth,
   CreateBookingInput,
+  CreateDayOverrideInput,
+  DayOverride,
   SlotPublic,
+  UpcomingBooking,
+  UploadResponse,
+  WeeklyAvailabilityDay,
 } from './schemas';
 
 // ---------------------------------------------------------------------------
@@ -26,10 +35,14 @@ export type ApiErrorCode =
   | 'NOT_FOUND'
   | 'CONFLICT'
   | 'OVERLAP'
+  | 'GONE'
+  | 'PAYLOAD_TOO_LARGE'
+  | 'UNSUPPORTED_MEDIA_TYPE'
   | 'RATE_LIMITED'
   | 'MAIL_FAILED'
   | 'INTERNAL_ERROR'
-  | 'NETWORK_ERROR';
+  | 'NETWORK_ERROR'
+  | 'BLOB_NOT_CONFIGURED';
 
 export class ApiClientError extends Error {
   status: number;
@@ -50,20 +63,23 @@ export class ApiClientError extends Error {
 // ---------------------------------------------------------------------------
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   body?: unknown;
+  /** Wenn true, wird body NICHT JSON-serialisiert (z.B. FormData für Uploads). */
+  rawBody?: boolean;
   signal?: AbortSignal;
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, signal } = opts;
+  const { method = 'GET', body, rawBody = false, signal } = opts;
 
   let response: Response;
   try {
+    const isJson = body && !rawBody;
     response = await fetch(path, {
       method,
-      headers: body ? { 'Content-Type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+      headers: isJson ? { 'Content-Type': 'application/json' } : undefined,
+      body: rawBody ? (body as BodyInit) : isJson ? JSON.stringify(body) : undefined,
       signal,
       credentials: 'same-origin',
       cache: 'no-store',
@@ -72,10 +88,12 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw err;
     }
+    // Network-Errors (DNS, Offline, CORS) werden hier abgefangen und als
+    // verständliche User-Message weitergegeben — niemals stilles Scheitern.
     throw new ApiClientError(
       0,
       'NETWORK_ERROR',
-      'Verbindung zum Server fehlgeschlagen. Bitte Internetverbindung prüfen.',
+      'Verbindung zum Server fehlgeschlagen. Bitte Internetverbindung prüfen und erneut versuchen.',
     );
   }
 
@@ -85,25 +103,32 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   let parsed: unknown;
+  let parseFailed = false;
   try {
     parsed = await response.json();
   } catch {
-    if (!response.ok) {
-      throw new ApiClientError(
-        response.status,
-        'INTERNAL_ERROR',
-        `Server-Fehler (${response.status})`,
-      );
-    }
-    return undefined as T;
+    parseFailed = true;
   }
 
   if (!response.ok) {
+    if (parseFailed || !parsed || typeof parsed !== 'object') {
+      // Server hat keinen JSON-Body geliefert (z.B. 500 mit HTML-Errorpage).
+      throw new ApiClientError(
+        response.status,
+        response.status === 429 ? 'RATE_LIMITED' : 'INTERNAL_ERROR',
+        `Server-Fehler (HTTP ${response.status}). Bitte später erneut versuchen.`,
+      );
+    }
     const errorPayload = parsed as ApiError;
     const code = (errorPayload?.error?.code ?? 'INTERNAL_ERROR') as ApiErrorCode;
-    const message = errorPayload?.error?.message ?? `Server-Fehler (${response.status})`;
+    const message =
+      errorPayload?.error?.message ?? `Server-Fehler (HTTP ${response.status})`;
     const field = errorPayload?.error?.field;
     throw new ApiClientError(response.status, code, message, field);
+  }
+
+  if (parseFailed) {
+    return undefined as T;
   }
 
   return parsed as T;
@@ -120,11 +145,13 @@ interface DataEnvelope<T> {
 export async function fetchSlots(params?: {
   from?: string;
   to?: string;
+  day?: string;
   signal?: AbortSignal;
 }): Promise<SlotPublic[]> {
   const search = new URLSearchParams();
   if (params?.from) search.set('from', params.from);
   if (params?.to) search.set('to', params.to);
+  if (params?.day) search.set('day', params.day);
   const qs = search.toString();
   const path = qs ? `/api/slots?${qs}` : '/api/slots';
   const res = await request<DataEnvelope<SlotPublic[]>>(path, { signal: params?.signal });
@@ -155,22 +182,40 @@ export async function deleteSlot(id: string): Promise<void> {
 
 export interface CreateBookingResponse {
   id: string;
-  status: 'PENDING' | 'CONFIRMED' | 'REJECTED';
+  status: BookingStatus;
   createdAt: string;
 }
 
+/**
+ * Erstellt eine reguläre Buchungsanfrage.
+ * `rebookToken` (Iteration 2): wenn vorhanden, wird der Re-Booking-Endpoint
+ * statt `POST /api/bookings` verwendet — der Kunde wählt einen neuen Slot
+ * für eine bestehende Anfrage (US-13 AC4).
+ */
 export async function createBooking(
-  payload: CreateBookingInput,
+  payload: CreateBookingInput & { rebookToken?: string },
 ): Promise<CreateBookingResponse> {
+  const { rebookToken, ...rest } = payload;
+  if (rebookToken) {
+    if (!rest.slotId) {
+      throw new ApiClientError(
+        400,
+        'VALIDATION_ERROR',
+        'Re-Booking erfordert eine Slot-ID.',
+        'slotId',
+      );
+    }
+    return rebookViaToken(rebookToken, rest.slotId);
+  }
   const res = await request<DataEnvelope<CreateBookingResponse>>('/api/bookings', {
     method: 'POST',
-    body: payload,
+    body: rest,
   });
   return res.data;
 }
 
 export async function fetchBookings(params?: {
-  status?: 'PENDING' | 'CONFIRMED' | 'REJECTED';
+  status?: BookingStatus;
   signal?: AbortSignal;
 }): Promise<BookingAdmin[]> {
   const search = new URLSearchParams();
@@ -216,6 +261,125 @@ export async function resendBookingMail(id: string): Promise<ResendMailResponse>
 }
 
 // ---------------------------------------------------------------------------
+// Iteration 2 — Counter-Proposal (US-13)
+// ---------------------------------------------------------------------------
+
+export interface CounterProposalResponse {
+  id: string;
+  status: 'COUNTER_PROPOSED';
+  counterProposalSlot: {
+    id: string;
+    startsAt: string;
+    endsAt: string;
+    description: string | null;
+  };
+  updatedAt: string;
+}
+
+export async function sendCounterProposal(
+  bookingId: string,
+  newSlotId: string,
+): Promise<CounterProposalResponse> {
+  const res = await request<DataEnvelope<CounterProposalResponse>>(
+    `/api/bookings/${encodeURIComponent(bookingId)}/counter-proposal`,
+    {
+      method: 'POST',
+      body: { newSlotId },
+    },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 2 — Rebook-Flow (US-13 AC4)
+// ---------------------------------------------------------------------------
+
+export interface RebookInfoResponse {
+  bookingId: string;
+  customerName: string;
+  service: string;
+  status: BookingStatus;
+  originalSlot: {
+    id: string;
+    startsAt: string;
+    endsAt: string;
+    description: string | null;
+  };
+  counterProposalSlot: {
+    id: string;
+    startsAt: string;
+    endsAt: string;
+    description: string | null;
+  } | null;
+}
+
+/**
+ * Liefert die zur Re-Booking gehörende Booking-Info (Token-basiert).
+ * Wird auf `/buchung?rebookToken=xxx` verwendet, um dem Kunden Kontext zu zeigen.
+ *
+ * Hinweis: Endpoint ist optional im Backend; falls nicht implementiert,
+ * wirft 404 → Frontend zeigt einen generischen Re-Booking-Banner ohne Details.
+ */
+export async function fetchRebook(token: string): Promise<RebookInfoResponse> {
+  const res = await request<DataEnvelope<RebookInfoResponse>>(
+    `/api/bookings/rebook?token=${encodeURIComponent(token)}`,
+    { method: 'GET' },
+  );
+  return res.data;
+}
+
+export async function rebookViaToken(
+  token: string,
+  newSlotId: string,
+): Promise<CreateBookingResponse> {
+  const res = await request<DataEnvelope<CreateBookingResponse>>('/api/bookings/rebook', {
+    method: 'POST',
+    body: { token, newSlotId },
+  });
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 2 — Verfügbarkeit (US-15)
+// ---------------------------------------------------------------------------
+
+export async function fetchAvailability(): Promise<WeeklyAvailabilityDay[]> {
+  const res = await request<DataEnvelope<{ days: WeeklyAvailabilityDay[] }>>(
+    '/api/availability',
+  );
+  return res.data.days;
+}
+
+export async function updateAvailability(
+  days: WeeklyAvailabilityDay[],
+): Promise<WeeklyAvailabilityDay[]> {
+  const res = await request<DataEnvelope<{ days: WeeklyAvailabilityDay[] }>>(
+    '/api/availability',
+    {
+      method: 'PUT',
+      body: { days },
+    },
+  );
+  return res.data.days;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 2 — Kalender (US-16)
+// ---------------------------------------------------------------------------
+
+export async function fetchCalendar(
+  year: number,
+  month: number,
+  signal?: AbortSignal,
+): Promise<CalendarMonth> {
+  const res = await request<DataEnvelope<CalendarMonth>>(
+    `/api/calendar?year=${year}&month=${month}`,
+    { signal },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 
@@ -235,6 +399,165 @@ export async function postSetup(payload: SetupPayload): Promise<{ id: string; em
   const res = await request<DataEnvelope<{ id: string; email: string }>>('/api/admin/setup', {
     method: 'POST',
     body: payload,
+  });
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 3 — Verfügbare Zeitslots (US-17)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lädt die verfügbaren Zeit-Slots für einen Tag.
+ * `date` muss "YYYY-MM-DD" (Berlin-TZ) sein.
+ */
+export async function fetchAvailableSlots(
+  date: string,
+  signal?: AbortSignal,
+): Promise<AvailableSlotsResponse> {
+  const res = await request<DataEnvelope<AvailableSlotsResponse>>(
+    `/api/slots/available?date=${encodeURIComponent(date)}`,
+    { signal },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 3 — AvailabilityTemplate (US-17)
+// ---------------------------------------------------------------------------
+
+export async function fetchAvailabilityTemplate(
+  signal?: AbortSignal,
+): Promise<AvailabilityTemplateDay[]> {
+  const res = await request<DataEnvelope<{ days: AvailabilityTemplateDay[] }>>(
+    '/api/admin/availability-template',
+    { signal },
+  );
+  return res.data.days;
+}
+
+export async function updateAvailabilityTemplate(
+  days: AvailabilityTemplateDay[],
+): Promise<AvailabilityTemplateDay[]> {
+  const res = await request<DataEnvelope<{ days: AvailabilityTemplateDay[] }>>(
+    '/api/admin/availability-template',
+    {
+      method: 'PUT',
+      body: { days },
+    },
+  );
+  return res.data.days;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 3 — DayOverrides (US-17)
+// ---------------------------------------------------------------------------
+
+export interface DayOverrideListResponse {
+  month: string;
+  overrides: DayOverride[];
+}
+
+/** Lädt alle Day-Overrides für einen Monat ("YYYY-MM"). */
+export async function fetchDayOverrides(
+  month: string,
+  signal?: AbortSignal,
+): Promise<DayOverrideListResponse> {
+  const res = await request<DataEnvelope<DayOverrideListResponse>>(
+    `/api/admin/day-overrides?month=${encodeURIComponent(month)}`,
+    { signal },
+  );
+  return res.data;
+}
+
+export interface CreateDayOverrideResult {
+  override: DayOverride;
+  warning: {
+    code: string;
+    message: string;
+    affectedBookingCount: number;
+  } | null;
+}
+
+export async function createDayOverride(
+  payload: CreateDayOverrideInput,
+): Promise<CreateDayOverrideResult> {
+  // Backend liefert evtl. ein optionales `warning`-Feld neben `data`.
+  // Wir lesen das `Response` selbst, um Zugriff auf den vollen Body zu haben.
+  const response = await fetch('/api/admin/day-overrides', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  let parsed: unknown = null;
+  try {
+    parsed = await response.json();
+  } catch {
+    // ignore — wir prüfen unten ob OK
+  }
+  if (!response.ok) {
+    const err = parsed as ApiError | null;
+    const code = (err?.error?.code ?? 'INTERNAL_ERROR') as ApiErrorCode;
+    const message = err?.error?.message ?? `Server-Fehler (HTTP ${response.status})`;
+    throw new ApiClientError(response.status, code, message, err?.error?.field);
+  }
+  const body = parsed as
+    | { data: DayOverride; warning?: { code: string; message: string; affectedBookingCount: number } }
+    | null;
+  if (!body || !body.data) {
+    throw new ApiClientError(500, 'INTERNAL_ERROR', 'Unerwartetes Antwortformat.');
+  }
+  return {
+    override: body.data,
+    warning: body.warning ?? null,
+  };
+}
+
+export async function deleteDayOverride(id: string): Promise<void> {
+  await request<void>(`/api/admin/day-overrides/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 3 — Bevorstehende Termine (US-21)
+// ---------------------------------------------------------------------------
+
+export async function fetchUpcomingBookings(
+  limit = 10,
+  signal?: AbortSignal,
+): Promise<UpcomingBooking[]> {
+  const safeLimit = Math.max(1, Math.min(100, limit));
+  const res = await request<DataEnvelope<UpcomingBooking[]>>(
+    `/api/admin/upcoming-bookings?limit=${safeLimit}`,
+    { signal },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 3 — Datei-Upload (US-18)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lädt eine einzelne Datei via `POST /api/upload` (multipart/form-data) hoch
+ * und liefert die Attachment-Metadaten zurück.
+ *
+ * Wirft ApiClientError mit Code:
+ *   - PAYLOAD_TOO_LARGE  → Datei > 20 MB.
+ *   - UNSUPPORTED_MEDIA_TYPE → MIME-Type nicht erlaubt.
+ *   - RATE_LIMITED       → 20/h/IP überschritten.
+ *   - BLOB_NOT_CONFIGURED → Blob-Storage ist nicht konfiguriert (siehe US-18 Fallback).
+ */
+export async function uploadFile(file: File): Promise<UploadResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await request<DataEnvelope<UploadResponse>>('/api/upload', {
+    method: 'POST',
+    body: formData,
+    rawBody: true,
   });
   return res.data;
 }

@@ -60,7 +60,8 @@ export async function GET(req: NextRequest): Promise<Response> {
       orderBy: { startsAt: 'asc' },
       include: {
         bookings: {
-          where: { status: { in: ['PENDING', 'CONFIRMED'] } },
+          // Iteration 2: COUNTER_PROPOSED zählt ebenfalls als belegt.
+          where: { status: { in: ['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED'] } },
           select: { id: true },
         },
       },

@@ -60,11 +60,17 @@ export async function POST(
       customerEmail: booking.customerEmail,
       service,
       description: booking.description,
-      slot: {
-        startsAt: booking.slot.startsAt,
-        endsAt: booking.slot.endsAt,
-        description: booking.slot.description,
-      },
+      cancelToken: booking.cancelToken,
+      slot: booking.slot
+        ? {
+            startsAt: booking.slot.startsAt,
+            endsAt: booking.slot.endsAt,
+            description: booking.slot.description,
+          }
+        : null,
+      date: booking.date,
+      startTime: booking.startTime,
+      endTime: booking.endTime,
     });
 
     const updated = await prisma.booking.update({

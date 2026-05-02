@@ -1,6 +1,20 @@
-import { SERVICE_LIST } from '@/lib/services';
+'use client';
+
+/**
+ * Service-Grid auf der Startseite.
+ *
+ * Iteration 3:
+ *  - US-20: Preis-Anzeige unter dem Beschreibungstext.
+ *  - US-23: Klick auf Karte öffnet ServiceDetailModal mit Vorher/Nachher.
+ */
+
+import { useState } from 'react';
+import { ServiceDetailModal } from './ServiceDetailModal';
+import { formatPrice, SERVICE_LIST, type ServiceInfo } from '@/lib/services';
 
 export function ServiceGrid() {
+  const [activeService, setActiveService] = useState<ServiceInfo | null>(null);
+
   return (
     <section
       aria-labelledby="services-title"
@@ -14,7 +28,8 @@ export function ServiceGrid() {
           Unsere Services
         </h2>
         <p className="mx-auto max-w-2xl text-base text-baerenstark-bark/80">
-          Sechs Kernleistungen rund ums Haus — alles aus einer Hand.
+          Sieben Bereiche rund ums Haus — alles aus einer Hand. Klick auf eine
+          Karte für Details und Preise.
         </p>
       </div>
 
@@ -24,9 +39,16 @@ export function ServiceGrid() {
       >
         {SERVICE_LIST.map((service) => (
           <li key={service.slug}>
-            <article
-              aria-labelledby={`svc-${service.slug}`}
-              className="flex h-full flex-col rounded-2xl border border-baerenstark-sand bg-white/70 p-6 shadow-soft transition-shadow hover:shadow-card"
+            <button
+              type="button"
+              onClick={() => setActiveService(service)}
+              aria-haspopup="dialog"
+              aria-label={`${service.label} — Details öffnen`}
+              className={[
+                'group flex h-full w-full flex-col rounded-2xl border border-baerenstark-sand bg-white/70 p-6 text-left shadow-soft transition-all',
+                'hover:-translate-y-0.5 hover:shadow-card hover:border-baerenstark-wood',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent',
+              ].join(' ')}
             >
               <div
                 className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full bg-baerenstark-sand/60 text-2xl"
@@ -43,13 +65,29 @@ export function ServiceGrid() {
               <p className="mb-2 text-sm font-medium text-baerenstark-wood">
                 {service.short}
               </p>
-              <p className="text-sm text-baerenstark-bark/80">
+              <p className="mb-3 text-sm text-baerenstark-bark/80">
                 {service.description}
               </p>
-            </article>
+              <p className="mt-auto text-sm font-semibold text-leaf">
+                {formatPrice(service)}
+              </p>
+              <span className="mt-2 text-xs text-baerenstark-wood underline-offset-2 group-hover:underline">
+                Mehr erfahren →
+              </span>
+            </button>
           </li>
         ))}
       </ul>
+
+      <p className="mt-6 text-center text-xs text-baerenstark-bark/60">
+        * Endpreise nach individueller Besichtigung. Richtpreise gelten für die
+        Region Darmstadt.
+      </p>
+
+      <ServiceDetailModal
+        service={activeService}
+        onClose={() => setActiveService(null)}
+      />
     </section>
   );
 }

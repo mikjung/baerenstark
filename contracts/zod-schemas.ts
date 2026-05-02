@@ -1,5 +1,5 @@
 /**
- * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.2 — Iteration 2)
+ * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.3 — Iteration 3)
  *
  * Diese Datei ist die einzige Quelle der Wahrheit für die Form
  * der API-Payloads. Sowohl Frontend (Forms, Fetch-Wrapper) als auch
@@ -7,29 +7,25 @@
  *
  * Pfad in der Live-App: src/lib/schemas.ts (synchron mit dieser Datei).
  *
- * Änderungen v1.2 (Iteration 2 — US-13 bis US-16, BUG US-04):
- *   - BookingStatus erweitert: COUNTER_PROPOSED, CANCELLED.
- *   - CreateBookingSchema: customerEmail ist jetzt PFLICHT (US-13/US-14
- *     brauchen sie für Aktionslinks).
- *   - CreateBookingSchema: customerEmail-preprocess für Whitespace
- *     (BUG US-04 Fix 2 — siehe BUG_US04_ANALYSIS.md).
- *   - UpdateBookingStatusSchema bleibt auf CONFIRMED|REJECTED beschränkt;
- *     COUNTER_PROPOSED + CANCELLED haben dedizierte Endpunkte.
- *   - CounterProposalSchema neu (POST /api/bookings/:id/counter-proposal).
- *   - RebookingSchema neu (Re-Booking-Flow nach Counter-Proposal).
- *   - WeeklyAvailabilitySchema + WeeklyAvailabilityUpdateSchema neu (US-15).
- *   - CalendarDaySchema + CalendarMonthSchema neu (US-16).
- *   - BookingAdminSchema erweitert um cancelToken, counterProposalSlot.
- *   - Neuer Fehlercode `GONE` (HTTP 410): Token bereits verwendet / Endstatus erreicht.
+ * Änderungen v1.3 (Iteration 3 — US-17 bis US-24):
+ *   - SERVICES erweitert um `'sonstiges'` (US-19).
+ *   - CreateBookingSchema umgebaut: `slotId` ist DEPRECATED (nur Bestand);
+ *     neue Buchungen senden `date + startTime + endTime` (US-17).
+ *   - CreateBookingSchema enthält superRefine: bei service='sonstiges' muss
+ *     description ≥ 30 Zeichen sein (US-19).
+ *   - CreateBookingSchema enthält optionales `attachmentIds: string[]` (US-18).
+ *   - Neue Schemas: AvailabilityTemplateSchema, UpdateAvailabilityTemplateSchema,
+ *     DayOverrideSchema, CreateDayOverrideSchema, AvailableSlotsSchema.
+ *   - Neue Schemas: BookingAttachmentSchema, UploadResponseSchema.
+ *   - Neues Schema: UpcomingBookingSchema (US-21).
+ *   - BookingAdminSchema erweitert um date/startTime/endTime/attachments.
+ *   - SlotPublicSchema bleibt für Bestand erhalten; neuer
+ *     `AvailableTimeSlotSchema` für IT3-Buchungs-UI.
  *
- * Änderungen v1.1:
- *   - BUG-008: Slot-Validierung — Min 30 min, Max 12 h, Max-Vorlauf 1 Jahr.
- *   - BUG-009: customerEmail klar als optional dokumentiert.
- *   - BUG-010: Telefon-Regex verschärft.
- *   - BUG-011: Datumsangaben akzeptieren auch Offsets.
- *   - BUG-002: Mail-Reliability-Felder.
- *   - Fehlercodes: OVERLAP, MAIL_FAILED, RATE_LIMITED.
- *   - Setup-Wizard: AdminSetupSchema neu.
+ * Änderungen v1.2 (Iteration 2):
+ *   - BookingStatus erweitert: COUNTER_PROPOSED, CANCELLED.
+ *   - customerEmail Pflicht, preprocess-Härtung.
+ *   - Counter-Proposal, Rebooking, WeeklyAvailability, Calendar-Schemas.
  */
 
 import { z } from 'zod';
@@ -44,13 +40,20 @@ export const SERVICES = [
   'gruenflaechenpflege',
   'muelltonnenservice',
   'entsorgung',
+  'sonstiges', // IT3 / US-19 — Individuelle Anfrage.
 ] as const;
 
 export const ServiceSchema = z.enum(SERVICES);
 export type Service = z.infer<typeof ServiceSchema>;
 
+/** Services, die "Sonstiges"-Verhalten triggern (verschärfte Beschreibung). */
+export const CUSTOM_SERVICE_SLUG: Service = 'sonstiges';
+
+/** Mindestlänge der Beschreibung bei `service === 'sonstiges'` (US-19). */
+export const CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH = 30;
+
 // ---------------------------------------------------------------------------
-// Booking-Status (erweitert in Iteration 2)
+// Booking-Status
 // ---------------------------------------------------------------------------
 export const BookingStatusSchema = z.enum([
   'PENDING',
@@ -61,17 +64,12 @@ export const BookingStatusSchema = z.enum([
 ]);
 export type BookingStatus = z.infer<typeof BookingStatusSchema>;
 
-/**
- * Status, die einen Slot als belegt markieren (für isBooked-Logik).
- * REJECTED und CANCELLED geben den Slot wieder frei.
- */
 export const ACTIVE_BOOKING_STATUSES: readonly BookingStatus[] = [
   'PENDING',
   'CONFIRMED',
   'COUNTER_PROPOSED',
 ] as const;
 
-/** Endstatus, ab denen Token-basierte Aktionen nicht mehr möglich sind. */
 export const TERMINAL_BOOKING_STATUSES: readonly BookingStatus[] = [
   'CONFIRMED',
   'REJECTED',
@@ -79,23 +77,48 @@ export const TERMINAL_BOOKING_STATUSES: readonly BookingStatus[] = [
 ] as const;
 
 // ---------------------------------------------------------------------------
-// Slot-Validierungs-Konstanten (BUG-008)
+// Slot-Validierungs-Konstanten (Bestand IT1/IT2)
 // ---------------------------------------------------------------------------
 export const SLOT_MIN_DURATION_MINUTES = 30;
 export const SLOT_MAX_DURATION_HOURS = 12;
 export const SLOT_MAX_LEAD_TIME_DAYS = 365;
 
 // ---------------------------------------------------------------------------
-// Slot
+// Zeit-/Datums-Helfer (Iteration 3, Berlin-TZ-First)
 // ---------------------------------------------------------------------------
 
-/**
- * Antwort für GET /api/slots (öffentlich).
- *
- * `isBooked` ist abgeleitet:
- *   true  ⇔ es existiert eine Booking mit Status PENDING, CONFIRMED ODER COUNTER_PROPOSED.
- *   false sonst.
- */
+/** "HH:MM" — 24h-Format, 00:00 bis 23:59. */
+export const TimeStringSchema = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Uhrzeit muss im Format HH:MM sein');
+
+/** "YYYY-MM-DD" — kein Offset, Berlin-TZ-Datum. */
+export const DateStringSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Datum muss im Format YYYY-MM-DD sein')
+  .refine(
+    (val) => {
+      const [y, m, d] = val.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      return (
+        dt.getUTCFullYear() === y &&
+        dt.getUTCMonth() === m - 1 &&
+        dt.getUTCDate() === d
+      );
+    },
+    { message: 'Datum existiert nicht (z.B. 2026-02-30)' },
+  );
+
+/** Hilfsfunktion: "HH:MM" → Minuten seit Mitternacht. */
+function timeStringToMinutes(t: string): number {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+}
+
+// ---------------------------------------------------------------------------
+// Slot (Bestand IT1/IT2 — DEPRECATED in IT3)
+// ---------------------------------------------------------------------------
+
 export const SlotPublicSchema = z.object({
   id: z.string(),
   startsAt: z.string().datetime({ offset: true }),
@@ -105,24 +128,10 @@ export const SlotPublicSchema = z.object({
 });
 export type SlotPublic = z.infer<typeof SlotPublicSchema>;
 
-/**
- * Body für POST /api/slots (Admin).
- *
- * Sanity-Checks (BUG-008):
- *   - startsAt >= now (mit kleiner Toleranz wegen Clock-Drift im Backend nochmal).
- *   - endsAt - startsAt >= 30 min, <= 12 h.
- *   - startsAt <= now + 365 Tage.
- *   - Überlappungs-Check geschieht serverseitig (nicht Zod-fähig, weil
- *     DB-Lookup nötig). Verstoß → 409 mit code `OVERLAP`.
- */
 export const CreateSlotSchema = z
   .object({
-    startsAt: z
-      .string()
-      .datetime({ offset: true, message: 'Startzeit muss ein gültiges ISO-8601-Datum sein' }),
-    endsAt: z
-      .string()
-      .datetime({ offset: true, message: 'Endzeit muss ein gültiges ISO-8601-Datum sein' }),
+    startsAt: z.string().datetime({ offset: true }),
+    endsAt: z.string().datetime({ offset: true }),
     description: z.string().max(500).optional().nullable(),
   })
   .superRefine((data, ctx) => {
@@ -131,71 +140,35 @@ export const CreateSlotSchema = z
     const now = Date.now();
 
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Ungültiges Datum',
-        path: ['startsAt'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Ungültiges Datum', path: ['startsAt'] });
       return;
     }
-
     if (end <= start) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Endzeit muss nach Startzeit liegen',
-        path: ['endsAt'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Endzeit muss nach Startzeit liegen', path: ['endsAt'] });
     }
-
     const durationMs = end.getTime() - start.getTime();
     const minMs = SLOT_MIN_DURATION_MINUTES * 60 * 1000;
     const maxMs = SLOT_MAX_DURATION_HOURS * 60 * 60 * 1000;
-
     if (durationMs < minMs) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Slot muss mindestens ${SLOT_MIN_DURATION_MINUTES} Minuten dauern`,
-        path: ['endsAt'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Slot muss mindestens ${SLOT_MIN_DURATION_MINUTES} Minuten dauern`, path: ['endsAt'] });
     }
-
     if (durationMs > maxMs) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Slot darf höchstens ${SLOT_MAX_DURATION_HOURS} Stunden dauern`,
-        path: ['endsAt'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Slot darf höchstens ${SLOT_MAX_DURATION_HOURS} Stunden dauern`, path: ['endsAt'] });
     }
-
     if (start.getTime() < now) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Startzeit muss in der Zukunft liegen',
-        path: ['startsAt'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Startzeit muss in der Zukunft liegen', path: ['startsAt'] });
     }
-
     const maxLeadMs = SLOT_MAX_LEAD_TIME_DAYS * 24 * 60 * 60 * 1000;
     if (start.getTime() > now + maxLeadMs) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Startzeit darf höchstens ${SLOT_MAX_LEAD_TIME_DAYS} Tage in der Zukunft liegen`,
-        path: ['startsAt'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Startzeit darf höchstens ${SLOT_MAX_LEAD_TIME_DAYS} Tage in der Zukunft liegen`, path: ['startsAt'] });
     }
   });
 export type CreateSlotInput = z.infer<typeof CreateSlotSchema>;
 
 // ---------------------------------------------------------------------------
-// Booking
+// Booking — Phone & Email-Härtung
 // ---------------------------------------------------------------------------
 
-/**
- * Telefon-Validierung (BUG-010).
- * - Erlaubte Zeichen: Ziffern, +, -, /, (, ), Leerzeichen.
- * - Mindestens 6 Ziffern nach Entfernen aller Trennzeichen.
- * - Max 40 Zeichen Gesamtlänge.
- */
 const PHONE_ALLOWED_CHARS = /^[+\d\s\-/()]+$/;
 const PHONE_MIN_DIGITS = 6;
 
@@ -210,15 +183,6 @@ const phoneSchema = z
     `Telefonnummer muss mindestens ${PHONE_MIN_DIGITS} Ziffern enthalten`,
   );
 
-/**
- * E-Mail-Schema mit Whitespace-Härtung (BUG US-04 Fix 2).
- *
- * `preprocess` trimmt vor der Validierung. Wenn der Trim-Output `''` ist,
- * wird der Wert auf `undefined` gemappt — wichtig, damit Browser-Autofill mit
- * Leerzeichen oder leere Default-Inputs nicht in Validierungsfehler laufen.
- *
- * In Iteration 2 ist E-Mail PFLICHT — daher das innere Schema ohne `.optional()`.
- */
 const customerEmailRequiredSchema = z.preprocess(
   (v) => {
     if (typeof v !== 'string') return v;
@@ -234,134 +198,230 @@ const customerEmailRequiredSchema = z.preprocess(
     .max(254, 'E-Mail-Adresse ist zu lang'),
 );
 
+// ---------------------------------------------------------------------------
+// Booking — IT3 (Date/Time-basiert) + IT1/IT2-Bestandsfeld slotId
+// ---------------------------------------------------------------------------
+
 /**
- * Body für POST /api/bookings (öffentlich, Kunde).
+ * Body für POST /api/bookings (öffentlich, Kunde) — Iteration 3.
  *
- * **Iteration 2: customerEmail ist Pflicht.** Begründung:
- *   - US-13 (Counter-Proposal) sendet einen Aktions-Link an den Kunden.
- *   - US-14 (Storno) ebenfalls.
- *   - Eingangsbestätigung an den Kunden braucht eine Adresse.
- *   - Ein einzelnes Pflichtfeld ist im MVP einfacher als zwei Code-Pfade
- *     (mit/ohne E-Mail). Trade-off: Kunden ohne E-Mail können online nicht
- *     buchen — sie sehen den tel:-Fallback prominent im Header der Seite.
+ * Modus 1 (NEU IT3, Standard für neue Buchungen):
+ *   - `date`, `startTime`, `endTime` sind Pflicht.
+ *   - `slotId` darf NICHT gesetzt sein (oder ist leer/undefined).
+ *
+ * Modus 2 (Bestand IT1/IT2, Re-Booking-Flow für alte Buchungen):
+ *   - `slotId` ist Pflicht.
+ *   - `date`, `startTime`, `endTime` dürfen NICHT gesetzt sein.
+ *
+ * Genau einer der beiden Modi muss erfüllt sein. Wird im superRefine geprüft.
+ *
+ * Für US-19 (`service === 'sonstiges'`): description muss ≥ 30 Zeichen sein.
+ *
+ * Für US-18: optionales `attachmentIds`-Array — Frontend lädt Dateien zuerst
+ * via `POST /api/upload` hoch, sammelt die zurückgegebenen IDs und schickt
+ * sie zusammen mit der Buchung. Backend verknüpft die `BookingAttachment`-
+ * Datensätze nach Insert mit der neuen Booking.
  */
-export const CreateBookingSchema = z.object({
-  slotId: z.string().min(1, 'Bitte wählen Sie ein Zeitfenster'),
-  customerName: z
-    .string()
-    .trim()
-    .min(2, 'Name muss mindestens 2 Zeichen haben')
-    .max(120, 'Name ist zu lang'),
-  customerPhone: phoneSchema,
-  customerEmail: customerEmailRequiredSchema,
-  service: ServiceSchema,
-  description: z
-    .string()
-    .trim()
-    .min(5, 'Bitte eine kurze Beschreibung angeben')
-    .max(2000, 'Beschreibung ist zu lang'),
-  // DSGVO: Pflicht-Checkbox im Formular, damit der Datenschutzhinweis
-  // aktiv bestätigt wird. Wird nicht in der DB persistiert.
-  privacyAccepted: z.literal(true, {
-    errorMap: () => ({ message: 'Bitte den Datenschutzhinweis bestätigen' }),
-  }),
-});
+export const CreateBookingSchema = z
+  .object({
+    // IT3-Modus:
+    date: DateStringSchema.optional(),
+    startTime: TimeStringSchema.optional(),
+    endTime: TimeStringSchema.optional(),
+
+    // Bestand IT1/IT2 (re-booking):
+    slotId: z.string().optional(),
+
+    customerName: z
+      .string()
+      .trim()
+      .min(2, 'Name muss mindestens 2 Zeichen haben')
+      .max(120, 'Name ist zu lang'),
+    customerPhone: phoneSchema,
+    customerEmail: customerEmailRequiredSchema,
+    service: ServiceSchema,
+    description: z
+      .string()
+      .trim()
+      .min(5, 'Bitte eine kurze Beschreibung angeben')
+      .max(2000, 'Beschreibung ist zu lang'),
+
+    // IT3 / US-18: Datei-Anhänge.
+    attachmentIds: z.array(z.string().min(1)).max(5, 'Maximal 5 Dateien').optional(),
+
+    privacyAccepted: z.literal(true, {
+      errorMap: () => ({ message: 'Bitte den Datenschutzhinweis bestätigen' }),
+    }),
+  })
+  .superRefine((data, ctx) => {
+    // Modus-Check: genau einer der beiden Modi.
+    const hasDateMode = !!(data.date && data.startTime && data.endTime);
+    const hasSlotMode = !!data.slotId;
+
+    if (!hasDateMode && !hasSlotMode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Bitte einen Termin auswählen (Datum + Uhrzeit).',
+        path: ['date'],
+      });
+      return;
+    }
+    if (hasDateMode && hasSlotMode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Entweder Slot ODER Datum/Uhrzeit, nicht beides.',
+        path: ['slotId'],
+      });
+      return;
+    }
+
+    if (hasDateMode) {
+      // endTime > startTime (lexikographisch + numerisch).
+      const startMin = timeStringToMinutes(data.startTime!);
+      const endMin = timeStringToMinutes(data.endTime!);
+      if (endMin <= startMin) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Endzeit muss nach Startzeit liegen',
+          path: ['endTime'],
+        });
+      }
+
+      // date in der Zukunft (Berlin-TZ-Datum-Vergleich).
+      // Hinweis: tagesgenauer Vergleich; das Backend führt zusätzlich
+      // einen Verfügbarkeitsfenster-Check durch.
+      const today = new Date();
+      const todayBerlin = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Berlin',
+      }).format(today); // "YYYY-MM-DD"
+      if (data.date! < todayBerlin) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Das gewählte Datum liegt in der Vergangenheit',
+          path: ['date'],
+        });
+      }
+    }
+
+    // US-19: Sonstiges-Service zwingt 30+ Zeichen Beschreibung.
+    if (data.service === CUSTOM_SERVICE_SLUG) {
+      if (data.description.length < CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Bei "Sonstiges" bitte mindestens ${CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH} Zeichen angeben.`,
+          path: ['description'],
+        });
+      }
+    }
+  });
 export type CreateBookingInput = z.infer<typeof CreateBookingSchema>;
 
 /**
- * Body für PATCH /api/bookings/:id (Admin) — bleibt auf CONFIRMED|REJECTED beschränkt.
+ * Form-Schema für `BookingForm.tsx` — wie CreateBookingSchema, aber ohne
+ * `date/startTime/endTime/slotId`. Diese Werte verwaltet die Komponente
+ * außerhalb von React-Hook-Form (im React-State), damit der Bug aus
+ * BUG_BOOKING_IT3.md (hidden Input + register) nicht erneut auftritt.
  *
- * State-Machine (Iteration 2 — siehe ARCHITECTURE.md §15):
- *   PENDING            → CONFIRMED | REJECTED          (über diesen Endpoint)
- *   PENDING            → COUNTER_PROPOSED              (eigener Endpoint, siehe unten)
- *   PENDING            → CANCELLED                     (Kunden-Token-Endpoint)
- *   CONFIRMED          → REJECTED                      (über diesen Endpoint)
- *   COUNTER_PROPOSED   → CONFIRMED | CANCELLED         (Kunden-Token-Endpoint)
- *   COUNTER_PROPOSED   → PENDING                       (Re-Booking-Flow)
- *
- * Idempotenz (gleicher Zielstatus wie Ist-Status → 200 OK, kein Update,
- * kein updatedAt-Bump) bleibt unverändert.
- *
- * COUNTER_PROPOSED → CONFIRMED auf einem Slot, der inzwischen anderweitig
- * aktiv gebucht ist, wird vom DB-Constraint verhindert → 409 CONFLICT.
+ * Beim Submit setzt die Komponente programmatisch die fehlenden Felder.
  */
+export const BookingFormSchema = z
+  .object({
+    customerName: z
+      .string()
+      .trim()
+      .min(2, 'Name muss mindestens 2 Zeichen haben')
+      .max(120, 'Name ist zu lang'),
+    customerPhone: phoneSchema,
+    customerEmail: customerEmailRequiredSchema,
+    service: ServiceSchema,
+    description: z
+      .string()
+      .trim()
+      .min(5, 'Bitte eine kurze Beschreibung angeben')
+      .max(2000, 'Beschreibung ist zu lang'),
+    privacyAccepted: z.literal(true, {
+      errorMap: () => ({ message: 'Bitte den Datenschutzhinweis bestätigen' }),
+    }),
+  })
+  .superRefine((data, ctx) => {
+    if (data.service === CUSTOM_SERVICE_SLUG) {
+      if (data.description.length < CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Bei "Sonstiges" bitte mindestens ${CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH} Zeichen angeben.`,
+          path: ['description'],
+        });
+      }
+    }
+  });
+export type BookingFormInput = z.infer<typeof BookingFormSchema>;
+
+// ---------------------------------------------------------------------------
+// PATCH /api/bookings/:id (Admin — CONFIRMED|REJECTED)
+// ---------------------------------------------------------------------------
+
 export const UpdateBookingStatusSchema = z.object({
   status: z.enum(['CONFIRMED', 'REJECTED']),
 });
 export type UpdateBookingStatusInput = z.infer<typeof UpdateBookingStatusSchema>;
 
-/**
- * Body für POST /api/bookings/:id/counter-proposal (Admin, Iteration 2 / US-13).
- *
- * Admin schlägt einen alternativen Slot vor. Verhalten:
- *   - Aktueller Status muss PENDING sein.
- *   - newSlotId muss ein anderer als der aktuelle slotId sein, existieren,
- *     nicht soft-deleted sein und keine aktive Buchung haben.
- *   - Booking wechselt auf COUNTER_PROPOSED, counterProposalSlotId wird gesetzt.
- *   - Mail-Versand an Kunden mit 3 Aktionslinks (siehe ARCHITECTURE.md §15).
- *   - Slot-Belegt-Status: COUNTER_PROPOSED zählt als belegt (siehe Partial Index).
- */
+// ---------------------------------------------------------------------------
+// Counter-Proposal & Rebooking & Token-Action (Iteration 2 — unverändert)
+// ---------------------------------------------------------------------------
+
 export const CounterProposalSchema = z.object({
   newSlotId: z.string().min(1, 'Bitte einen alternativen Slot angeben'),
 });
 export type CounterProposalInput = z.infer<typeof CounterProposalSchema>;
 
-/**
- * Query-Parameter für GET /api/bookings/respond?token=xxx&action=accept|cancel
- * (Iteration 2 / US-13/US-14).
- *
- * Öffentlich (kein Auth). Token ist die Authority.
- *
- * Aktionen:
- *   - accept: COUNTER_PROPOSED → CONFIRMED. slotId wird auf
- *     counterProposalSlotId gesetzt; counterProposalSlotId auf NULL.
- *     Mail an Tom (Bestätigung).
- *   - cancel: PENDING|COUNTER_PROPOSED → CANCELLED.
- *     Mail an Tom (Info).
- *
- * Re-Use eines Tokens nach finalem Status (CONFIRMED/REJECTED/CANCELLED) → 410 GONE.
- */
 export const TokenActionSchema = z.object({
   token: z.string().min(1, 'Token fehlt'),
   action: z.enum(['accept', 'cancel']),
 });
 export type TokenActionInput = z.infer<typeof TokenActionSchema>;
 
-/**
- * Body für POST /api/bookings/respond (POST-Variante, falls aus dem Browser
- * via Re-Booking-Flow ein neuer Slot gewählt wird; Iteration 2 / US-13 AC4).
- *
- * Wenn der Kunde im Counter-Proposal "Neuen Termin wählen" klickt, landet er
- * auf /buchung?rebookToken=xxx, wählt einen neuen Slot und drückt Submit.
- * Das Frontend ruft POST /api/bookings/rebook mit { token, newSlotId } auf:
- *   COUNTER_PROPOSED → PENDING, slotId = newSlotId, counterProposalSlotId = NULL.
- * Tom erhält Benachrichtigungs-Mail (US-13 AC4).
- */
 export const RebookingSchema = z.object({
   token: z.string().min(1, 'Token fehlt'),
   newSlotId: z.string().min(1, 'Bitte einen Slot auswählen'),
 });
 export type RebookingInput = z.infer<typeof RebookingSchema>;
 
+// ---------------------------------------------------------------------------
+// Booking — Admin-Antwort (erweitert in IT3)
+// ---------------------------------------------------------------------------
+
+export const BookingAttachmentSchema = z.object({
+  id: z.string(),
+  url: z.string().url(),
+  filename: z.string(),
+  contentType: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type BookingAttachment = z.infer<typeof BookingAttachmentSchema>;
+
 /**
- * Antwort für GET /api/bookings (Admin).
+ * Admin-Antwort für GET /api/bookings.
  *
- * mailSent / mailError: Sichtbarkeit über E-Mail-Reliability (BUG-002).
- * Frontend zeigt Bookings mit `mailSent === false` farblich markiert
- * (orange/rot) und blendet `mailError` als Tooltip ein.
- *
- * Iteration 2: cancelToken (für Resend-Action-Links im Admin-UI),
- * counterProposalSlot (eingebetteter Slot-Datensatz, falls vorhanden).
+ * Iteration 3:
+ *  - `slot` ist nullable (neue Buchungen haben keinen Slot).
+ *  - `date / startTime / endTime` für IT3-Buchungen.
+ *  - `attachments` für Datei-Anhänge (US-18).
  */
 export const BookingAdminSchema = z.object({
   id: z.string(),
-  slot: z.object({
-    id: z.string(),
-    startsAt: z.string().datetime({ offset: true }),
-    endsAt: z.string().datetime({ offset: true }),
-    description: z.string().nullable(),
-    deletedAt: z.string().datetime({ offset: true }).nullable(),
-  }),
+  slot: z
+    .object({
+      id: z.string(),
+      startsAt: z.string().datetime({ offset: true }),
+      endsAt: z.string().datetime({ offset: true }),
+      description: z.string().nullable(),
+      deletedAt: z.string().datetime({ offset: true }).nullable(),
+    })
+    .nullable(),
+  date: z.string().nullable(),
+  startTime: z.string().nullable(),
+  endTime: z.string().nullable(),
   customerName: z.string(),
   customerPhone: z.string(),
   customerEmail: z.string(),
@@ -379,32 +439,80 @@ export const BookingAdminSchema = z.object({
       description: z.string().nullable(),
     })
     .nullable(),
+  attachments: z.array(BookingAttachmentSchema),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type BookingAdmin = z.infer<typeof BookingAdminSchema>;
 
-// ---------------------------------------------------------------------------
-// Weekly Availability (Iteration 2 / US-15)
-// ---------------------------------------------------------------------------
-
-/** Antwort für GET /api/availability (öffentlich) und Eingabe für PUT /api/availability (Admin). */
-export const WeeklyAvailabilityDaySchema = z.object({
-  dayOfWeek: z
-    .number()
-    .int()
-    .min(0, 'Wochentag muss zwischen 0 (Sonntag) und 6 (Samstag) liegen')
-    .max(6, 'Wochentag muss zwischen 0 (Sonntag) und 6 (Samstag) liegen'),
-  isActive: z.boolean(),
+/**
+ * US-21: Übersicht bevorstehender bestätigter Termine im Admin-Dashboard.
+ * Reduzierte Form (kein customerPhone/Email/description), für die Liste.
+ */
+export const UpcomingBookingSchema = z.object({
+  id: z.string(),
+  date: z.string(),
+  startTime: z.string(),
+  endTime: z.string(),
+  customerName: z.string(),
+  service: ServiceSchema,
+  /** true, wenn das Datum dem heutigen Tag (Berlin-TZ) entspricht. */
+  isToday: z.boolean(),
 });
-export type WeeklyAvailabilityDay = z.infer<typeof WeeklyAvailabilityDaySchema>;
+export type UpcomingBooking = z.infer<typeof UpcomingBookingSchema>;
 
-/** Body für PUT /api/availability (Admin). */
-export const UpdateWeeklyAvailabilitySchema = z.object({
+// ---------------------------------------------------------------------------
+// Iteration 3 — AvailabilityTemplate (US-17)
+// ---------------------------------------------------------------------------
+
+const SLOT_DURATION_MIN_MINUTES = 15;
+const SLOT_DURATION_MAX_MINUTES = 480; // 8h
+export const AVAILABILITY_TEMPLATE_SLOT_DURATION_MIN = SLOT_DURATION_MIN_MINUTES;
+export const AVAILABILITY_TEMPLATE_SLOT_DURATION_MAX = SLOT_DURATION_MAX_MINUTES;
+
+/**
+ * Single Day in der AvailabilityTemplate.
+ * `startTime < endTime`, `slotDurationMinutes` muss in das Fenster passen
+ * (mind. ein Slot).
+ */
+export const AvailabilityTemplateDaySchema = z
+  .object({
+    dayOfWeek: z.number().int().min(0).max(6),
+    isActive: z.boolean(),
+    startTime: TimeStringSchema,
+    endTime: TimeStringSchema,
+    slotDurationMinutes: z
+      .number()
+      .int()
+      .min(SLOT_DURATION_MIN_MINUTES, `Mindestens ${SLOT_DURATION_MIN_MINUTES} Minuten`)
+      .max(SLOT_DURATION_MAX_MINUTES, `Höchstens ${SLOT_DURATION_MAX_MINUTES} Minuten`),
+  })
+  .superRefine((data, ctx) => {
+    const startMin = timeStringToMinutes(data.startTime);
+    const endMin = timeStringToMinutes(data.endTime);
+    if (endMin <= startMin) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Endzeit muss nach Startzeit liegen',
+        path: ['endTime'],
+      });
+    }
+    if (endMin - startMin < data.slotDurationMinutes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Das Verfügbarkeitsfenster muss mindestens einen Slot enthalten',
+        path: ['endTime'],
+      });
+    }
+  });
+export type AvailabilityTemplateDay = z.infer<typeof AvailabilityTemplateDaySchema>;
+
+/** Body für PUT /api/admin/availability-template (Bulk-Update). */
+export const UpdateAvailabilityTemplateSchema = z.object({
   days: z
-    .array(WeeklyAvailabilityDaySchema)
-    .min(1, 'Mindestens ein Wochentag erforderlich')
-    .max(7, 'Höchstens 7 Wochentage')
+    .array(AvailabilityTemplateDaySchema)
+    .min(1)
+    .max(7)
     .superRefine((days, ctx) => {
       const seen = new Set<number>();
       for (const d of days) {
@@ -418,33 +526,143 @@ export const UpdateWeeklyAvailabilitySchema = z.object({
       }
     }),
 });
-export type UpdateWeeklyAvailabilityInput = z.infer<typeof UpdateWeeklyAvailabilitySchema>;
+export type UpdateAvailabilityTemplateInput = z.infer<typeof UpdateAvailabilityTemplateSchema>;
 
 // ---------------------------------------------------------------------------
-// Calendar (Iteration 2 / US-16)
+// Iteration 3 — DayOverride (US-17)
+// ---------------------------------------------------------------------------
+
+export const DayOverrideSchema = z.object({
+  id: z.string(),
+  date: DateStringSchema,
+  isActive: z.boolean(),
+  startTime: TimeStringSchema.nullable(),
+  endTime: TimeStringSchema.nullable(),
+  reason: z.string().max(200).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type DayOverride = z.infer<typeof DayOverrideSchema>;
+
+/**
+ * Body für POST /api/admin/day-overrides.
+ *
+ * Wenn `isActive: false`, sind startTime/endTime irrelevant (Tag ist gesperrt).
+ * Wenn `isActive: true`, MÜSSEN startTime/endTime entweder beide null sein
+ * (= Template-Defaults nutzen) oder beide "HH:MM" mit endTime > startTime.
+ */
+export const CreateDayOverrideSchema = z
+  .object({
+    date: DateStringSchema,
+    isActive: z.boolean(),
+    startTime: TimeStringSchema.nullable().optional(),
+    endTime: TimeStringSchema.nullable().optional(),
+    reason: z.string().trim().max(200).optional().nullable(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.isActive) {
+      const hasStart = data.startTime != null;
+      const hasEnd = data.endTime != null;
+      if (hasStart !== hasEnd) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Wenn Zeiten gesetzt sind, müssen beide (Start & Ende) angegeben sein',
+          path: ['endTime'],
+        });
+      }
+      if (hasStart && hasEnd) {
+        if (timeStringToMinutes(data.endTime!) <= timeStringToMinutes(data.startTime!)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'Endzeit muss nach Startzeit liegen',
+            path: ['endTime'],
+          });
+        }
+      }
+    }
+  });
+export type CreateDayOverrideInput = z.infer<typeof CreateDayOverrideSchema>;
+
+/** Query für GET /api/admin/day-overrides?month=YYYY-MM. */
+export const DayOverrideMonthQuerySchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/, 'Monat muss im Format YYYY-MM sein'),
+});
+export type DayOverrideMonthQuery = z.infer<typeof DayOverrideMonthQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Iteration 3 — Verfügbare Zeitslots pro Tag (US-17)
 // ---------------------------------------------------------------------------
 
 /**
- * Ein einzelner Tag in der Kalenderansicht.
+ * Ein berechneter Buchungs-Block für GET /api/slots/available?date=YYYY-MM-DD.
  *
- * `available` ist die kombinierte Logik:
- *   available = WeeklyAvailability(weekday).isActive
- *               AND (kein CONFIRMED Slot an diesem Tag)
- *               AND (Datum > heute)
- *
- * `slotIds` ist die Liste der Slot-IDs, die an diesem Tag mindestens teilweise
- * liegen UND nicht soft-deleted sind UND keine aktive Buchung haben (oder
- * deren aktive Buchung den Tag freilässt — pragmatisch: Slots, die der Kunde
- * potentiell wählen kann).
+ * `available: false` ⇔ es gibt eine aktive Buchung auf diesem Block.
+ * Frontend rendert `available: true` als klickbar, `available: false` als
+ * ausgegraut.
  */
+export const AvailableTimeSlotSchema = z.object({
+  startTime: TimeStringSchema,
+  endTime: TimeStringSchema,
+  available: z.boolean(),
+});
+export type AvailableTimeSlot = z.infer<typeof AvailableTimeSlotSchema>;
+
+/** Antwort für GET /api/slots/available?date=YYYY-MM-DD. */
+export const AvailableSlotsResponseSchema = z.object({
+  date: DateStringSchema,
+  /** false = der ganze Tag ist gesperrt (Override oder Wochentag inaktiv). */
+  isDayActive: z.boolean(),
+  /** Nicht-leere Liste, wenn isDayActive=true; sonst leeres Array. */
+  slots: z.array(AvailableTimeSlotSchema),
+  /** Optional: Override-Reason (Urlaub etc.), falls Tag durch Override gesperrt. */
+  overrideReason: z.string().nullable().optional(),
+});
+export type AvailableSlotsResponse = z.infer<typeof AvailableSlotsResponseSchema>;
+
+/** Query für GET /api/slots/available. */
+export const AvailableSlotsQuerySchema = z.object({
+  date: DateStringSchema,
+});
+export type AvailableSlotsQuery = z.infer<typeof AvailableSlotsQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Iteration 2 (Bestand) — WeeklyAvailability
+// ---------------------------------------------------------------------------
+
+export const WeeklyAvailabilityDaySchema = z.object({
+  dayOfWeek: z.number().int().min(0).max(6),
+  isActive: z.boolean(),
+});
+export type WeeklyAvailabilityDay = z.infer<typeof WeeklyAvailabilityDaySchema>;
+
+export const UpdateWeeklyAvailabilitySchema = z.object({
+  days: z
+    .array(WeeklyAvailabilityDaySchema)
+    .min(1)
+    .max(7)
+    .superRefine((days, ctx) => {
+      const seen = new Set<number>();
+      for (const d of days) {
+        if (seen.has(d.dayOfWeek)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Wochentag ${d.dayOfWeek} ist doppelt enthalten` });
+        }
+        seen.add(d.dayOfWeek);
+      }
+    }),
+});
+export type UpdateWeeklyAvailabilityInput = z.infer<typeof UpdateWeeklyAvailabilitySchema>;
+
+// ---------------------------------------------------------------------------
+// Iteration 2 (Bestand) — Calendar
+// ---------------------------------------------------------------------------
+
 export const CalendarDaySchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Datum muss im Format YYYY-MM-DD sein'),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   available: z.boolean(),
   slotIds: z.array(z.string()),
 });
 export type CalendarDay = z.infer<typeof CalendarDaySchema>;
 
-/** Antwort für GET /api/calendar?year=YYYY&month=MM. */
 export const CalendarMonthSchema = z.object({
   year: z.number().int(),
   month: z.number().int().min(1).max(12),
@@ -452,43 +670,54 @@ export const CalendarMonthSchema = z.object({
 });
 export type CalendarMonth = z.infer<typeof CalendarMonthSchema>;
 
-/** Query-Parameter für GET /api/calendar. */
 export const CalendarQuerySchema = z.object({
-  year: z.coerce
-    .number()
-    .int()
-    .min(2025, 'Jahr muss >= 2025 sein')
-    .max(2100, 'Jahr ist außerhalb des Bereichs'),
+  year: z.coerce.number().int().min(2025).max(2100),
   month: z.coerce.number().int().min(1).max(12),
 });
 export type CalendarQueryInput = z.infer<typeof CalendarQuerySchema>;
 
 // ---------------------------------------------------------------------------
-// Auth (Login)
+// Iteration 3 — Datei-Upload (US-18)
 // ---------------------------------------------------------------------------
 
-/** Eingaben für NextAuth Credentials Provider (US-07) */
+export const UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
+export const UPLOAD_MAX_FILES_PER_BOOKING = 5;
+export const UPLOAD_ACCEPTED_CONTENT_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'video/mp4',
+  'video/quicktime', // .mov
+  'application/pdf',
+] as const;
+export type UploadContentType = (typeof UPLOAD_ACCEPTED_CONTENT_TYPES)[number];
+
+export const UploadResponseSchema = z.object({
+  /** Temporäre Attachment-ID, wird beim POST /api/bookings im `attachmentIds`-Array referenziert. */
+  attachmentId: z.string(),
+  url: z.string().url(),
+  filename: z.string(),
+  contentType: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+});
+export type UploadResponse = z.infer<typeof UploadResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Auth (Login + Setup) — unverändert
+// ---------------------------------------------------------------------------
+
 export const LoginSchema = z.object({
   email: z.string().trim().email('Bitte eine gültige E-Mail-Adresse angeben'),
   password: z.string().min(1, 'Passwort darf nicht leer sein'),
 });
 export type LoginInput = z.infer<typeof LoginSchema>;
 
-/**
- * Body für POST /api/admin/setup (Setup-Wizard, einmalig).
- *
- * Greift nur, wenn die `users`-Tabelle leer ist. Sobald ein User existiert,
- * antwortet der Endpoint mit 409 CONFLICT. Tom setzt sein Initial-Passwort
- * selbst — kein Engineer kennt es jemals.
- */
 export const AdminSetupSchema = z
   .object({
     email: z.string().trim().email('Bitte eine gültige E-Mail-Adresse angeben'),
-    name: z.string().trim().min(1, 'Name darf nicht leer sein').max(120),
-    password: z
-      .string()
-      .min(12, 'Passwort muss mindestens 12 Zeichen lang sein')
-      .max(200, 'Passwort ist zu lang'),
+    name: z.string().trim().min(1).max(120),
+    password: z.string().min(12).max(200),
     passwordConfirm: z.string(),
   })
   .refine((d) => d.password === d.passwordConfirm, {
@@ -502,23 +731,21 @@ export type AdminSetupInput = z.infer<typeof AdminSetupSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * Fehler-Codes (verbindlich für FE/BE-Vertrag).
+ * Iteration 3 — neue Fehlercodes:
+ *  - `PAYLOAD_TOO_LARGE` (413): Datei-Upload überschreitet Größenlimit (US-18).
+ *  - `UNSUPPORTED_MEDIA_TYPE` (415): Nicht erlaubter MIME-Type (US-18).
  *
- *  - VALIDATION_ERROR  400  Eingaben sind ungültig (Zod-Fehler).
- *  - UNAUTHORIZED      401  Keine oder ungültige Session.
- *  - FORBIDDEN         403  Eingeloggt, aber nicht berechtigt.
- *  - NOT_FOUND         404  Ressource existiert nicht.
- *  - CONFLICT          409  Slot bereits aktiv gebucht (BUG-001/006) oder
- *                            Status-Übergang nicht erlaubt.
- *  - OVERLAP           409  Neuer Slot überschneidet bestehenden Slot (BUG-008).
- *  - GONE              410  Token bereits verwendet / Booking in Endstatus
- *                            (Iteration 2 / US-13/US-14).
- *  - RATE_LIMITED      429  Rate-Limit überschritten.
- *  - MAIL_FAILED       —    Marker im Booking-Datensatz; nicht als HTTP-Antwort
- *                            bei POST /api/bookings (Buchung wird trotzdem
- *                            persistiert), sondern für Admin-Dashboard und
- *                            Resend-Trigger-Endpoints.
- *  - INTERNAL_ERROR    500  Unerwarteter Server-Fehler.
+ * Bestehende Codes (unverändert):
+ *  - VALIDATION_ERROR (400)
+ *  - UNAUTHORIZED (401)
+ *  - FORBIDDEN (403)
+ *  - NOT_FOUND (404)
+ *  - CONFLICT (409)
+ *  - OVERLAP (409)
+ *  - GONE (410)
+ *  - RATE_LIMITED (429)
+ *  - MAIL_FAILED (502)
+ *  - INTERNAL_ERROR (500)
  */
 export const ApiErrorSchema = z.object({
   error: z.object({
@@ -530,6 +757,8 @@ export const ApiErrorSchema = z.object({
       'CONFLICT',
       'OVERLAP',
       'GONE',
+      'PAYLOAD_TOO_LARGE',
+      'UNSUPPORTED_MEDIA_TYPE',
       'RATE_LIMITED',
       'MAIL_FAILED',
       'INTERNAL_ERROR',
