@@ -17,7 +17,22 @@ import type {
   CalendarMonth,
   CreateBookingInput,
   CreateDayOverrideInput,
+  CreatePaymentInput,
+  CreatePaymentSessionResponse,
+  CreateReviewInput,
+  CustomerBookingsResponse,
+  CustomerForgotPasswordInput,
+  CustomerLoginInput,
+  CustomerLoginResponse,
+  CustomerProfileUpdateInput,
+  CustomerRegisterInput,
+  CustomerResetPasswordInput,
+  CustomerUserPublic,
   DayOverride,
+  Payment,
+  PublicReview,
+  Review,
+  SessionStatus,
   SlotPublic,
   UpcomingBooking,
   UploadResponse,
@@ -38,6 +53,8 @@ export type ApiErrorCode =
   | 'GONE'
   | 'PAYLOAD_TOO_LARGE'
   | 'UNSUPPORTED_MEDIA_TYPE'
+  | 'EMAIL_NOT_VERIFIED'
+  | 'STRIPE_ERROR'
   | 'RATE_LIMITED'
   | 'MAIL_FAILED'
   | 'INTERNAL_ERROR'
@@ -228,13 +245,13 @@ export async function fetchBookings(params?: {
 
 export interface UpdateBookingResponse {
   id: string;
-  status: 'CONFIRMED' | 'REJECTED';
+  status: 'CONFIRMED' | 'REJECTED' | 'COMPLETED';
   updatedAt: string;
 }
 
 export async function updateBookingStatus(
   id: string,
-  status: 'CONFIRMED' | 'REJECTED',
+  status: 'CONFIRMED' | 'REJECTED' | 'COMPLETED',
 ): Promise<UpdateBookingResponse> {
   const res = await request<DataEnvelope<UpdateBookingResponse>>(
     `/api/bookings/${encodeURIComponent(id)}`,
@@ -559,5 +576,224 @@ export async function uploadFile(file: File): Promise<UploadResponse> {
     body: formData,
     rawBody: true,
   });
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 4 — Kunden-Auth (US-25)
+// ---------------------------------------------------------------------------
+
+export interface CustomerRegisterResponse {
+  id: string;
+  email: string;
+  emailVerified: boolean;
+  verificationMailSent: boolean;
+}
+
+export async function registerCustomer(
+  payload: CustomerRegisterInput,
+): Promise<CustomerRegisterResponse> {
+  const res = await request<DataEnvelope<CustomerRegisterResponse>>(
+    '/api/customer/register',
+    { method: 'POST', body: payload },
+  );
+  return res.data;
+}
+
+export async function loginCustomer(
+  payload: CustomerLoginInput,
+): Promise<CustomerLoginResponse> {
+  const res = await request<DataEnvelope<CustomerLoginResponse>>(
+    '/api/customer/login',
+    { method: 'POST', body: payload },
+  );
+  return res.data;
+}
+
+export async function logoutCustomer(): Promise<void> {
+  await request<DataEnvelope<{ loggedOut: boolean }>>('/api/customer/logout', {
+    method: 'POST',
+  });
+}
+
+/**
+ * Lädt das eingeloggte Kundenprofil.
+ *
+ * Liefert `null` wenn kein/abgelaufenes Cookie vorliegt — der Frontend-Code
+ * kann das als "nicht eingeloggt" interpretieren, ohne den Fehler an die
+ * UI weiterzureichen.
+ */
+export async function getCustomerMe(): Promise<CustomerUserPublic | null> {
+  try {
+    const res = await request<DataEnvelope<CustomerUserPublic>>('/api/customer/me');
+    return res.data;
+  } catch (err) {
+    if (err instanceof ApiClientError && err.status === 401) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+export async function updateCustomerProfile(
+  payload: CustomerProfileUpdateInput,
+): Promise<CustomerUserPublic> {
+  const res = await request<DataEnvelope<CustomerUserPublic>>('/api/customer/me', {
+    method: 'PATCH',
+    body: payload,
+  });
+  return res.data;
+}
+
+export async function forgotPassword(
+  payload: CustomerForgotPasswordInput,
+): Promise<void> {
+  await request<DataEnvelope<{ ok: boolean }>>('/api/customer/forgot-password', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function resetPassword(
+  payload: CustomerResetPasswordInput,
+): Promise<void> {
+  await request<DataEnvelope<{ ok: boolean }>>('/api/customer/reset-password', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function resendVerification(email: string): Promise<void> {
+  await request<DataEnvelope<{ ok: boolean }>>(
+    '/api/customer/resend-verification',
+    { method: 'POST', body: { email } },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 4 — Customer-Portal Bookings (US-26 / US-27)
+// ---------------------------------------------------------------------------
+
+export async function fetchCustomerBookings(
+  signal?: AbortSignal,
+): Promise<CustomerBookingsResponse> {
+  const res = await request<DataEnvelope<CustomerBookingsResponse>>(
+    '/api/customer/bookings',
+    { signal },
+  );
+  return res.data;
+}
+
+export interface CancelCustomerBookingResponse {
+  id: string;
+  status: 'CANCELLED';
+  cancelledAt: string;
+}
+
+export async function cancelCustomerBooking(
+  bookingId: string,
+): Promise<CancelCustomerBookingResponse> {
+  const res = await request<DataEnvelope<CancelCustomerBookingResponse>>(
+    `/api/customer/bookings/${encodeURIComponent(bookingId)}/cancel`,
+    { method: 'POST' },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 4 — Reviews (US-29)
+// ---------------------------------------------------------------------------
+
+export async function submitReview(
+  payload: CreateReviewInput,
+): Promise<Review> {
+  const res = await request<DataEnvelope<Review>>('/api/customer/reviews', {
+    method: 'POST',
+    body: payload,
+  });
+  return res.data;
+}
+
+export interface PublicReviewsResponse {
+  items: PublicReview[];
+  average: number;
+  total: number;
+}
+
+export async function fetchPublicReviews(
+  limit = 20,
+  signal?: AbortSignal,
+): Promise<PublicReviewsResponse> {
+  const safe = Math.max(1, Math.min(100, limit));
+  const res = await request<DataEnvelope<PublicReviewsResponse>>(
+    `/api/reviews?limit=${safe}`,
+    { signal },
+  );
+  return res.data;
+}
+
+export async function fetchAdminReviews(
+  signal?: AbortSignal,
+): Promise<Review[]> {
+  const res = await request<DataEnvelope<Review[]>>('/api/admin/reviews', {
+    signal,
+  });
+  return res.data;
+}
+
+export async function updateReviewApproval(
+  reviewId: string,
+  approved: boolean,
+): Promise<Review> {
+  const res = await request<DataEnvelope<Review>>(
+    `/api/admin/reviews/${encodeURIComponent(reviewId)}`,
+    { method: 'PATCH', body: { approved } },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 4 — Payments (US-28)
+// ---------------------------------------------------------------------------
+
+export async function createPaymentRequest(
+  bookingId: string,
+  payload: CreatePaymentInput,
+): Promise<Payment> {
+  const res = await request<DataEnvelope<Payment>>(
+    `/api/admin/bookings/${encodeURIComponent(bookingId)}/payment`,
+    { method: 'POST', body: payload },
+  );
+  return res.data;
+}
+
+export async function deletePaymentRequest(bookingId: string): Promise<void> {
+  await request<void>(
+    `/api/admin/bookings/${encodeURIComponent(bookingId)}/payment`,
+    { method: 'DELETE' },
+  );
+}
+
+export async function createPaymentSession(
+  bookingId: string,
+  cancelToken?: string,
+): Promise<CreatePaymentSessionResponse> {
+  const body: { bookingId: string; cancelToken?: string } = { bookingId };
+  if (cancelToken) body.cancelToken = cancelToken;
+  const res = await request<DataEnvelope<CreatePaymentSessionResponse>>(
+    '/api/payments/create-session',
+    { method: 'POST', body },
+  );
+  return res.data;
+}
+
+export async function fetchPaymentSessionStatus(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SessionStatus> {
+  const res = await request<DataEnvelope<SessionStatus>>(
+    `/api/payments/session-status?session_id=${encodeURIComponent(sessionId)}`,
+    { signal },
+  );
   return res.data;
 }

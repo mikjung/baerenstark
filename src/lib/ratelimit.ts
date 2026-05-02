@@ -72,6 +72,36 @@ export const bookingLimiter = makeLimiter(60 * 60, 10, 'rl:booking');
 // Wir nutzen das engere Limit, das im Aufgaben-Brief vorgegeben wurde.
 export const uploadLimiter = makeLimiter(60, 10, 'rl:upload');
 
+// ---------------------------------------------------------------------------
+// Iteration 4 — Customer-Auth + Payments (siehe api-routes.md §20)
+// ---------------------------------------------------------------------------
+
+// 5 Registrierungen / 60 min / IP (siehe §11).
+export const customerRegisterLimiter = makeLimiter(60 * 60, 5, 'rl:cust-reg');
+
+// 10 Login-Versuche / 15 min / IP (siehe §11). Aufgaben-Brief sagt 5/15min;
+// api-routes.md §20 sagt 10/15min — wir folgen der API-Spec.
+export const customerLoginLimiter = makeLimiter(15 * 60, 10, 'rl:cust-login');
+
+// 3 Forgot/Resend / 60 min / IP.
+export const customerSensitiveActionLimiter = makeLimiter(
+  60 * 60,
+  3,
+  'rl:cust-sensitive',
+);
+
+// 5 Reset-Versuche / 60 min / IP.
+export const customerResetLimiter = makeLimiter(60 * 60, 5, 'rl:cust-reset');
+
+// 5 Reviews / 60 min / Customer (per customerId).
+export const customerReviewLimiter = makeLimiter(60 * 60, 5, 'rl:cust-review');
+
+// 20 Stripe-Session-Erstellungen / 60 min / IP.
+export const paymentSessionLimiter = makeLimiter(60 * 60, 20, 'rl:pay-session');
+
+// 60 Session-Status-Polls / 5 min / IP.
+export const paymentStatusLimiter = makeLimiter(5 * 60, 60, 'rl:pay-status');
+
 /**
  * Liefert die anfragende IP aus den üblichen Vercel-Headern.
  * Fallback: 'unknown' (alle Anfragen ohne Header werden gemeinsam gezählt —

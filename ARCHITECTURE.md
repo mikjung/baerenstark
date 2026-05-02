@@ -1,8 +1,63 @@
 # Architektur — Bärenstark Hausservice Website
 
-**Version:** 1.3 (Iteration 3 — Verfügbarkeitsfenster, Datei-Upload, Preise, Reviews, Popups, Kunden-Mails)
+**Version:** 1.4.1 (Iteration 4 Revision — QA-Fixes BUG-401/402, MAJOR-401–405)
 **Stand:** 2026-05-02
 **Autor:** Solution Architect
+
+---
+
+## Änderungslog v1.4.1 (Iteration 4 — QA-Revision)
+
+Auslöser: QA-Design-Review zu Iteration 4 (siehe `QA_DESIGN_REVIEW.md`,
+Abschnitt "Iteration 4 Design Review"). 2 kritische und 5 wichtige
+Defekte wurden vor dem Code-Build im Design behoben. Schema-Änderung
+ist auf 1 neues Feld beschränkt; alle anderen Findings werden durch
+Spec-Klarstellungen + 1 neuen öffentlichen Endpoint adressiert.
+
+| ID         | Severity | Bereich         | Fix-Strategie                                                                                                                                  |
+| ---------- | -------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| BUG-401    | Critical | Schema / Auth   | Neues Feld `CustomerUser.verificationTokenExpiry DateTime?`. Wird bei Registrierung UND `resend-verification` auf `now + 24h` gesetzt. Verify prüft gegen diese Spalte. |
+| BUG-402    | Critical | API / Profil    | E-Mail-Änderung im MVP NICHT erlaubt. `CustomerProfileUpdateSchema` ist `.strict()` und akzeptiert nur firstName/lastName/phone. Pending-Email-Mechanismus bleibt Backlog (IT5). |
+| MAJOR-401  | Major    | Backend / Time  | Storno-Frist wird in Berlin-Zeitzone berechnet. `parseBerlinDateTime()` interpretiert die Wall-Clock korrekt und liefert UTC — DST-fest dokumentiert in §17.7. |
+| MAJOR-402  | Major    | API / FE        | Neuer öffentlicher Endpoint `GET /api/payments/session-status?session_id=...`. Erfolgsseite polled diesen Endpoint (max 5×, 1s Intervall) — Gäste-tauglich. |
+| MAJOR-403  | Major    | Schema / API    | `Review.customerName` bleibt KEIN DB-Feld. Backend leitet ihn live aus dem Customer-Join ab (`firstName + lastName[0] + '.'`); Fallback `"Anonym"` bei null-Kunde. |
+| MAJOR-404  | Major    | Backend / Logic | `isCancellable()` ist null-fest: für Bestandsbuchungen (Slot-basiert ohne `date`) wird `slot.startsAt` herangezogen. Buchungen ohne bekannten Termin → `true` (Server-Authority gilt). |
+| MAJOR-405  | Major    | Sicherheit / FE | `redirectUrl` (im POST-Body) bzw. `callbackUrl` (Query) wird via `safeCustomerCallback()` validiert: nur relative Pfade ohne Protokoll/Host. Sonst Fallback `/konto`. |
+
+Detaillierte Fix-Spezifikation: §17.1 (Auth + Profile), §17.4 (Stripe-Status-Endpoint), §17.5 (Mail-Templates verändert), §17.7 (Sicherheits-Aspekte).
+
+Schema-Migration: 1 ALTER TABLE auf `customer_users` (neue Spalte `verification_token_expiry DATETIME NULL`). Kein Backfill nötig — bestehende unverifizierte Konten erhalten beim nächsten `resend-verification` einen frischen Wert; eine 24h+alte Mail bleibt ungültig (gewünschtes Verhalten).
+
+---
+
+## Änderungslog v1.4 (Iteration 4)
+
+Auslöser: Iteration-4-Stories US-25 bis US-29. Diese Version dokumentiert
+das neue Kundenportal mit eigener Auth-Mechanik, die Stripe-basierte
+Zahlungsabwicklung, das echte Backend für Kundenbewertungen und den
+neuen Booking-Status `COMPLETED`.
+
+| ID                | Bereich       | Erweiterung / Fix                                                                                |
+| ----------------- | ------------- | ------------------------------------------------------------------------------------------------ |
+| US-25 Datenmodell | Schema        | Neue Tabelle `customer_users` mit eigenem Cookie `customer-session` (JWT, 7d). Vollständig getrennt vom Admin-`User`. |
+| US-25 API         | Endpunkte     | 9 neue Endpunkte unter `/api/customer/*` (register/login/logout/me/verify/resend-verification/forgot-password/reset-password). |
+| US-25 Mail        | Templates     | 2 neue Templates: `customerVerificationMail`, `customerPasswordResetMail`. (`customerEmailChangedMail` war ursprünglich geplant, wurde in v1.4.1 entfernt — siehe BUG-402.) |
+| US-25 Middleware  | Routing       | `/konto/*` (außer Public-Whitelist) prüft `customer-session`-Cookie. Edge-sicher (nur Cookie-Existenz, JWT-Verify im Handler). |
+| US-26 Datenmodell | Schema        | `Booking.customerId` (FK → customer_users, ON DELETE SET NULL). Backfill-Strategie: keine — Gastbuchungen bleiben sichtbar nur für Tom. |
+| US-26 API         | Endpunkte     | `GET /api/customer/bookings` (Split upcoming/past), `GET /api/customer/bookings/:id`. |
+| US-27 API         | Endpunkte     | `POST /api/customer/bookings/:id/cancel` mit serverseitigem 24h-Frist-Check. |
+| US-28 Stack       | Stack         | **Stripe** als Zahlungs-Provider (deckt Karte, PayPal, Apple Pay, Google Pay über Checkout-Sessions). Alternativen verworfen — siehe §17.4. |
+| US-28 Datenmodell | Schema        | Neue Tabelle `payments` (1:1 zu Booking). Beträge in Cents (Int). |
+| US-28 API         | Endpunkte     | `POST /api/admin/bookings/:id/payment` (Admin), `DELETE /api/admin/bookings/:id/payment` (Admin), `POST /api/payments/create-session`, `POST /api/payments/webhook` (Stripe). |
+| US-28 Mail        | Templates     | 4 neue Templates: `paymentRequestToCustomer`, `paymentReceivedToCustomer`, `paymentReceivedToAdmin`, `paymentRefundedToCustomer`. |
+| US-29 Datenmodell | Schema        | Neue Tabelle `reviews` mit Admin-Freigabe-Mechanismus (`approved` boolean). 1:1 zu Booking, optional zu CustomerUser. |
+| US-29 API         | Endpunkte     | `POST /api/customer/reviews`, `GET /api/reviews` (öffentlich, nur approved), `GET /api/admin/reviews`, `PATCH /api/admin/reviews/:id`. |
+| US-29 Status      | State-Machine | `BookingStatus.COMPLETED` neu — Tom markiert Termin nach Erbringung als abgeschlossen, was Bewertungs-Button im Portal freischaltet. |
+| US-29 Frontend    | UI            | `lib/reviews.ts` (statisch, IT3) wird ersetzt durch `GET /api/reviews`-Aufruf — sobald ≥4 approved Reviews vorhanden sind. |
+| Neue ENV          | Operational   | `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`. `AUTH_SECRET` (alias `NEXTAUTH_SECRET`) wird wiederverwendet für Customer-JWT-Signing. |
+| Neue Fehlercodes  | API           | `EMAIL_NOT_VERIFIED` (422), `STRIPE_ERROR` (502).                                                |
+
+Detaillierte Iteration-4-Spezifikation: siehe **§17** in diesem Dokument.
 
 ---
 
@@ -1922,3 +1977,828 @@ WHERE NOT EXISTS (SELECT 1 FROM availability_template WHERE day_of_week = d.day_
 | US-22 | `lib/reviews.ts` mit 10 statischen Datensätzen; `<ReviewSection>` auf Startseite.                                         |
 | US-23 | `<ServiceModal>` mit Vorher/Nachher, Inhalt aus `services.ts.details`.                                                    |
 | US-24 | `bookingConfirmationToCustomer` + `bookingRejectionToCustomer` in `lib/mail.ts`; Trigger im `PATCH /api/bookings/:id`.    |
+
+---
+
+## 17. Iteration 4 — Detail-Spec (US-25 bis US-29)
+
+Iteration 4 ist die bisher umfangreichste Iteration. Sie führt drei
+voneinander entkoppelte Subsysteme ein:
+
+1. **Kunden-Auth & Portal** (US-25, US-26, US-27) — eigene Auth-Mechanik
+   neben NextAuth-Admin, ohne dass eines das andere beeinflusst.
+2. **Stripe-Zahlungen** (US-28) — externer Payment-Provider, integriert
+   via Checkout-Sessions + Webhook.
+3. **Bewertungs-Backend** (US-29) — Admin-moderierte Reviews ersetzen
+   die statische Liste aus IT3.
+
+Verbindendes Element: der neue Booking-Status `COMPLETED` schaltet den
+Bewertungs-Flow frei und kann optional Voraussetzung für die endgültige
+Zahlungs-Quittung sein (im MVP nicht erzwungen — Tom kann Zahlung schon
+vor COMPLETED hinterlegen).
+
+### 17.1 Kunden-Auth-Architektur (US-25)
+
+#### Entscheidung: Eigenes JWT-Cookie vs. zweite NextAuth-Instanz
+
+**Gewählt: Eigenes JWT-Cookie `customer-session`.**
+
+Begründung:
+
+- NextAuth v5 unterstützt zwar mehrere Provider, aber die Trennung von
+  zwei voneinander unabhängigen User-Tabellen (Admin vs. Kunde) führt
+  zu Komplexität in `auth.config.ts` (verschiedene `pages.signIn`-
+  Routen, getrennte Callbacks, Session-Cookie-Namensraum).
+- Eine eigene, leichtgewichtige JWT-Session ist ~150 Zeilen Code
+  (Cookie setzen / lesen / löschen + JWT-Sign/Verify). Sie hat:
+  - keine Auswirkung auf das bestehende Admin-Auth (BUG-005-Härtung
+    bleibt unverändert),
+  - einen eigenen Cookie-Namen (`customer-session`),
+  - identische Sicherheits-Eigenschaften (httpOnly, Secure, SameSite=Lax).
+- Beide Sessions können parallel im selben Browser existieren — ein
+  CustomerUser, der zufällig auch Admin ist (Tom?), kann sich in beide
+  Bereiche einloggen.
+
+#### Helper-Funktionen (`src/lib/customer-auth.ts`)
+
+```ts
+// Pseudocode
+import { SignJWT, jwtVerify } from 'jose';
+import { cookies } from 'next/headers';
+
+const SECRET = new TextEncoder().encode(
+  process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET!,
+);
+const COOKIE_NAME = 'customer-session';
+const MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 Tage
+
+export interface CustomerSession {
+  customerId: string;
+  email: string;
+}
+
+export async function createCustomerSession(
+  payload: CustomerSession,
+): Promise<string> {
+  return new SignJWT({ ...payload })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime(`${MAX_AGE_SECONDS}s`)
+    .sign(SECRET);
+}
+
+export function setCustomerSessionCookie(token: string) {
+  cookies().set(COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: MAX_AGE_SECONDS,
+  });
+}
+
+export function clearCustomerSessionCookie() {
+  cookies().delete(COOKIE_NAME);
+}
+
+export async function readCustomerSession(): Promise<CustomerSession | null> {
+  const token = cookies().get(COOKIE_NAME)?.value;
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, SECRET);
+    return { customerId: String(payload.customerId), email: String(payload.email) };
+  } catch {
+    return null;
+  }
+}
+
+/** Variante für Edge-Middleware (cookie-only — kein DB-Lookup). */
+export async function readCustomerSessionFromRequest(
+  req: NextRequest,
+): Promise<CustomerSession | null> { /* gleiche Logik mit req.cookies */ }
+```
+
+**Wichtig — Edge vs. Node:** Die Middleware (Edge-Runtime) darf nur
+`jose` (ESM, edge-kompatibel) und keinen Prisma-Client importieren. Sie
+prüft **nur** die JWT-Validität (Signatur + exp). Tieferer DB-Check
+(z.B. emailVerified) erfolgt im Route-Handler.
+
+#### Middleware-Erweiterung (`src/middleware.ts`)
+
+Die bestehende Middleware schützt nur `/admin/*`. Iteration 4 ergänzt
+einen zweiten Matcher für `/konto/*`:
+
+```ts
+// Pseudocode (vereinfacht — Engineers fassen die zwei matcher in einer
+// einzigen Middleware-Funktion zusammen).
+import { authConfig } from '@/lib/auth.config';
+import { readCustomerSessionFromRequest } from '@/lib/customer-auth';
+
+const PUBLIC_KONTO_PATHS = [
+  '/konto/login',
+  '/konto/registrieren',
+  '/konto/passwort-vergessen',
+  '/konto/passwort-zuruecksetzen',
+  '/konto/verifizieren',
+];
+
+export default async function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+
+  // /admin/* — bestehende Logik
+  if (pathname.startsWith('/admin')) { /* unverändert */ }
+
+  // /konto/* — IT4
+  if (pathname.startsWith('/konto')) {
+    // /konto/zahlung/:id ist öffentlich, wenn ?token=cancelToken vorhanden
+    // ist — sonst Login-Pflicht.
+    if (pathname.startsWith('/konto/zahlung/')) {
+      const token = req.nextUrl.searchParams.get('token');
+      if (token) return NextResponse.next();
+    }
+    if (PUBLIC_KONTO_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
+      return NextResponse.next();
+    }
+    const session = await readCustomerSessionFromRequest(req);
+    if (session) return NextResponse.next();
+    const loginUrl = new URL('/konto/login', req.nextUrl.origin);
+    loginUrl.searchParams.set('callbackUrl', pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ['/admin/:path*', '/konto/:path*'],
+};
+```
+
+#### Sicherheits-Praktiken (Kunden-Auth)
+
+- **Passwort-Hashing:** bcrypt cost 10 (gleich wie Admin).
+- **Login-Fehler:** generische Message — keine Auskunft, ob E-Mail
+  existiert (BUG-005-Pattern wiederverwendet, inkl. konstanter
+  bcrypt-Last gegen Timing-Angriff).
+- **Verifikations-Pflicht:** Login mit `emailVerified: false` schlägt
+  mit 422 fehl. Konto kann erst nach Verifikation genutzt werden.
+- **Token-Ablauf (BUG-401-Fix v1.4.1):**
+  - `verificationToken`: 24h, geprüft via dedizierter Spalte
+    `verificationTokenExpiry DateTime?`. Bei Registrierung UND bei
+    `POST /api/customer/resend-verification` wird das Feld gesetzt
+    auf `now + 24h`. Verify-Endpoint prüft `verificationTokenExpiry > now`.
+    Engineers-Hinweis: NICHT mehr `createdAt` für die Ablauf-Prüfung
+    nutzen — das ist das Symptom, das BUG-401 ausgelöst hat.
+  - `resetToken`: 1h (`resetTokenExpiry`).
+- **Profil-E-Mail-Änderung (BUG-402-Fix v1.4.1):**
+  - Im MVP **nicht erlaubt**. `CustomerProfileUpdateSchema` ist
+    `.strict()` und akzeptiert nur firstName/lastName/phone. Versuche,
+    `email` zu setzen, geben 400 `VALIDATION_ERROR` zurück.
+  - Begründung: Eine echte E-Mail-Änderung erfordert einen Pending-
+    State-Mechanismus (`pendingEmail`, `pendingEmailToken`,
+    `pendingEmailTokenExpiry`), damit der Login unter der alten
+    Adresse bedienbar bleibt, bis die neue verifiziert ist. Diese
+    drei Spalten + Verify-Endpoint sind Backlog (IT5, eigene Story).
+  - Frontend-Verhalten: Profil-Form zeigt das `email`-Feld read-only
+    mit Hinweistext: "E-Mail-Adresse kann derzeit nicht selbst geändert
+    werden. Bitte wenden Sie sich an unser Team."
+  - Engineers-Hinweis: Tom kann im Notfall (z.B. Tippfehler bei
+    Registrierung) eine E-Mail manuell via Prisma Studio korrigieren.
+- **Enumeration-Schutz:** `forgot-password` und `resend-verification`
+  antworten **immer** 200, unabhängig von Konto-Existenz.
+- **Brute-Force:** Rate-Limits via Upstash (siehe API-Spec §20).
+- **CSRF:** Da wir SameSite=Lax und JSON-Bodies nutzen, ist CSRF für
+  POST-Endpunkte automatisch entschärft. Engineers sollten KEIN
+  Form-Submit (multipart) für Customer-Endpunkte nutzen (außer Upload,
+  der keine Auth-Aktion ist).
+- **Open-Redirect-Schutz für Login (MAJOR-405-Fix v1.4.1):**
+  - `POST /api/customer/login` akzeptiert ein optionales `redirectUrl`
+    im Body. Middleware setzt es als `?callbackUrl=<pathname>` beim
+    Login-Redirect.
+  - Beide Werte werden vor Verwendung durch
+    `safeCustomerCallback(input)` (in `src/lib/customer-auth.ts`)
+    validiert:
+
+```ts
+/**
+ * Akzeptiert NUR relative Pfade ohne Protokoll/Host.
+ * Liefert bei Verstoß den Default '/konto'.
+ *
+ * Verworfen wird:
+ *   - Strings ohne führendes '/' ('konto' → fail)
+ *   - Protokoll-relative URLs ('//evil.example/login' → fail)
+ *   - URLs mit Schema (':' oder '\\' enthalten → fail)
+ *   - Strings mit Whitespace
+ *   - Externe Origins (URL-Parse → host !== '')
+ */
+export function safeCustomerCallback(input: unknown): string {
+  const FALLBACK = '/konto';
+  if (typeof input !== 'string' || input.length === 0) return FALLBACK;
+  if (!input.startsWith('/')) return FALLBACK;
+  if (input.startsWith('//')) return FALLBACK;       // protocol-relative
+  if (/[:\\\s]/.test(input)) return FALLBACK;        // scheme/backslash/whitespace
+  if (input.length > 512) return FALLBACK;           // sanity
+  return input;
+}
+```
+
+  - Wirkungs-Punkte:
+    1. `POST /api/customer/login` — Backend validiert `redirectUrl`
+       (Body) und gibt den geprüften Wert in `data.redirectUrl` zurück.
+    2. `LoginForm.tsx` — vor `router.push()` validieren, falls
+       Frontend zusätzlich aus der Query liest.
+    3. Middleware — `loginUrl.searchParams.set('callbackUrl', pathname)`
+       schreibt eingehende Pfade weiter, validiert wird beim Login.
+  - Engineers-Hinweis: Der Helper-Test (`safeCustomerCallback`) ist
+    Pflicht-Unit-Test im Test-Plan §17.8 (mit den oben genannten
+    Failure-Cases als Negative-Cases).
+
+### 17.2 Datenmodell-Änderungen IT4
+
+#### Neue Tabellen
+
+| Tabelle         | Zweck                                                                               | Schema-Detail                                                                     |
+| --------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `customer_users`| Kunden-Account (US-25).                                                             | id, email (UNIQUE), password_hash, first_name, last_name, phone?, email_verified, verification_token (UNIQUE), reset_token (UNIQUE), reset_token_expiry, created_at, updated_at. |
+| `payments`      | Stripe-Zahlung 1:1 zu Booking (US-28).                                              | id, booking_id (UNIQUE), stripe_session_id (UNIQUE), amount (Cents), currency, description, status, paid_at, created_at, updated_at. |
+| `reviews`       | Kundenbewertung 1:1 zu Booking (US-29).                                             | id, customer_id?, booking_id (UNIQUE), stars (1–5), text?, approved, created_at, updated_at. |
+
+#### Neue Felder an `bookings`
+
+| Feld           | Typ      | Constraints                                                  | Bemerkung                                            |
+| -------------- | -------- | ------------------------------------------------------------ | ---------------------------------------------------- |
+| `customer_id`  | TEXT     | NULL, FK → customer_users.id ON DELETE SET NULL, INDEX       | Verknüpfung zum Kundenkonto (Gastbuchung = NULL).    |
+
+#### Status-Erweiterung
+
+`BookingStatus` erhält den neuen Wert `COMPLETED`. CHECK-Constraint in
+`schema.sql` entsprechend erweitert. Prisma-Enum-Eintrag ebenso.
+
+#### Migration (Prisma)
+
+```bash
+prisma migrate dev --name iteration4_customer_portal_payments_reviews
+```
+
+Migrationsschritte (Engineers):
+
+1. `customer_users`-Tabelle anlegen.
+2. `bookings.customer_id` als nullable Spalte mit FK ergänzen.
+3. `bookings.status`-CHECK aktualisieren (`COMPLETED` zusätzlich erlaubt).
+   Prisma erzeugt das automatisch aus dem Enum; SQLite erfordert ggf.
+   ein manuelles Recreate-Pattern (Engineers prüfen Prisma-Output).
+4. `payments`-Tabelle anlegen.
+5. `reviews`-Tabelle anlegen.
+6. Indexe anlegen (siehe `schema.sql`).
+
+**Datenmigration:** Keine Backfill nötig. Bestehende Buchungen behalten
+`customer_id = NULL` (Gastbuchungen).
+
+### 17.3 Frontend-Architektur Iteration 4
+
+#### Neue Pages
+
+```
+src/app/
+├── konto/
+│   ├── layout.tsx                       # Kunden-Header + Footer
+│   ├── login/page.tsx                   # US-25 AC3
+│   ├── registrieren/page.tsx            # US-25 AC1
+│   ├── passwort-vergessen/page.tsx      # US-25 AC5
+│   ├── passwort-zuruecksetzen/page.tsx  # US-25 AC6 (?token=...)
+│   ├── verifizieren/page.tsx            # US-25 AC2 (?token=...)
+│   ├── page.tsx                         # Auftragsübersicht (US-26)
+│   ├── auftrag/[id]/page.tsx            # Detail (US-26 AC4, US-27, US-29)
+│   ├── profil/page.tsx                  # Profil-Update (US-25 AC10)
+│   └── zahlung/
+│       ├── [bookingId]/page.tsx         # Stripe-Checkout-Auslöser (US-28)
+│       └── erfolg/page.tsx              # Stripe-Redirect-Ziel (?session_id=...)
+└── admin/
+    └── reviews/page.tsx                 # NEU IT4 — Bewertungs-Moderation (US-29)
+```
+
+#### Neue Komponenten
+
+| Pfad                                             | Status   | Zweck                                                                |
+| ------------------------------------------------ | -------- | -------------------------------------------------------------------- |
+| `components/customer/CustomerHeaderMenu.tsx`     | NEU      | Header-Menü mit Logout-Button, Profil-Link.                          |
+| `components/customer/RegisterForm.tsx`           | NEU      | Registrierungs-Formular.                                             |
+| `components/customer/LoginForm.tsx`              | NEU      | Login-Formular.                                                      |
+| `components/customer/ForgotPasswordForm.tsx`     | NEU      |                                                                       |
+| `components/customer/ResetPasswordForm.tsx`      | NEU      |                                                                       |
+| `components/customer/CustomerBookingsList.tsx`   | NEU      | Liste mit Tabs "Bevorstehend"/"Vergangen".                           |
+| `components/customer/BookingDetailCard.tsx`      | NEU      | Detail-Anzeige inkl. Status-Badge.                                   |
+| `components/customer/CancelBookingButton.tsx`    | NEU      | Confirm-Dialog + POST `/api/customer/bookings/:id/cancel`.           |
+| `components/customer/ReviewForm.tsx`             | NEU      | 5-Sterne-Picker + Textarea.                                           |
+| `components/customer/StripeCheckoutButton.tsx`   | NEU      | "Mit PayPal/Karte/Apple Pay/Google Pay bezahlen" → POST create-session. |
+| `components/admin/PaymentEditor.tsx`             | NEU      | Modal: Betrag in Euro eingeben, in Cents umrechnen, POST.            |
+| `components/admin/ReviewModerationTable.tsx`     | NEU      | Reviews mit Approve/Reject-Buttons.                                  |
+| `components/home/ReviewSection.tsx`              | UMGEBAUT | Liest jetzt von `GET /api/reviews`; Fallback auf statische Daten falls < 4 approved. |
+
+#### API-Client-Erweiterungen (`src/lib/api-client.ts`)
+
+```ts
+// Neue Funktionen (Auswahl):
+export async function customerRegister(input: CustomerRegisterInput): Promise<...>;
+export async function customerLogin(input: CustomerLoginInput): Promise<CustomerUserPublic>;
+export async function customerLogout(): Promise<void>;
+export async function fetchMe(): Promise<CustomerUserPublic | null>;
+export async function fetchMyBookings(): Promise<CustomerBookingsResponse>;
+export async function cancelMyBooking(id: string): Promise<...>;
+export async function createPaymentSession(bookingId: string, cancelToken?: string): Promise<{ url: string }>;
+export async function createReview(input: CreateReviewInput): Promise<Review>;
+export async function fetchPublicReviews(limit?: number): Promise<{ items: PublicReview[]; average: number; total: number }>;
+```
+
+### 17.4 Stripe-Integration Architektur (US-28)
+
+#### Stack-Entscheidung: Stripe Checkout vs. Stripe Elements
+
+Wir nutzen **Stripe Checkout** (hosted page) statt Stripe Elements (embedded).
+
+| Kriterium             | Checkout (gewählt)                                        | Elements                                            |
+| --------------------- | --------------------------------------------------------- | --------------------------------------------------- |
+| PCI-Compliance        | Stripe handhabt alles (SAQ-A).                            | Wir hosten Karten-Eingabe — höhere PCI-Anforderung. |
+| Implementierungsaufwand | ~50 Zeilen Code (`stripe.checkout.sessions.create`).    | UI-Komponenten + Stripe.js + Theme-Anpassung.        |
+| PayPal/Apple/Google Pay | Out-of-the-box.                                          | Manuell zu konfigurieren.                            |
+| Branding              | Begrenzt (Logo + Farbe in Stripe Dashboard).              | Vollständig.                                         |
+| Mobile UX             | Stripe-optimiert (Wallets, Touch-friendly).               | Eigene Mobile-Optimierung nötig.                    |
+
+Stripe Checkout deckt unsere Anforderung (US-28: PayPal + Apple Pay +
+Google Pay) ab und reduziert PCI-Verantwortung auf SAQ-A. Branding-
+Trade-off ist akzeptabel.
+
+#### Beträge in Cents
+
+Stripe-Konvention: Beträge sind Integer in der Subwährungs-Einheit
+(Cents für EUR). Wir persistieren **immer** Cents (Spalte
+`payments.amount INTEGER`). Frontend rechnet bei Anzeige in Euro um.
+
+Begründung: Float-Persistenz verursacht Rundungsfehler (`14.99 € →
+1499 cent`, nicht `14.989999... €`). Stripe erwartet ohnehin Cents.
+
+#### Webhook-Sicherheit
+
+Stripe sendet Webhooks an `POST /api/payments/webhook`. Drei
+Verteidigungslinien:
+
+1. **Signatur-Check** mit `STRIPE_WEBHOOK_SECRET`. Verstoß → 400.
+2. **Idempotenz**: vor jedem Update Status-Check (PAID + erneuter
+   `checkout.session.completed` → keine zweite Mail).
+3. **Raw-Body-Lesen**: Next.js parst JSON automatisch. Für Webhook
+   muss der Handler `await req.text()` aufrufen (vor dem JSON-Parse),
+   damit die Signatur über den unveränderten Bytes berechnet werden
+   kann.
+
+```ts
+// Pseudocode src/app/api/payments/webhook/route.ts
+export async function POST(req: Request) {
+  const sig = req.headers.get('stripe-signature');
+  if (!sig) return new Response('Missing signature', { status: 400 });
+
+  const rawBody = await req.text();
+  let event: Stripe.Event;
+  try {
+    event = stripe.webhooks.constructEvent(rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET!);
+  } catch {
+    return new Response('Invalid signature', { status: 400 });
+  }
+
+  switch (event.type) {
+    case 'checkout.session.completed': await handleCompleted(event); break;
+    case 'checkout.session.expired':   await handleExpired(event); break;
+    case 'payment_intent.payment_failed': await handleFailed(event); break;
+    case 'charge.refunded':            await handleRefunded(event); break;
+    default: /* ignore */ break;
+  }
+
+  return Response.json({ received: true });
+}
+```
+
+#### Test-Mode vs. Live-Mode
+
+- **Development:** `STRIPE_SECRET_KEY=sk_test_...` + Stripe CLI
+  (`stripe listen --forward-to localhost:3000/api/payments/webhook`)
+  für lokale Webhook-Tests.
+- **Production:** `sk_live_...` + Webhook-Endpoint im Stripe Dashboard
+  registrieren mit den 4 oben genannten Event-Types.
+
+#### `lib/stripe.ts` — Singleton
+
+```ts
+import Stripe from 'stripe';
+
+let _stripe: Stripe | null = null;
+
+export function getStripe(): Stripe {
+  if (_stripe) return _stripe;
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key) throw new Error('STRIPE_SECRET_KEY ist nicht gesetzt.');
+  _stripe = new Stripe(key, { apiVersion: '2024-04-10' });
+  return _stripe;
+}
+```
+
+### 17.5 E-Mail-Templates Iteration 4
+
+| Template-Key                       | Trigger                                          | Empfänger | Wesentliche Inhalte                                            |
+| ---------------------------------- | ------------------------------------------------ | --------- | -------------------------------------------------------------- |
+| `customerVerificationMail`         | `POST /api/customer/register` UND `POST /api/customer/resend-verification` | Kunde | Verifikations-Link `${BASE_URL}/konto/verifizieren?token=...`. **Hinweis (BUG-401-Fix):** beide Trigger setzen den Token UND `verificationTokenExpiry = now + 24h`. |
+| `customerPasswordResetMail`        | `POST /api/customer/forgot-password`             | Kunde     | Reset-Link `${BASE_URL}/konto/passwort-zuruecksetzen?token=...` |
+| `paymentRequestToCustomer`         | `POST /api/admin/bookings/:id/payment`           | Kunde     | Fälliger Betrag, Link `${BASE_URL}/konto/zahlung/:bookingId?token=...` |
+| `paymentReceivedToCustomer`        | Stripe `checkout.session.completed`              | Kunde     | "Vielen Dank, Zahlung eingegangen"; Auftragsdetails.           |
+| `paymentReceivedToAdmin`           | Stripe `checkout.session.completed`              | Tom       | "Zahlung eingegangen"; Kundendaten + Betrag.                    |
+| `paymentRefundedToCustomer`        | Stripe `charge.refunded`                         | Kunde     | "Rückerstattung erfolgt"; Betrag.                              |
+
+**ENTFERNT in v1.4.1 (BUG-402-Fix):** `customerEmailChangedMail` —
+E-Mail-Änderung im MVP nicht angeboten, Template entfällt damit
+ebenfalls. Wenn Tom dies in IT5 wieder aktiviert (Story
+"E-Mail-Änderung mit Pending-State"), kommt das Template zurück.
+
+Implementation analog zu IT2/IT3-Templates in `src/lib/mail.ts`.
+
+### 17.6 UI-States Iteration 4
+
+#### `/konto/login` (US-25 AC3, AC4)
+
+| State           | Trigger                                          | UI                                                                |
+| --------------- | ------------------------------------------------ | ----------------------------------------------------------------- |
+| Idle            | Initial-Load                                      | Form mit E-Mail + Passwort + "Passwort vergessen"-Link.            |
+| Submitting      | POST läuft                                        | Submit-Button disabled, Spinner.                                   |
+| AuthError       | 401                                               | Banner "E-Mail oder Passwort ungültig" (generisch).                |
+| EmailNotVerified| 422 EMAIL_NOT_VERIFIED                            | Banner + "Bestätigungs-E-Mail erneut senden"-Button (resend-verification). |
+| RateLimited     | 429                                               | Banner "Zu viele Anmelde-Versuche. Bitte 15 Minuten warten."        |
+| Success         | 200                                               | Redirect auf `?callbackUrl=...` oder `/konto`.                     |
+
+#### `/konto/registrieren` (US-25 AC1)
+
+| State        | UI                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------- |
+| Idle         | Form: Vorname, Nachname, E-Mail, Passwort, Telefon (optional), DSGVO-Checkbox.       |
+| Submitting   | Disabled.                                                                           |
+| Success      | Banner "Bitte bestätigen Sie Ihre E-Mail-Adresse." + Hinweis auf Spam-Ordner.        |
+| EmailTaken   | 409 → Inline-Error am E-Mail-Feld: "Diese E-Mail ist bereits registriert."           |
+| Validation   | Inline-Errors (Passwort < 8, ungültige Mail, etc.).                                  |
+
+#### `/konto` (Übersicht, US-26)
+
+| State        | UI                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------- |
+| Loading      | Skeleton-Cards (3 Stück).                                                                    |
+| Empty        | "Sie haben noch keine Aufträge." + CTA "Ersten Auftrag buchen" → `/buchung`.                |
+| Ready        | Zwei Sektionen: "Bevorstehende Termine" und "Vergangene Aufträge", jeweils chronologisch.    |
+| Error        | Banner mit Retry-Button.                                                                     |
+
+#### `/konto/auftrag/:id` (Detail, US-26 AC4, US-27, US-29)
+
+| State              | UI                                                                                |
+| ------------------ | --------------------------------------------------------------------------------- |
+| Loading            | Skeleton-Card.                                                                    |
+| Ready              | Buchungsdetails, Status-Badge, ggf. Stornieren-Button, ggf. Bewerten-Button, ggf. Bezahlen-Button. |
+| CancelDialog       | "Möchten Sie diesen Termin wirklich stornieren?" mit Ja/Nein.                     |
+| Cancelled          | Status-Badge wechselt sofort, Stornieren-Button verschwindet, Toast.              |
+| CancelTooLate      | Stornieren-Button disabled mit Hint "Stornierung nur bis 24h vor Termin möglich. Bitte rufen Sie uns an: 0157-74787512." |
+| ReviewSubmitting   | Bewertungs-Button disabled mit Spinner.                                            |
+| ReviewSubmitted    | "Vielen Dank für Ihre Bewertung! Sie wird nach Freigabe veröffentlicht." + Form schreibgeschützt. |
+| ReviewExisting     | Schon bewertet: Sterne + Text werden read-only angezeigt.                          |
+
+#### `/konto/zahlung/:bookingId` (US-28)
+
+| State        | UI                                                                                                  |
+| ------------ | --------------------------------------------------------------------------------------------------- |
+| Loading      | Spinner.                                                                                            |
+| Ready        | Auftragsdetails + Betrag + "Mit PayPal/Karte/Apple Pay/Google Pay bezahlen"-Button (Stripe-Checkout). |
+| AlreadyPaid  | Banner "Diese Buchung wurde bereits bezahlt am ...".                                                 |
+| Failed       | Banner "Letzte Zahlung fehlgeschlagen — bitte erneut versuchen.".                                    |
+| Submitting   | Button disabled mit Spinner; nach Response: window.location = stripe-url.                            |
+
+#### `/konto/zahlung/erfolg` (Stripe-Redirect-Ziel) — MAJOR-402-Fix v1.4.1
+
+Client-Component liest `?session_id=...`, **polled** den öffentlichen
+Endpoint `GET /api/payments/session-status?session_id=...`
+(siehe API-Spec §13). Der Endpoint braucht **keine** Customer-Session —
+damit funktioniert die Erfolgsseite auch für Gäste, die ohne Login
+über einen Bezahl-Mail-Link zur Stripe-Checkout-Seite kamen.
+
+**Polling-Verhalten:**
+
+```ts
+// Frontend pseudocode
+const MAX = PAYMENT_SESSION_POLL_MAX_ATTEMPTS; // 5
+const INTERVAL = PAYMENT_SESSION_POLL_INTERVAL_MS; // 1000
+
+for (let i = 0; i < MAX; i++) {
+  const res = await fetch(`/api/payments/session-status?session_id=${sid}`);
+  const { data } = await res.json();
+  if (data.status === 'PAID')   { showSuccess(data); return; }
+  if (data.status === 'FAILED') { showFailed(data);  return; }
+  await sleep(INTERVAL);
+}
+showStillProcessing(); // Fallback nach 5 Tries
+```
+
+| State           | Trigger                                    | UI                                                                                                |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| WaitingWebhook  | Initial / `status === 'PENDING'`           | "Wir verarbeiten Ihre Zahlung..." mit Spinner. Polling läuft (max 5 × 1s).                        |
+| Success         | `status === 'PAID'`                        | "Vielen Dank! Zahlung erhalten." Eingeloggte Kunden bekommen zusätzlich einen Link auf `/konto/auftrag/<bookingId>`. Gäste sehen nur statischen Text. |
+| Failed          | `status === 'FAILED'`                      | "Die Zahlung konnte nicht abgeschlossen werden. Bitte erneut versuchen." + Retry-Link auf `/konto/zahlung/<bookingId>?token=...` (Gast) bzw. `/konto/zahlung/<bookingId>` (eingeloggt). |
+| StillProcessing | Nach 5 Polling-Versuchen weiterhin PENDING | "Wir verarbeiten Ihre Zahlung. Sie erhalten in Kürze eine E-Mail-Bestätigung." (kein weiterer Poll-Loop). |
+| NotFound        | 404 von session-status                     | Freundlicher Fallback "Bitte später erneut prüfen." (passiert im Race-Case, wenn Stripe schneller redirected als unsere DB den `stripeSessionId` schreibt — sollte selten sein). |
+
+**Gäste-Erkennung:** Frontend prüft, ob `customer-session`-Cookie
+clientseitig sichtbar ist (oder fragt `/api/customer/me` mit
+`credentials: 'include'`; bei 401 ist der User Gast). Der Detail-Link
+`/konto/auftrag/...` wird ausgeblendet — der Gast hätte sonst nur
+einen 401 nach dem Klick.
+
+#### `/admin/reviews` (US-29 Moderation)
+
+| State        | UI                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------- |
+| Tabs         | "Wartend auf Freigabe" / "Veröffentlicht" / "Alle".                                  |
+| Per Eintrag  | Sterne, Text, Kunde, Service, Datum, "Freigeben"-Button bzw. "Zurückziehen"-Button. |
+| Confirm      | Modal: "Bewertung freigeben? Sie wird sofort auf der Startseite sichtbar."           |
+
+### 17.7 Sicherheits-Aspekte Iteration 4
+
+#### Authentifizierung (Kunden)
+
+- bcrypt cost 10 (gleich wie Admin).
+- JWT mit HS256, signiert mit `AUTH_SECRET` (32+ Zeichen Random).
+- Cookie httpOnly + Secure + SameSite=Lax.
+- Rate-Limits siehe API-Spec §20.
+
+#### Autorisierung
+
+- Jeder `/api/customer/*`-Endpunkt (außer Auth-Aktionen) prüft die
+  Session am Anfang und antwortet 401 ohne Cookie.
+- Ressourcen-Zugriff: jeder Booking/Review/Payment-Endpunkt prüft
+  Ownership (`customerId === me.id`) und antwortet **404** (NICHT 403)
+  bei Fremdzugriff — verhindert Existenz-Enumeration.
+
+#### Open-Redirect-Schutz für Customer-Login (MAJOR-405-Fix v1.4.1)
+
+Identische Pattern wie BUG-005-Fix für Admin: `redirectUrl` (Body) und
+`callbackUrl` (Query) werden via `safeCustomerCallback()` geprüft.
+Akzeptiert sind ausschließlich relative Pfade ohne Protokoll/Host
+(siehe §17.1 für Helper-Code). Ungültige Werte → Fallback `/konto`.
+
+#### Stripe-Webhook-Authentizität
+
+Pflicht-Signatur-Check via `STRIPE_WEBHOOK_SECRET`. Ohne Check
+könnte jeder POSTen und Bezahl-Status faken — deshalb **harte
+Anforderung**, dass die Signatur vor jeder DB-Schreibaktion validiert
+ist (siehe §17.4).
+
+#### Stripe-Session-Status-Endpoint (MAJOR-402-Fix v1.4.1)
+
+`GET /api/payments/session-status?session_id=cs_...` ist öffentlich
+(kein Auth-Cookie). Begründung: Stripe-Session-IDs sind hochentropisch
+und nur dem Käufer bekannt — sie wirken token-artig. Der Endpoint
+liefert ausschließlich `{ sessionId, status, paidAt, bookingId }` —
+**kein** Kunden-PII, keine Booking-Details. Damit ist eine Enumerierung
+auch im Worst Case (Angreifer kennt die Session-ID) unproblematisch:
+er erfährt nur "wurde bezahlt: ja/nein", was er als Käufer eh wüsste.
+
+Rate-Limit: 60 / 5 min / IP (das FE-Polling braucht max. 5 Calls in 5s,
+die Begrenzung ist ein Sanity-Cap gegen Polling-Loop-Bugs).
+
+#### Datenschutz
+
+- Reviews: `customerName` wird auf der öffentlichen API auf "Vorname N."
+  gekürzt (Backend, im Response-Mapper, MAJOR-403-Fix v1.4.1 — kein
+  DB-Snapshot, nur Live-Join).
+- Konto-Löschung: im MVP kein Self-Service. Wird Tom benötigt, kann er
+  via Prisma Studio einen `CustomerUser` löschen — die FK
+  `Booking.customerId` wird dann auf NULL gesetzt (SET NULL); Reviews
+  bleiben ebenfalls erhalten (nur ohne Bezug zum gelöschten Konto).
+  In diesem Fall greift der Review-Anzeige-Fallback `customerName = 'Anonym'`.
+  Engineers ergänzen einen `DELETE /api/customer/me`-Endpunkt nur
+  auf Anforderung. Wird Tom später Account-Delete einführen, müssen
+  Engineers eine Snapshot-Spalte `Review.customerName` ergänzen, damit
+  ältere Reviews ihren Anzeigenamen nicht verlieren.
+- Aufbewahrung: CustomerUser-Daten unbegrenzt (analog zum Admin). Bei
+  Anfrage zur DSGVO-Löschung manuell in Prisma Studio.
+
+#### Race-Conditions
+
+- **Doppelter Stripe-Webhook**: Status-Check vor Update verhindert
+  doppelten Mail-Versand.
+- **Doppelte Review-Erstellung**: UNIQUE-Index auf `reviews.booking_id`
+  fängt parallele Inserts auf DB-Ebene → 409.
+- **Stornierung kurz vor 24h-Frist**: Frontend-Check + Server-Check
+  beide vorhanden; Server-Check ist Authority.
+
+#### Storno-Frist-Algorithmus — Berlin-Zeitzone & DST (MAJOR-401-Fix v1.4.1)
+
+**Frist:** 24 Stunden physische Echtzeit (NICHT 24 naïve Berlin-
+Wand-Uhr-Stunden). Algorithmus:
+
+```ts
+// Pseudocode in src/lib/cancellation.ts
+import { fromZonedTime } from 'date-fns-tz';
+
+const TZ = 'Europe/Berlin';
+
+/**
+ * Interpretiert "YYYY-MM-DD" + "HH:MM" als Berlin-Wall-Clock und
+ * liefert einen UTC-Date. DST-fest: am letzten Sonntag im März
+ * existiert die Stunde 02:00–03:00 nicht (Spring-Forward); wenn ein
+ * Termin in dieser Lücke liegt, gibt date-fns-tz die nächst-folgende
+ * gültige Wall-Clock zurück. Am letzten Sonntag im Oktober existiert
+ * die Stunde 02:00–03:00 doppelt; wir wählen die SPÄTERE (zweite)
+ * Belegung — Stripe-Mail-Versand und Tom-Tagesplanung sind so
+ * deterministisch.
+ */
+export function parseBerlinDateTime(date: string, time: string): Date {
+  return fromZonedTime(`${date}T${time}:00`, TZ);
+}
+
+export function isCancellableConfirmed(date: string, time: string, now = new Date()): boolean {
+  const start = parseBerlinDateTime(date, time);
+  return start.getTime() - now.getTime() > 24 * 60 * 60 * 1000;
+}
+```
+
+**Konsequenz für DST-Tage:**
+
+- *Spring-forward (März):* Termin Sonntag 10:00 Berlin nach DST. Storno
+  Samstag 10:00 Berlin → Differenz physisch nur **23 Stunden** → 24h-
+  Test schlägt fehl → Storno gesperrt. (Korrekt: weniger als 24h echte
+  Vorlaufzeit für Tom.)
+- *Fall-back (Oktober):* Termin Sonntag 10:00 Berlin nach DST. Storno
+  Samstag 10:00 Berlin → Differenz physisch **25 Stunden** → 24h-Test
+  passiert → Storno erlaubt. (Korrekt: Tom hat physisch 25h Vorlauf.)
+
+Dies ist die intuitive Lesart aus Tom-Sicht („wirklich 24 h vor dem
+Termin Bescheid geben"); die andere Lesart („1 Kalendertag vorher")
+wird damit bewusst verworfen.
+
+**Test-Plan §17.8 Pflichttests:**
+1. Termin am 26.10.2026 10:00 Berlin (Fall-back-Sonntag), Storno am
+   25.10.2026 10:00 Berlin → erlaubt (25h echte Differenz).
+2. Termin am 29.03.2026 10:00 Berlin (Spring-forward-Sonntag), Storno
+   am 28.03.2026 10:00 Berlin → gesperrt (23h echte Differenz).
+
+#### `isCancellable()` Null-Robustheit (MAJOR-404-Fix v1.4.1)
+
+Der Algorithmus für die Cancellable-Bewertung muss drei Eingangs-Fälle
+sauber behandeln:
+
+```ts
+function bookingStartUTC(b: Booking & { slot?: Slot | null }): Date | null {
+  if (b.date && b.startTime) return parseBerlinDateTime(b.date, b.startTime);
+  if (b.slot?.startsAt)      return new Date(b.slot.startsAt);   // IT1/IT2-Bestand
+  return null;                                                    // unbekannt
+}
+
+function isCancellable(b: Booking & { slot?: Slot | null }): boolean {
+  if (!PORTAL_CANCELLABLE_STATUSES.includes(b.status)) return false;
+  const start = bookingStartUTC(b);
+  if (!start) return true;          // unbekannter Termin → defensiv true; Server prüft erneut
+  if (b.status === 'CONFIRMED') {
+    return start.getTime() - Date.now() > 24 * 60 * 60 * 1000;
+  }
+  return start.getTime() > Date.now();
+}
+```
+
+**Begründung:**
+
+- Buchungen mit `date && startTime` (Standard-Fall IT3+) → Berlin-DST-fest.
+- Buchungen mit `slot.startsAt` (IT1/IT2-Bestand) → UTC direkt.
+- Buchungen ohne beides → semantisch: unbekannter Termin. Wir geben
+  `true` zurück, damit der Kunde nicht in einer Sackgasse hängt; der
+  POST-Cancel-Endpoint wiederholt den Check und 409, falls die Frist
+  nicht erfüllt ist (Server bleibt Authority).
+
+**Frontend-Komponente:** `<CancelBookingButton>` zeigt bei
+`isCancellable === false` und `b.status === 'CONFIRMED'` den 24h-
+Hinweis mit Telefonnummer (siehe §17.6 UI-State `CancelTooLate`). Bei
+Status nicht in `PORTAL_CANCELLABLE_STATUSES` (REJECTED/CANCELLED/
+COMPLETED) wird der Button gar nicht gerendert.
+
+#### Review-Anzeigename — Datenschutz & Anonymisierung (MAJOR-403-Klärung v1.4.1)
+
+`Review.customerName` ist **kein DB-Feld**. Stattdessen leitet der
+Backend-Response-Mapper den Anzeigenamen aus der include'd
+`customer`-Relation ab:
+
+```ts
+function reviewToPublic(r: Review & { customer: CustomerUser | null; booking: { service: string } | null }): PublicReview {
+  const customerName =
+    r.customer != null
+      ? `${r.customer.firstName} ${r.customer.lastName.charAt(0)}.`  // "Maria M."
+      : 'Anonym';                                                     // FK SetNull-Fall
+  return {
+    id: r.id,
+    customerName,
+    service: r.booking?.service ?? null,
+    stars: r.stars,
+    text: r.text,
+    createdAt: r.createdAt.toISOString(),
+  };
+}
+```
+
+Im Admin-Endpoint `GET /api/admin/reviews` wird `customerName` aus
+demselben Relation-Lookup gebildet — dort allerdings UNGEKÜRZT
+(`firstName + ' ' + lastName`), weil Tom die volle Identität für die
+Moderations-Entscheidung braucht.
+
+**Wichtig — MVP-Annahme:** Solange kein Self-Service-Account-Delete
+existiert, wird `customer === null` praktisch nie auftreten. Wenn Tom
+aber eine DSGVO-Löschung manuell ausführt, greift der `'Anonym'`-
+Fallback automatisch. Engineers brauchen also keinen Snapshot — bis
+Self-Service-Delete (Backlog) kommt.
+
+### 17.8 Test-Plan Iteration 4 (Engineer-Hinweise)
+
+| Bereich          | Test                                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------ |
+| Customer-Auth    | E2E: Register → Verify-Mail-Klick → Login → /konto sichtbar.                                |
+| Forgot-Password  | E2E: Forgot → Mail → Reset-Link → neues Passwort → Login mit neuem Passwort.                |
+| Booking-Zuordnung| Eingeloggt: Buchung absenden → erscheint in `/konto`. Nicht eingeloggt: erscheint nicht.    |
+| Cancel 24h-Frist | Buchung 26h in Zukunft → cancellable. 22h → not cancellable, server check 409.              |
+| Payment-Flow     | Test-Mode: Tom legt Betrag → Mail an Kunden → Stripe-Checkout (Test-Karte 4242…) → Webhook → Status PAID. |
+| Webhook-Idempotenz | Webhook 2× senden → nur 1× Mail.                                                          |
+| Webhook-Signatur | Manueller POST ohne Signatur → 400; mit invalider Signatur → 400.                           |
+| Review-Flow      | Booking auf COMPLETED → Bewerten-Button sichtbar → Review submit → Tom genehmigt → Review auf Startseite. |
+| **BUG-401 Resend** | Konto registrieren, 25h warten (Mock `Date.now`), `resend-verification`, Link sofort klicken → Verifikation **erfolgreich** (NICHT 400). |
+| **BUG-402 Profile** | `PATCH /api/customer/me` mit `{ email: 'neu@example.com' }` → 400 `VALIDATION_ERROR`. Mit `{ firstName: 'Maria' }` → 200. |
+| **MAJOR-401 DST Spring** | Termin 29.03.2026 10:00 Berlin (Spring-Forward), Storno-Versuch 28.03.2026 10:00 Berlin → 409 (23h echte Differenz). |
+| **MAJOR-401 DST Fall** | Termin 26.10.2026 10:00 Berlin (Fall-Back), Storno-Versuch 25.10.2026 10:00 Berlin → 200 (25h echte Differenz). |
+| **MAJOR-402 Gast-Erfolg** | Stripe-Checkout ohne Login abschließen → `/konto/zahlung/erfolg?session_id=...` zeigt Success ohne 401. Polling auf `session-status` läuft. |
+| **MAJOR-403 Anonym** | Review mit `customerId = NULL` (manuell in DB gesetzt) → `GET /api/reviews` liefert `customerName: "Anonym"`, KEIN 500. |
+| **MAJOR-404 Slot-Bestand** | Buchung mit `slotId` und `date = NULL`, Status CONFIRMED, slot.startsAt 26h in Zukunft → `isCancellable === true`. |
+| **MAJOR-405 Open-Redirect** | `POST /api/customer/login` mit `redirectUrl: "https://evil.example/login"` → Login OK, Response `data.redirectUrl === '/konto'`. Mit `"//evil.example/login"` → ebenfalls Fallback. Mit `"/konto/auftrag/abc"` → durchgereicht. |
+| **safeCustomerCallback unit** | Pflicht-Unit-Tests: `'/konto'` → ok; `''` → `/konto`; `'//x'` → `/konto`; `'http://x'` → `/konto`; `'\\\\x'` → `/konto`; `'/konto?a=b'` → ok. |
+
+### 17.9 ENV-Variablen Iteration 4
+
+| Variable                  | Pflicht | Wert / Beispiel                        | Zweck                                  |
+| ------------------------- | ------- | -------------------------------------- | -------------------------------------- |
+| `STRIPE_SECRET_KEY`       | ja      | `sk_test_...` / `sk_live_...`          | Stripe-API-Auth (Server-side, US-28).  |
+| `STRIPE_PUBLISHABLE_KEY`  | ja      | `pk_test_...` / `pk_live_...`          | Optional (Embedded-Forms, im MVP nicht genutzt — bleibt Backlog für Stripe Elements). |
+| `STRIPE_WEBHOOK_SECRET`   | ja      | `whsec_...`                            | Webhook-Signatur-Validierung (US-28).  |
+| `AUTH_SECRET`             | ja      | bestehender NEXTAUTH_SECRET-Wert       | Wird für Customer-JWT-Signing wiederverwendet. Engineers können auch ein eigenes `CUSTOMER_AUTH_SECRET` setzen — dann Helper anpassen. |
+
+`.env.example` wird entsprechend ergänzt mit Hinweisen auf den
+Test-Mode (`sk_test_...`).
+
+### 17.10 Offene Punkte / Annahmen Iteration 4
+
+- **Annahme:** Stripe-Account ist verfügbar / wird von Tom angelegt
+  (kostenlos im Test-Mode). DNS-Verifikation der Stripe-Empfangsdomäne
+  ist nicht nötig — nur API-Key + Webhook-URL im Stripe-Dashboard.
+- **Annahme (BUG-402-Fix v1.4.1):** Im MVP wird **keine** E-Mail-Änderung
+  via Profil angeboten. Der Pending-Email-Mechanismus
+  (`pendingEmail` / `pendingEmailToken` / `pendingEmailTokenExpiry`)
+  ist Backlog (eigene Story IT5). Wenn ein Kunde die E-Mail unbedingt
+  ändern muss, korrigiert Tom sie manuell in Prisma Studio.
+- **Annahme:** "Termin abschließen" wird **manuell** von Tom im Admin-UI
+  ausgelöst (`PATCH /api/bookings/:id { status: 'COMPLETED' }`). Eine
+  automatische Markierung via Cron (z.B. 24h nach Termin-Datum) ist
+  Backlog.
+- **Annahme:** Stripe-Sessions laufen nach 24h ab (Stripe-Default).
+  Wenn ein Kunde eine alte Mail nach >24h klickt, wird automatisch eine
+  neue Session erstellt (`POST create-session` ist idempotent / handled
+  failed-state).
+- **Annahme:** Der Apple-Pay-/Google-Pay-Button wird **automatisch** von
+  Stripe Checkout gerendert, wenn das Endgerät kompatibel ist
+  ("progressive enhancement" — siehe US-28 AC4/AC5). Engineers
+  konfigurieren in Stripe-Dashboard die Wallet-Optionen.
+- **Annahme:** Im MVP kein Self-Service-Account-Delete (`DELETE /api/customer/me`)
+  — wird auf Backlog gesetzt. DSGVO-Löschung läuft über Tom + Prisma
+  Studio.
+- **Annahme (MAJOR-403-Klärung v1.4.1):** Statt einer separaten
+  `Review.customerName`-Snapshot-Spalte bleibt der Anzeigename live aus
+  `CustomerUser.firstName + lastName[0]` per Join. Backend liefert für
+  öffentlich `"Vorname N."`, im Admin-Endpoint `"Vorname Nachname"`
+  (volle Identität). Bei `customerId === null` (theoretisch nach
+  Konto-Löschung) greift der Fallback `'Anonym'`. Wird Tom später
+  Account-Delete einführen, müssen Engineers eine Snapshot-Spalte
+  ergänzen — solange kein Self-Service-Delete existiert, ist das
+  unkritisch.
+- [NEEDS INPUT] **Stripe-Account-Region & Steuerregeln.** Tom muss in
+  Stripe-Dashboard sein Steuersystem konfigurieren (Kleinunternehmer-
+  Status nach §19 UStG?). Das beeinflusst die `tax_behavior`-
+  Einstellung der Checkout-Session (`inclusive` vs. `exclusive`).
+  Engineers warten auf Tom-Input, sonst Default `inclusive` (Bruttopreis).
+- [NEEDS INPUT] **Mail-Versand vor Stripe-PaymentRequest:** Soll das
+  System bei Anlegen eines Payment-Datensatzes wirklich automatisch
+  eine Mail an den Kunden schicken? Annahme: **ja** (US-28 AC1
+  impliziert es). Wenn Tom erst manuell prüfen will, müsste ein
+  separater `POST /api/admin/bookings/:id/payment/send-request`-
+  Endpunkt entstehen.
+
+### 17.11 Akzeptanzkriterien-Mapping IT4
+
+| Story | Erfüllt durch                                                                                                                       |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| US-25 | `customer_users`-Tabelle, `/api/customer/*`-Endpunkte, `customer-session`-Cookie, `/konto/login` + `/konto/registrieren` Pages, Verifikations-Mail-Flow, Forgot/Reset-Flow, Profil-Update unter `/konto/profil`. Middleware schützt `/konto/*` (außer Public-Whitelist). |
+| US-26 | `Booking.customerId`-Feld (auto-befüllt aus Cookie), `GET /api/customer/bookings` mit upcoming/past-Split, `/konto`-Page mit Liste, `/konto/auftrag/:id`-Detail. Status-Badges DE-Mapping. Empty-State mit CTA. |
+| US-27 | `POST /api/customer/bookings/:id/cancel` mit serverseitigem 24h-Frist-Check und Status-Whitelist. `<CancelBookingButton>` mit Confirm-Dialog. Disabled-State + Hinweistext bei < 24h. |
+| US-28 | `Payment`-Modell, Stripe-Integration via `lib/stripe.ts`, `POST /api/admin/bookings/:id/payment` (Tom hinterlegt Betrag), `POST /api/payments/create-session` (Stripe Checkout mit card/paypal/wallets), `POST /api/payments/webhook` (Status-Update + Mails), `/konto/zahlung/:id` Page, Status-Badge "Bezahlt". |
+| US-29 | `Review`-Modell mit Admin-Freigabe, `POST /api/customer/reviews` (nur bei COMPLETED + ohne bestehende Review), `GET /api/reviews` (öffentlich, kürzt Namen, sortiert), `GET/PATCH /api/admin/reviews/:id` (Moderation), `/admin/reviews`-UI, `<ReviewSection>` umgebaut. `BookingStatus.COMPLETED` neu. |

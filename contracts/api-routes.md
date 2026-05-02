@@ -3,7 +3,70 @@
 **Verbindliche Spezifikation für Frontend & Backend.**
 Alle Endpunkte sind Next.js Route Handlers unter `src/app/api/`.
 
-**Version:** 1.3 (Iteration 3 — US-17 bis US-24, BUG IT3)
+**Version:** 1.4.1 (Iteration 4 Revision — QA-Fixes BUG-401/402, MAJOR-401/402/403/404/405)
+
+**Änderungen v1.4.1 gegenüber v1.4 (QA-Revision, kein Code-Bruch — nur Spec-Klarstellung + 1 neuer öffentlicher Endpoint):**
+
+- **BUG-401:** `POST /api/customer/resend-verification` aktualisiert
+  jetzt `verificationToken` UND `verificationTokenExpiry = now + 24h`.
+  `GET /api/customer/verify` prüft `verificationTokenExpiry > now`
+  statt `createdAt + 24h`.
+- **BUG-402:** `PATCH /api/customer/me` akzeptiert NUR `firstName`,
+  `lastName`, `phone` — `email` ist nicht mehr im Schema (siehe
+  `CustomerProfileUpdateSchema`). E-Mail-Änderung ist Backlog (IT5).
+- **MAJOR-401:** Storno-Frist-Algorithmus ist jetzt explizit
+  Berlin-zonen-fest dokumentiert (siehe ARCHITECTURE.md §17.7).
+- **MAJOR-402:** **NEUER öffentlicher Endpoint** `GET /api/payments/session-status?session_id=xxx`
+  — Stripe-Erfolgsseite kann den Zahlungs-Status auch ohne Customer-
+  Session prüfen (Polling-fähig, max 5 × 1s).
+- **MAJOR-403:** `Review.customerName` wird im Response per Live-Join
+  aus `customer.firstName + lastName[0] + '.'` berechnet (kein DB-Feld);
+  Fallback `"Anonym"` bei `customerId === null`.
+- **MAJOR-404:** `isCancellable()` ist null-fest gegen Bestandsbuchungen
+  ohne `date`/`startTime` — fällt auf `slot.startsAt` zurück.
+- **MAJOR-405:** `redirectUrl` / `callbackUrl` bei Customer-Login werden
+  validiert (nur Pfade ohne Host akzeptiert; sonst Fallback `/konto`).
+
+**Änderungen v1.4 gegenüber v1.3:**
+
+- US-25: **Neue Kunden-Auth-Endpunkte** (`/api/customer/*`, eigenes Cookie
+  `customer-session`, JWT, separat von NextAuth-Admin):
+  - `POST /api/customer/register`
+  - `POST /api/customer/login`
+  - `POST /api/customer/logout`
+  - `GET  /api/customer/me`
+  - `PATCH /api/customer/me` (Profil)
+  - `GET  /api/customer/verify?token=...`
+  - `POST /api/customer/resend-verification`
+  - `POST /api/customer/forgot-password`
+  - `POST /api/customer/reset-password`
+- US-26/US-27: **Neue Kundenportal-Endpunkte:**
+  - `GET  /api/customer/bookings` (Split: upcoming / past)
+  - `GET  /api/customer/bookings/:id`
+  - `POST /api/customer/bookings/:id/cancel` (mit 24h-Frist-Check)
+- US-28: **Neue Zahlungs-Endpunkte (Stripe-Integration):**
+  - `POST /api/admin/bookings/:id/payment` (Admin: Betrag hinterlegen)
+  - `POST /api/payments/create-session` (Kunde: Stripe-Checkout-Session)
+  - `GET  /api/payments/session-status` (öffentlich, Erfolgsseiten-Polling — MAJOR-402-Fix v1.4.1)
+  - `POST /api/payments/webhook` (Stripe → uns)
+- US-29: **Neue Review-Endpunkte:**
+  - `POST /api/customer/reviews`
+  - `GET  /api/reviews` (öffentlich, nur approved)
+  - `GET  /api/admin/reviews` (Admin)
+  - `PATCH /api/admin/reviews/:id`
+- **Booking-Erweiterung:** `POST /api/bookings` setzt automatisch
+  `customerId`, wenn ein gültiges `customer-session`-Cookie vorhanden ist.
+  Body unverändert (kein neues Pflichtfeld). Response enthält weiterhin
+  nur `{ id, status, createdAt }`.
+- **`PATCH /api/bookings/:id`** akzeptiert jetzt zusätzlich
+  `status: 'COMPLETED'` (US-29-Vorbedingung — Bewertung erst nach
+  COMPLETED möglich).
+- **Neue Fehlercodes:** `EMAIL_NOT_VERIFIED` (422), `STRIPE_ERROR` (502).
+- **Middleware-Erweiterung:** `/konto/*` (außer `/konto/login`,
+  `/konto/registrieren`, `/konto/passwort-vergessen`,
+  `/konto/passwort-zuruecksetzen`, `/konto/verifizieren`,
+  `/konto/zahlung/:id`) → Redirect auf `/konto/login` ohne
+  `customer-session`-Cookie.
 
 **Änderungen v1.3 gegenüber v1.2:**
 
@@ -777,17 +840,58 @@ Im MVP genügt der Standard-Pfad: pro Tag-Klick einen
 
 ---
 
-## 8. Auth (NextAuth-managed)
+## 8. Auth (NextAuth-managed Admin + JWT-Cookie Customer)
 
-Unverändert seit IT2. Geschützte Routen-Patterns erweitert:
+**Iteration 4** führt zwei Auth-Mechanismen parallel:
 
-| Pfad-Pattern                                                | Auth                |
-| ----------------------------------------------------------- | ------------------- |
-| `GET /admin/*` (Browser)                                    | Session erforderlich |
-| `POST/PUT/DELETE /api/admin/*` (Iteration 3 NEU)            | Session erforderlich |
-| `POST /api/upload`                                          | Öffentlich, Rate-Limit |
-| `GET /api/slots/available`                                  | Öffentlich          |
-| `GET /api/bookings/respond`, `POST /api/bookings/rebook`    | Öffentlich (Token)  |
+| Auth-Typ        | Cookie-Name               | Mechanismus                          | Pfad-Schutz             |
+| --------------- | ------------------------- | ------------------------------------ | ----------------------- |
+| Admin (NextAuth)| `next-auth.session-token` | NextAuth Credentials Provider (JWT)  | `/admin/*`, `/api/admin/*` |
+| Kunde (eigen)   | `customer-session`        | JWT mit `AUTH_SECRET`, 7d, httpOnly  | `/konto/*`, `/api/customer/*` |
+
+Beide Cookies können **gleichzeitig** existieren — eine Person kann
+sowohl Admin als auch Kunde sein. Die beiden Sessions sind voneinander
+unabhängig (verschiedene Cookie-Namen, verschiedene Secrets-Salts).
+
+Geschützte Routen-Patterns:
+
+| Pfad-Pattern                                                | Auth                                |
+| ----------------------------------------------------------- | ----------------------------------- |
+| `GET /admin/*` (Browser)                                    | Admin-Session erforderlich          |
+| `POST/PUT/DELETE /api/admin/*`                              | Admin-Session erforderlich          |
+| `POST /api/upload`                                          | Öffentlich, Rate-Limit              |
+| `GET /api/slots/available`                                  | Öffentlich                          |
+| `GET /api/bookings/respond`, `POST /api/bookings/rebook`    | Öffentlich (Token)                  |
+| `GET /konto/*` (Browser, IT4)                               | Customer-Session erforderlich (siehe Public-Whitelist unten) |
+| `/api/customer/*` (außer register/login/forgot/reset/verify) | Customer-Session erforderlich      |
+| `POST /api/payments/webhook`                                | Öffentlich, Stripe-Signatur-Check   |
+| `POST /api/payments/create-session`                         | Customer-Session ODER `cancelToken` |
+| `GET /api/payments/session-status`                          | Öffentlich (Stripe-Session-ID = Token) |
+
+**Public-Whitelist `/konto/*` (kein Login nötig):**
+- `/konto/login`
+- `/konto/registrieren`
+- `/konto/passwort-vergessen`
+- `/konto/passwort-zuruecksetzen?token=...`
+- `/konto/verifizieren?token=...`
+- `/konto/zahlung/:bookingId` (öffentlich; Auth via Login ODER `cancelToken`-Query)
+
+### Customer-Session-Cookie-Spezifikation
+
+```
+Name:        customer-session
+Value:       <JWT signed with AUTH_SECRET, payload { customerId, email, iat, exp }>
+HttpOnly:    true
+Secure:      true (Production)
+SameSite:    Lax
+Path:        /
+Max-Age:     604800   (7 Tage in Sekunden)
+```
+
+Der Token-Payload enthält **nur** `customerId` und `email` —
+`emailVerified` wird bei jedem Request frisch aus der DB gelesen, damit
+ein nach Verifikation ausgestelltes Cookie sofort wirkt (sonst müsste
+der Token rotiert werden).
 
 ---
 
@@ -836,3 +940,1079 @@ US-20 (Preise), US-22 (Reviews), US-23 (Service-Popups) sind **frontend-only**
 | `PATCH /api/bookings/:id`                      | `components/admin/BookingTable.tsx` |
 
 Übrige Endpoints unverändert (siehe v1.2).
+
+---
+
+## 11. Kunden-Auth (Iteration 4 — US-25)
+
+Neuer Pfad-Prefix: `/api/customer/*`. Eigene JWT-basierte Session-
+Verwaltung; keine NextAuth-Abhängigkeit. Cookie: `customer-session`,
+httpOnly, Secure, SameSite=Lax, 7 Tage Gültigkeit.
+
+### `POST /api/customer/register`
+
+**Auth:** öffentlich
+**Story:** US-25 AC1, AC2
+
+Legt einen neuen Kunden-Account an. Sendet eine Verifikations-E-Mail.
+Antwortet sofort mit 201, **ohne** Session-Cookie zu setzen — der Kunde
+muss erst E-Mail bestätigen.
+
+**Request Body** (`CustomerRegisterSchema`):
+
+```json
+{
+  "email": "maria@example.com",
+  "password": "geheim1234",
+  "firstName": "Maria",
+  "lastName": "Müller",
+  "phone": "0157-12345678",
+  "privacyAccepted": true
+}
+```
+
+| Feld              | Typ      | Pflicht | Validierung                                                |
+| ----------------- | -------- | ------- | ---------------------------------------------------------- |
+| `email`           | string   | ja      | E-Mail, lowercase im Storage, max 254 Zeichen, UNIQUE.     |
+| `password`        | string   | ja      | mind. 8 Zeichen, max 200.                                  |
+| `firstName`       | string   | ja      | 1–120 Zeichen.                                             |
+| `lastName`        | string   | ja      | 1–120 Zeichen.                                             |
+| `phone`           | string   | nein    | Falls gesetzt: phone-Schema (siehe Booking).                |
+| `privacyAccepted` | true     | ja      | Muss `true` sein. Wird **nicht** persistiert.              |
+
+**Verhalten:**
+
+1. E-Mail in lowercase normalisieren.
+2. Existiert bereits ein CustomerUser mit dieser E-Mail? → 409 `CONFLICT` mit `field: 'email'`, message "Diese E-Mail ist bereits registriert."
+3. Passwort mit bcrypt cost 10 hashen.
+4. `verificationToken = cuid()` generieren, `verificationTokenExpiry = now + 24h` setzen (BUG-401-Fix v1.4.1).
+5. CustomerUser anlegen (`emailVerified: false`, `verificationToken`, `verificationTokenExpiry`).
+6. Mail an die angegebene Adresse: `customerVerificationMail` mit Link `${BASE_URL}/konto/verifizieren?token=<token>`. Fire-and-forget.
+
+**Response 201:**
+
+```json
+{
+  "data": {
+    "id": "cu_abc...",
+    "email": "maria@example.com",
+    "emailVerified": false,
+    "verificationMailSent": true
+  }
+}
+```
+
+**Rate-Limiting:** 5 Registrierungen / 60 min / IP.
+
+**Fehler:**
+- 400 `VALIDATION_ERROR`.
+- 409 `CONFLICT` (E-Mail bereits registriert; `field: 'email'`).
+- 429 `RATE_LIMITED`.
+
+---
+
+### `POST /api/customer/login`
+
+**Auth:** öffentlich
+**Story:** US-25 AC3, AC4
+
+Authentifiziert einen Kunden und setzt das `customer-session`-Cookie.
+
+**Request Body** (`CustomerLoginSchema`):
+
+```json
+{
+  "email": "maria@example.com",
+  "password": "geheim1234",
+  "redirectUrl": "/konto/auftrag/bk_abc..."
+}
+```
+
+| Feld          | Typ    | Pflicht | Validierung                                                                          |
+| ------------- | ------ | ------- | ------------------------------------------------------------------------------------ |
+| `email`       | string | ja      | E-Mail-Format.                                                                       |
+| `password`    | string | ja      | mind. 1 Zeichen (Server-Side erfolgt Vergleich gegen Hash).                          |
+| `redirectUrl` | string | nein    | Ziel-Pfad nach Login. **MAJOR-405-Fix:** nur relativer Pfad ohne Host (`/konto/...`). |
+
+**Verhalten:**
+
+1. E-Mail lowercase, CustomerUser lookup.
+2. Wenn nicht vorhanden → konstante bcrypt-Last gegen DUMMY-Hash + 401 `UNAUTHORIZED` mit Message "E-Mail oder Passwort ungültig" (KEINE Auskunft, ob E-Mail existiert).
+3. bcrypt.compare(password, hash) — bei false → 401 `UNAUTHORIZED` (gleiche Message).
+4. Wenn `emailVerified === false` → 422 `EMAIL_NOT_VERIFIED` mit Hinweis "Bitte bestätigen Sie zuerst Ihre E-Mail-Adresse." (Frontend zeigt "Erneut senden"-Button).
+5. JWT signieren: `{ customerId, email }`, `exp: now + 7d`. Cookie `customer-session` setzen (httpOnly, Secure, SameSite=Lax, Max-Age=604800).
+6. **MAJOR-405-Fix (v1.4.1):** Wenn `redirectUrl` angegeben ist, validiere
+   ihn via `safeCustomerCallback(url)` (siehe ARCHITECTURE.md §17.1):
+     - String muss mit `/` beginnen UND darf KEIN `//` als Präfix haben
+       (verhindert protokoll-relative URLs wie `//evil.example/`).
+     - Darf KEIN `:` (Schema), `\\`, oder Whitespace enthalten.
+     - Falls Validierung fehlschlägt → Fallback auf `/konto`.
+   Frontend nutzt diesen geprüften Wert beim Redirect; das Backend
+   gibt ihn zusätzlich als `data.redirectUrl` zurück, sodass Server-
+   Components dieselbe Authority haben.
+7. 200 OK.
+
+**Response 200:**
+
+```json
+{
+  "data": {
+    "id": "cu_abc...",
+    "email": "maria@example.com",
+    "firstName": "Maria",
+    "lastName": "Müller",
+    "phone": "0157-12345678",
+    "emailVerified": true,
+    "createdAt": "2026-04-15T10:00:00.000Z",
+    "redirectUrl": "/konto/auftrag/bk_abc..."
+  }
+}
+```
+
+`redirectUrl` ist der vom Backend validierte Pfad; bei fehlendem oder
+ungültigem Input gibt das Backend `"/konto"` zurück (MAJOR-405-Fix).
+
+(`Set-Cookie: customer-session=...` Header zusätzlich.)
+
+**Rate-Limiting:** 10 Login-Versuche / 15 min / IP.
+
+**Fehler:**
+- 400 `VALIDATION_ERROR`.
+- 401 `UNAUTHORIZED` (generische Message).
+- 422 `EMAIL_NOT_VERIFIED`.
+- 429 `RATE_LIMITED`.
+
+---
+
+### `POST /api/customer/logout`
+
+**Auth:** Customer-Session (idempotent — funktioniert auch ohne).
+**Story:** US-25
+
+Löscht das Cookie via `Set-Cookie: customer-session=; Max-Age=0`.
+
+**Response 200:** `{ "data": { "loggedOut": true } }`.
+
+---
+
+### `GET /api/customer/me`
+
+**Auth:** Customer-Session
+**Story:** US-25
+
+Liefert den eingeloggten Kunden. Wird vom Frontend nach Login UND beim
+initialen Page-Load von `/konto/*` aufgerufen, um Cookie-Validität zu
+prüfen.
+
+**Response 200** (`CustomerUserPublicSchema`):
+
+```json
+{
+  "data": {
+    "id": "cu_abc...",
+    "email": "maria@example.com",
+    "firstName": "Maria",
+    "lastName": "Müller",
+    "phone": "0157-12345678",
+    "emailVerified": true,
+    "createdAt": "2026-04-15T10:00:00.000Z"
+  }
+}
+```
+
+**Fehler:**
+- 401 `UNAUTHORIZED` — kein/abgelaufenes Cookie.
+
+---
+
+### `PATCH /api/customer/me`
+
+**Auth:** Customer-Session
+**Story:** US-25 AC10
+
+Aktualisiert Profil-Daten. **BUG-402-Fix (v1.4.1):** Im MVP NUR
+`firstName`, `lastName`, `phone`. Eine E-Mail-Änderung ist NICHT
+erlaubt — sie würde einen Pending-State-Mechanismus erfordern (damit
+das Konto unter der alten Adresse bedienbar bleibt, bis die neue
+verifiziert ist) und ist Backlog/IT5.
+
+**Request Body** (`CustomerProfileUpdateSchema`, `.strict()`):
+
+```json
+{
+  "firstName": "Maria",
+  "lastName": "Müller-Neu",
+  "phone": "0157-99999999"
+}
+```
+
+| Feld         | Typ            | Pflicht | Validierung                        |
+| ------------ | -------------- | ------- | ---------------------------------- |
+| `firstName`  | string         | nein    | trim, 1–120 Zeichen                |
+| `lastName`   | string         | nein    | trim, 1–120 Zeichen                |
+| `phone`      | string \| null | nein    | `phoneOptionalSchema`              |
+
+**Strict mode:** Unbekannte Felder (insb. `email`) führen zu 400
+`VALIDATION_ERROR` mit `field: 'email'` (bzw. dem unbekannten Feld).
+Frontend zeigt das `email`-Feld im Profilformular nur read-only an
+mit Hinweistext: "E-Mail-Adresse kann derzeit nicht selbst geändert
+werden. Bitte wenden Sie sich an unser Team."
+
+**Verhalten:**
+
+1. Session-Lookup → 401 wenn fehlt.
+2. Body via `CustomerProfileUpdateSchema` parsen → 400 bei unbekannten
+   Feldern oder Validierungs-Fehlern.
+3. `prisma.customerUser.update({ where: { id: me.id }, data: { ... } })`.
+4. Response 200 mit aktualisiertem `CustomerUserPublicSchema`.
+
+**Response 200:** `CustomerUserPublicSchema`.
+
+**Fehler:**
+- 400 `VALIDATION_ERROR` (unbekanntes Feld inkl. `email`, oder Format-Fehler).
+- 401 `UNAUTHORIZED`.
+
+---
+
+### `GET /api/customer/verify?token=...`
+
+**Auth:** öffentlich (Token-basiert)
+**Story:** US-25 AC2
+
+Aktiviert ein Konto via Verifikations-Link aus der Mail.
+
+**Verhalten:**
+
+1. Token-Lookup (`customer_users.verification_token === token`).
+2. Wenn nicht gefunden → 302 Redirect `/konto/login?error=invalid_token`.
+3. **BUG-401-Fix (v1.4.1):** Wenn `verificationTokenExpiry IS NULL`
+   ODER `verificationTokenExpiry <= now` → 302 Redirect
+   `/konto/login?error=invalid_token` (Token abgelaufen).
+   *(Vorher fälschlich gegen `createdAt + 24h` geprüft — was beim
+   Resend nicht aktualisiert wurde und damit zu Sackgassen-Konten
+   führte.)*
+4. Sonst: in einer Transaktion `emailVerified = true`, `verificationToken = NULL`,
+   `verificationTokenExpiry = NULL` setzen.
+5. **Optional**: setze gleich das `customer-session`-Cookie (Auto-Login
+   nach Verifikation), damit der Redirect zu `/konto` direkt klappt
+   (US-25 AC2).
+
+**Response:** 302 Redirect auf `/konto?verified=1` (mit Set-Cookie-Header bei Auto-Login).
+
+**Fehler:** Bei Token-Fehler: 302 Redirect auf `/konto/login?error=invalid_token`.
+
+---
+
+### `POST /api/customer/resend-verification`
+
+**Auth:** öffentlich (Body enthält E-Mail).
+**Story:** US-25 AC1, AC2
+
+Sendet die Verifikations-Mail neu.
+
+**Request Body:** `{ "email": "maria@example.com" }`
+
+**Verhalten:**
+
+1. Lookup CustomerUser via E-Mail. Wenn nicht gefunden ODER schon
+   verifiziert → trotzdem **200 OK** zurückgeben (Enumeration-Schutz),
+   ohne Mail zu senden.
+2. Sonst (BUG-401-Fix v1.4.1): in einer Transaktion **beide** Felder
+   setzen — `verificationToken = newCuid()` UND
+   `verificationTokenExpiry = now + 24h`. Anschließend
+   `customerVerificationMail` mit dem neuen Token senden.
+
+   **Wichtig:** `createdAt` bleibt unverändert (Audit-Feld bleibt
+   intakt). Der Ablauf-Check im Verify-Endpoint vergleicht
+   `verificationTokenExpiry` (siehe `GET /api/customer/verify`).
+
+**Response 200:** `{ "data": { "ok": true } }` (immer).
+
+**Rate-Limiting:** 3 Anfragen / 60 min / IP + 3 / 24h / Email.
+
+---
+
+### `POST /api/customer/forgot-password`
+
+**Auth:** öffentlich
+**Story:** US-25 AC5
+
+Startet den Passwort-Reset-Flow.
+
+**Request Body** (`CustomerForgotPasswordSchema`):
+
+```json
+{ "email": "maria@example.com" }
+```
+
+**Verhalten:**
+
+1. CustomerUser-Lookup (lowercase).
+2. Wenn nicht vorhanden → trotzdem **200 OK** (Enumeration-Schutz).
+3. Wenn vorhanden: `resetToken = cuid()`, `resetTokenExpiry = now + 1h`.
+4. Persistieren + Mail an `email` mit Link
+   `${BASE_URL}/konto/passwort-zuruecksetzen?token=<resetToken>`.
+
+**Response 200:** `{ "data": { "ok": true } }` (immer).
+
+**Rate-Limiting:** 3 Anfragen / 60 min / IP + 3 / 24h / Email.
+
+---
+
+### `POST /api/customer/reset-password`
+
+**Auth:** öffentlich (Token-basiert)
+**Story:** US-25 AC6
+
+Setzt ein neues Passwort.
+
+**Request Body** (`CustomerResetPasswordSchema`):
+
+```json
+{
+  "token": "rst_abc...",
+  "password": "neuesPasswort12",
+  "passwordConfirm": "neuesPasswort12"
+}
+```
+
+**Verhalten:**
+
+1. Token-Lookup.
+2. Wenn nicht gefunden ODER `resetTokenExpiry < now` → 400 `VALIDATION_ERROR` ("Der Link ist nicht mehr gültig.").
+3. bcrypt-Hash erzeugen, `passwordHash` setzen, `resetToken` + `resetTokenExpiry` auf null.
+4. **Wichtig**: alle bestehenden `customer-session`-JWTs werden NICHT
+   invalidiert (kein Server-Side-Token-Store). Engineers-Hinweis:
+   das ist akzeptabel im MVP, weil Reset üblicherweise nach Konto-
+   Übernahme passiert UND der Angreifer das alte JWT ohnehin nicht hat.
+
+**Response 200:** `{ "data": { "ok": true } }`.
+
+**Rate-Limiting:** 5 Versuche / 60 min / IP.
+
+---
+
+## 12. Kundenportal — Buchungen (Iteration 4 — US-26/US-27)
+
+### `GET /api/customer/bookings`
+
+**Auth:** Customer-Session
+**Story:** US-26 AC1, AC2, AC3
+
+Liefert alle Buchungen des eingeloggten Kunden, gesplittet nach
+"Bevorstehend" und "Vergangen". Sortierung pro Bucket: chronologisch
+(upcoming aufsteigend, past absteigend).
+
+**Algorithmus:**
+
+```
+me = readCustomerSession(req)
+today = todayInBerlin() // "YYYY-MM-DD"
+
+bookings = prisma.booking.findMany({
+  where: { customerId: me.id },
+  include: { attachments, payment, review }
+})
+
+upcoming = bookings.filter(b => b.date >= today && b.status !== 'COMPLETED')
+                   .sort((a, b) => compareDateTime(a, b)) // asc
+
+past = bookings.filter(b => b.date < today || b.status === 'COMPLETED')
+               .sort((a, b) => compareDateTime(b, a)) // desc
+```
+
+**Response 200** (`CustomerBookingsResponseSchema`):
+
+```json
+{
+  "data": {
+    "upcoming": [
+      {
+        "id": "bk_abc...",
+        "date": "2026-05-15",
+        "startTime": "09:00",
+        "endTime": "10:00",
+        "service": "entruempelung",
+        "description": "Keller entrümpeln",
+        "status": "CONFIRMED",
+        "cancellableUntilHours": 48,
+        "isCancellable": true,
+        "canReview": false,
+        "attachments": [],
+        "payment": {
+          "id": "pay_xyz",
+          "amount": 14000,
+          "currency": "eur",
+          "status": "PENDING",
+          "paidAt": null
+        },
+        "review": null,
+        "createdAt": "2026-05-02T10:00:00.000Z",
+        "updatedAt": "2026-05-02T10:00:00.000Z"
+      }
+    ],
+    "past": []
+  }
+}
+```
+
+**`isCancellable`-Berechnung (Backend) — v1.4.1, MAJOR-401 + MAJOR-404 berücksichtigt:**
+
+```ts
+/**
+ * Liefert den Termin-Zeitpunkt einer Buchung als UTC-Date.
+ *
+ * - IT3+: aus b.date + b.startTime via parseBerlinDateTime()
+ *   (interpretiert "YYYY-MM-DD" + "HH:MM" als Berlin-Wall-Clock und
+ *   gibt einen UTC-Zeitpunkt zurück; DST-fest, siehe ARCHITECTURE.md §17.7).
+ * - IT1/IT2 (Bestand): aus b.slot.startsAt (UTC-DateTime).
+ * - sonst: null (Buchung hat keinen bekannten Termin).
+ */
+function bookingStartUTC(b: Booking & { slot?: Slot | null }): Date | null {
+  if (b.date && b.startTime) return parseBerlinDateTime(b.date, b.startTime);
+  if (b.slot?.startsAt)      return new Date(b.slot.startsAt);
+  return null;
+}
+
+function isCancellable(b: Booking & { slot?: Slot | null }): boolean {
+  if (!PORTAL_CANCELLABLE_STATUSES.includes(b.status)) return false;
+
+  const start = bookingStartUTC(b);
+
+  // MAJOR-404: Bestandsbuchungen ohne bekannten Termin (weder date noch slot)
+  // können nicht sinnvoll bewertet werden. Wir geben TRUE zurück, damit der
+  // Kunde nicht fest hängt — Server-Endpoint wird die 24h-Frist selbst
+  // erneut prüfen (Authority).
+  if (!start) return true;
+
+  // 24h-Frist gilt nur für CONFIRMED.
+  if (b.status === 'CONFIRMED') {
+    return start.getTime() - Date.now() > 24 * 60 * 60 * 1000;
+  }
+
+  // PENDING / COUNTER_PROPOSED: solange Termin in der Zukunft liegt.
+  return start.getTime() > Date.now();
+}
+```
+
+**Eigenschaften:**
+
+- **MAJOR-401** (DST-Fest): `parseBerlinDateTime(date, time)` interpretiert
+  Berlin-Wall-Clock korrekt und liefert einen UTC-Zeitpunkt. DST-Übergänge
+  (letzter Sonntag im März / Oktober) werden korrekt aufgelöst — die
+  24h-Frist ist physische Echtzeit, nicht naïve Tag-Differenz.
+- **MAJOR-404** (Null-Fest): Buchungen ohne `date` UND ohne `slot` werden
+  defensiv als cancellable behandelt; der Cancel-Endpoint führt seinen
+  eigenen 24h-Check durch und ist Authority.
+- **Bestandsbuchungen** (Slot-basiert, IT1/IT2 mit `slot.startsAt`):
+  Datum kommt aus `slot.startsAt` (UTC). `isCancellable` funktioniert
+  damit auch für historische Buchungen, die Tom evtl. nachträglich
+  einem Customer-Konto zuweist.
+
+`cancellableUntilHours` zeigt die Stunden, die noch bis zum Termin
+fehlen — wenn negativ ODER Status nicht cancellable ODER `start === null`
+ist, Wert ist `null`.
+
+`canReview` ist true gdw. `status === 'COMPLETED'` UND `review === null`.
+
+`Cache-Control: no-store`.
+
+**Fehler:**
+- 401 `UNAUTHORIZED`.
+
+---
+
+### `GET /api/customer/bookings/:id`
+
+**Auth:** Customer-Session
+**Story:** US-26 AC4
+
+Liefert eine einzelne Buchung des eingeloggten Kunden mit vollen Details.
+
+**Verhalten:**
+
+1. Booking lookup. Wenn `customerId !== me.id` → 404 `NOT_FOUND` (NICHT 403 — Existenz nicht preisgeben).
+2. Sonst: Response wie Items aus `GET /api/customer/bookings`.
+
+**Response 200:** `CustomerBookingSchema`.
+
+**Fehler:**
+- 401 `UNAUTHORIZED`.
+- 404 `NOT_FOUND`.
+
+---
+
+### `POST /api/customer/bookings/:id/cancel`
+
+**Auth:** Customer-Session
+**Story:** US-27
+
+Storniert eine Buchung des eingeloggten Kunden, sofern Bedingungen
+erfüllt sind.
+
+**Request Body:** keiner (POST ohne Body).
+
+**Verhalten:**
+
+1. Booking-Lookup, Ownership-Check (`customerId === me.id`) → sonst 404.
+2. `isCancellable(booking)` prüfen → sonst 409 `CONFLICT` mit Message:
+   - Status nicht erlaubt: "Diese Buchung kann nicht mehr storniert werden."
+   - 24h-Frist verletzt: "Stornierung nur bis 24 Stunden vor dem Termin möglich. Bitte rufen Sie uns an: 0157-74787512."
+3. `prisma.booking.update({ where: { id }, data: { status: 'CANCELLED' } })`.
+4. Mail an Tom (`cancellationToAdmin`, vorhandenes IT2-Template). Fire-and-forget.
+
+**Response 200:**
+
+```json
+{
+  "data": {
+    "id": "bk_abc...",
+    "status": "CANCELLED",
+    "cancelledAt": "2026-05-02T13:42:00.000Z"
+  }
+}
+```
+
+**Fehler:**
+- 401 `UNAUTHORIZED`.
+- 404 `NOT_FOUND` — Buchung gehört nicht dem Kunden / existiert nicht.
+- 409 `CONFLICT` — Status nicht stornierbar oder 24h-Frist überschritten.
+
+---
+
+## 13. Zahlung — Stripe-Integration (Iteration 4 — US-28)
+
+### `POST /api/admin/bookings/:id/payment`
+
+**Auth:** Admin
+**Story:** US-28 AC1
+
+Tom hinterlegt einen Zahlbetrag für eine bestätigte Buchung. Erstellt
+einen `Payment`-Datensatz (Status PENDING) und sendet eine
+Zahlungsaufforderung per Mail an den Kunden.
+
+**Voraussetzungen:**
+
+- Booking-Status muss `CONFIRMED` oder `COMPLETED` sein. Sonst 409
+  `CONFLICT` ("Zahlbetrag erst nach Terminbestätigung möglich.").
+- Booking darf noch keine Payment haben (Update via DELETE + neu
+  anlegen, falls Tom korrigieren will). Sonst 409 `CONFLICT`
+  ("Für diese Buchung wurde bereits ein Betrag hinterlegt.").
+
+**Request Body** (`CreatePaymentSchema`):
+
+```json
+{
+  "amount": 14000,
+  "currency": "eur",
+  "description": "Entrümpelung Keller, 4h"
+}
+```
+
+| Feld          | Typ    | Pflicht | Validierung                                  |
+| ------------- | ------ | ------- | -------------------------------------------- |
+| `amount`      | number | ja      | Cents, integer, 100 <= x <= 1_000_000.        |
+| `currency`    | string | nein    | Default `'eur'`. Aktuell nur 'eur' erlaubt.   |
+| `description` | string | nein    | max 500 Zeichen. Wird Stripe als description weitergereicht. |
+
+**Verhalten:**
+
+1. Booking laden, Status-Check.
+2. Payment anlegen: `{ bookingId, amount, currency, description, status: 'PENDING' }`.
+3. Mail an `booking.customerEmail` (`paymentRequestToCustomer`-Template):
+   - Subject: "Ihre Rechnung von Bärenstark Hausservice"
+   - Inhalt: Datum/Service/Betrag, Link `${BASE_URL}/konto/zahlung/${booking.id}?token=${booking.cancelToken}` (fallback-Token, falls der Kunde nicht eingeloggt ist).
+4. Antwort 201 mit Payment-Datensatz.
+
+**Response 201:** `PaymentSchema`.
+
+**Fehler:**
+- 400 `VALIDATION_ERROR`.
+- 401 `UNAUTHORIZED`.
+- 404 `NOT_FOUND`.
+- 409 `CONFLICT` — Booking nicht in zulässigem Status / Payment existiert bereits.
+
+---
+
+### `DELETE /api/admin/bookings/:id/payment`
+
+**Auth:** Admin
+**Story:** US-28 (Hilfs-Endpoint)
+
+Löscht eine PENDING-Payment, damit Tom den Betrag korrigieren kann
+(z.B. Tippfehler).
+
+**Voraussetzungen:**
+- Payment muss `status === 'PENDING'` sein (PAID/FAILED/REFUNDED dürfen
+  NICHT gelöscht werden — historische Konsistenz).
+
+**Response 204:** kein Body.
+
+**Fehler:**
+- 401 `UNAUTHORIZED`.
+- 404 `NOT_FOUND`.
+- 409 `CONFLICT` — Payment ist bereits bezahlt / refunded / failed.
+
+---
+
+### `POST /api/payments/create-session`
+
+**Auth:** Customer-Session ODER `cancelToken` als Auth-Fallback (siehe Body).
+**Story:** US-28 AC2, AC3, AC4, AC5
+
+Erzeugt eine Stripe-Checkout-Session und gibt die Stripe-URL zurück.
+Frontend macht `window.location = url`.
+
+**Request Body** (`CreatePaymentSessionSchema`):
+
+```json
+{
+  "bookingId": "bk_abc...",
+  "cancelToken": "tok_xyz..."
+}
+```
+
+`cancelToken` ist optional — nur erforderlich, wenn der Kunde nicht
+eingeloggt ist (Fallback für E-Mail-Klick ohne Konto).
+
+**Verhalten:**
+
+1. Auth-Check:
+   - Wenn `customer-session`-Cookie vorhanden: Booking muss `customerId === me.id` haben.
+   - Sonst: `cancelToken` muss zur Booking gehören. Sonst 401.
+2. Payment-Lookup über `bookingId`. Wenn nicht vorhanden → 404 (Tom hat noch keinen Betrag hinterlegt).
+3. Status-Check:
+   - PAID: 409 `CONFLICT` ("Diese Buchung wurde bereits bezahlt.").
+   - REFUNDED: 409 `CONFLICT` ("Diese Zahlung wurde zurückerstattet.").
+   - PENDING/FAILED: weiter.
+4. Stripe Checkout Session erstellen via Stripe SDK:
+   ```ts
+   const session = await stripe.checkout.sessions.create({
+     mode: 'payment',
+     payment_method_types: ['card', 'paypal'],
+     // Apple Pay / Google Pay laufen über 'card' (automatisch mit Wallets).
+     line_items: [{
+       price_data: {
+         currency: payment.currency,
+         product_data: { name: `Bärenstark — ${SERVICE_LABELS[booking.service]}` , description: payment.description ?? undefined },
+         unit_amount: payment.amount,
+       },
+       quantity: 1,
+     }],
+     metadata: { bookingId, paymentId: payment.id },
+     success_url: `${BASE_URL}/konto/zahlung/erfolg?session_id={CHECKOUT_SESSION_ID}`,
+     cancel_url:  `${BASE_URL}/konto/zahlung/${bookingId}`,
+     customer_email: booking.customerEmail,
+     locale: 'de',
+   });
+   ```
+5. Payment.stripeSessionId mit `session.id` aktualisieren. Wenn vorher `status === 'FAILED'`, auf `PENDING` zurücksetzen (neuer Versuch).
+6. Antwort `{ url: session.url, sessionId: session.id }`.
+
+**Response 201** (`CreatePaymentSessionResponseSchema`):
+
+```json
+{
+  "data": {
+    "url": "https://checkout.stripe.com/c/pay/cs_test_abc...",
+    "sessionId": "cs_test_abc..."
+  }
+}
+```
+
+**Idempotenz:** Wenn die bestehende Payment-Session noch nicht abgelaufen
+ist (Stripe-Sessions: 24h Default), wird sie wiederverwendet (gleiche
+`stripeSessionId`, gleiche URL). Engineers-Hinweis: einfaches
+Re-Generate ist auch akzeptabel — Stripe verrechnet erst beim Abschluss.
+
+**Fehler:**
+- 400 `VALIDATION_ERROR`.
+- 401 `UNAUTHORIZED`.
+- 404 `NOT_FOUND` — Booking oder Payment nicht gefunden.
+- 409 `CONFLICT` — Payment bereits PAID/REFUNDED.
+- 502 `STRIPE_ERROR` — Stripe-API nicht erreichbar.
+
+---
+
+### `GET /api/payments/session-status?session_id=...`
+
+**Auth:** öffentlich (Stripe-Session-ID wirkt token-artig).
+**Story:** US-28 AC6, AC7 (MAJOR-402-Fix v1.4.1)
+
+Liefert den aktuellen Payment-Status zu einer Stripe-Checkout-Session.
+Wird vom Frontend auf `/konto/zahlung/erfolg?session_id=cs_test_...`
+**polled** — auch von Gästen, die nicht eingeloggt sind und somit
+`/api/customer/me` / `/api/customer/bookings/:id` nicht nutzen können.
+
+**Hintergrund (MAJOR-402):** Die alte Spec verlangte Polling auf
+`GET /api/customer/bookings/:id` — das schlägt für Gäste mit 401 fehl.
+Der neue öffentliche Endpoint löst das, ohne sensitive Kunden-Daten
+zu exponieren (er liefert nur Status + paidAt + bookingId).
+
+**Query** (`SessionStatusQuerySchema`):
+
+| Name         | Typ    | Pflicht | Validierung                                              |
+| ------------ | ------ | ------- | -------------------------------------------------------- |
+| `session_id` | string | ja      | Pattern `^cs_(test\|live)_[A-Za-z0-9]+$` (Stripe-Format). |
+
+**Verhalten:**
+
+1. `prisma.payment.findUnique({ where: { stripeSessionId: query.session_id } })`.
+2. Wenn nicht gefunden → 404 `NOT_FOUND` (kein Hinweis auf Existenz).
+3. Sonst Response 200 mit `SessionStatusSchema`.
+
+**Response 200** (`SessionStatusSchema`):
+
+```json
+{
+  "data": {
+    "sessionId": "cs_test_abc...",
+    "status": "PAID",
+    "paidAt": "2026-05-02T13:45:21.000Z",
+    "bookingId": "bk_abc..."
+  }
+}
+```
+
+**Frontend-Polling (Konsument):**
+
+- Direkt nach Page-Load: erster Call.
+- Wenn `status === 'PENDING'`: bis zu **5 Wiederholungen** (`PAYMENT_SESSION_POLL_MAX_ATTEMPTS`)
+  im Abstand von **1 s** (`PAYMENT_SESSION_POLL_INTERVAL_MS`).
+- Wenn nach den 5 Versuchen weiterhin PENDING → Frontend zeigt:
+  "Wir verarbeiten Ihre Zahlung. Sie erhalten in Kürze eine E-Mail-Bestätigung."
+- Eingeloggte Kunden bekommen zusätzlich einen Link zu `/konto/auftrag/<bookingId>`;
+  Gäste sehen nur den statischen Bestätigungstext (kein Login-Hinweis).
+
+`Cache-Control: no-store`.
+
+**Rate-Limiting:** 60 Calls / 5 min / IP (sanity-cap; Frontend macht max 5 in 5s).
+
+**Fehler:**
+- 400 `VALIDATION_ERROR` (ungültiges `session_id`-Format).
+- 404 `NOT_FOUND`.
+- 429 `RATE_LIMITED`.
+
+---
+
+### `POST /api/payments/webhook`
+
+**Auth:** Stripe-Signatur-Check (`STRIPE_WEBHOOK_SECRET`)
+**Story:** US-28 AC6
+
+Stripe-Webhook-Endpoint. Stripe sendet POST mit Event-Payload und
+Header `stripe-signature`. Backend muss:
+
+1. **Raw-Body** lesen (kein automatisches Parsing — Next.js: in Route-
+   Handler `await req.text()` statt `req.json()`).
+2. `stripe.webhooks.constructEvent(rawBody, signatureHeader, STRIPE_WEBHOOK_SECRET)` aufrufen — wirft bei ungültiger Signatur.
+3. Auf Event-Type matchen:
+
+| Event-Type                          | Aktion                                                        |
+| ----------------------------------- | ------------------------------------------------------------- |
+| `checkout.session.completed`        | Payment auf PAID, paidAt = now. Mail an Kunden + Tom.          |
+| `checkout.session.expired`          | Payment auf FAILED. Keine Mail (Kunde hat einfach geschlossen). |
+| `payment_intent.payment_failed`     | Payment auf FAILED. Optional Mail an Kunden ("Bitte erneut").  |
+| `charge.refunded`                   | Payment auf REFUNDED. Mail an Kunden ("Rückerstattung erfolgt"). |
+| Andere                              | Ignoriert, 200 OK.                                            |
+
+**Idempotenz**: Stripe sendet Events potenziell mehrfach. Backend prüft
+vor jedem Update den Status — wenn schon PAID, kein erneuter
+Mail-Versand (kein Update).
+
+**Authentizität-Check ist Pflicht** — ohne Signatur-Check kann jeder die
+URL POSTen und Bezahl-Status faken. `STRIPE_WEBHOOK_SECRET` wird beim
+Anlegen des Webhooks im Stripe-Dashboard generiert.
+
+**Response 200:** `{ "received": true }` (Stripe akzeptiert nur 2xx).
+
+**Bei Signatur-Fehler:** 400 `VALIDATION_ERROR`. Stripe wiederholt automatisch.
+
+**Bei DB-Fehler:** 500 (Stripe wiederholt automatisch — bis zu 3 Tage lang).
+
+---
+
+## 14. Reviews (Iteration 4 — US-29)
+
+### `POST /api/customer/reviews`
+
+**Auth:** Customer-Session
+**Story:** US-29 AC1, AC2, AC3, AC4
+
+Erstellt eine Bewertung zu einer abgeschlossenen Buchung.
+
+**Request Body** (`CreateReviewSchema`):
+
+```json
+{
+  "bookingId": "bk_abc...",
+  "stars": 5,
+  "text": "Super Service, jederzeit wieder!"
+}
+```
+
+| Feld        | Typ    | Pflicht | Validierung                                              |
+| ----------- | ------ | ------- | -------------------------------------------------------- |
+| `bookingId` | string | ja      | Existiert + gehört Kunden + Status COMPLETED + keine Review. |
+| `stars`     | number | ja      | 1–5 (integer).                                           |
+| `text`      | string | nein    | trim, max 500 Zeichen.                                   |
+
+**Verhalten:**
+
+1. Booking-Lookup, Ownership-Check.
+2. Status muss `COMPLETED` sein → sonst 409 `CONFLICT` ("Bewertung erst nach Auftragsabschluss möglich.").
+3. `booking.review === null` → sonst 409 `CONFLICT` ("Sie haben diese Buchung bereits bewertet.").
+4. Review anlegen mit `approved: false`.
+5. Optional: Mail an Tom ("Neue Bewertung wartet auf Freigabe") — fire-and-forget.
+
+**Response 201** (`ReviewSchema` — eingeschränkt):
+
+```json
+{
+  "data": {
+    "id": "rv_xyz...",
+    "stars": 5,
+    "text": "Super Service, jederzeit wieder!",
+    "approved": false,
+    "createdAt": "2026-05-02T13:42:00.000Z"
+  }
+}
+```
+
+**Fehler:**
+- 400 `VALIDATION_ERROR`.
+- 401 `UNAUTHORIZED`.
+- 404 `NOT_FOUND`.
+- 409 `CONFLICT`.
+
+---
+
+### `GET /api/reviews`
+
+**Auth:** öffentlich
+**Story:** US-29 AC7, AC8
+
+Liefert alle freigegebenen Bewertungen für die Startseiten-Sektion.
+Ersetzt die statische Liste aus `lib/reviews.ts` (US-22), sobald
+mindestens `REVIEW_MIN_APPROVED_TO_REPLACE_STATIC = 4` echte Reviews
+vorhanden sind.
+
+**Query-Parameter:**
+
+| Name    | Typ    | Pflicht | Default | Validierung |
+| ------- | ------ | ------- | ------- | ----------- |
+| `limit` | number | nein    | 20      | 1–100       |
+
+**Verhalten:**
+
+1. `prisma.review.findMany({ where: { approved: true }, orderBy: { createdAt: 'desc' }, take: limit, include: { customer: true, booking: { select: { service: true } } } })`.
+2. **MAJOR-403-Klärung (v1.4.1):** Server berechnet `customerName` im Response-Mapper (kein DB-Feld):
+   - `customer !== null` → `customerName = customer.firstName + ' ' + customer.lastName[0] + '.'`
+   - `customer === null` (FK SET NULL nach Konto-Löschung — im MVP nicht möglich) → `customerName = 'Anonym'`
+3. `service` aus `booking.service` (kann null sein, falls Booking gelöscht wurde — dann wird Service auch `null`).
+
+**Response 200:**
+
+```json
+{
+  "data": {
+    "items": [
+      {
+        "id": "rv_xyz...",
+        "customerName": "Maria M.",
+        "service": "entruempelung",
+        "stars": 5,
+        "text": "Super Service, jederzeit wieder!",
+        "createdAt": "2026-05-02T13:42:00.000Z"
+      }
+    ],
+    "average": 4.7,
+    "total": 12
+  }
+}
+```
+
+`average` = arithmetisches Mittel aller approved-stars. `total` = Gesamtanzahl approved Reviews.
+
+`Cache-Control: public, max-age=60, stale-while-revalidate=300`.
+
+**Fehler:** keine spezifischen.
+
+---
+
+### `GET /api/admin/reviews`
+
+**Auth:** Admin
+**Story:** US-29 AC6
+
+Liefert alle Bewertungen (approved + pending), sortiert nach createdAt
+desc, für die Moderations-UI.
+
+**Query-Parameter:**
+
+| Name       | Typ      | Pflicht | Default | Beschreibung                         |
+| ---------- | -------- | ------- | ------- | ------------------------------------ |
+| `approved` | boolean  | nein    | alle    | true / false → filtert auf Status.    |
+
+**Response 200:** `{ "data": Review[] }` mit vollem `ReviewSchema`
+(inkl. customerName aus User+Booking, customerId, bookingId, alle
+Felder — **keine** Nachnamen-Kürzung, Tom sieht die volle Identität
+für die Moderations-Entscheidung).
+
+**`customerName`-Berechnung (Admin-Layer, MAJOR-403-Klärung v1.4.1):**
+
+- `customer !== null` → `customerName = customer.firstName + ' ' + customer.lastName` (volltändig).
+- `customer === null` → `customerName = 'Anonym'`.
+
+`Cache-Control: no-store`.
+
+---
+
+### `PATCH /api/admin/reviews/:id`
+
+**Auth:** Admin
+**Story:** US-29 AC6, AC7
+
+Setzt `approved` auf true (Freigabe) oder false (Ablehnung / Rückzug).
+
+**Request Body** (`ApproveReviewSchema`):
+
+```json
+{ "approved": true }
+```
+
+**Verhalten:**
+
+- Update direkt; Idempotenz: gleicher Wert → 200 ohne DB-Schreiben.
+- Bei Ablehnung (true → false): keine Mail an Kunden (Stille).
+- Bei Erst-Freigabe: optional Mail an Kunden ("Ihre Bewertung wurde veröffentlicht").
+
+**Response 200:** `ReviewSchema`.
+
+**Fehler:**
+- 401 `UNAUTHORIZED`.
+- 404 `NOT_FOUND`.
+
+---
+
+## 15. Booking-Erweiterung — `POST /api/bookings` (IT4)
+
+`POST /api/bookings` bleibt **bezüglich Body unverändert** (kein neues
+Feld). Backend liest beim Request:
+
+```ts
+const customerSession = await readCustomerSession(req); // null oder { id }
+const body = CreateBookingSchema.parse(await req.json());
+
+await prisma.booking.create({
+  data: {
+    ...body,
+    customerId: customerSession?.id ?? null, // <-- IT4
+  },
+});
+```
+
+So bekommt eine eingeloggte Kundin ihre Buchung automatisch zugeordnet
+(US-25 AC8). Gastbuchungen funktionieren weiter wie bisher.
+
+---
+
+## 16. PATCH /api/bookings/:id — IT4-Erweiterung
+
+`UpdateBookingStatusSchema` akzeptiert in IT4 den neuen Status
+`COMPLETED`. State-Machine-Übergänge:
+
+| Vorher    | Nachher    | Erlaubt? | Mail-Trigger                    |
+| --------- | ---------- | -------- | ------------------------------- |
+| CONFIRMED | COMPLETED  | ✓        | Optional: "Termin abgeschlossen — bitte bewerten Sie uns" mit Link `/konto/auftrag/:id`. |
+| PENDING   | COMPLETED  | ✗ (400)  | —                               |
+| Andere    | COMPLETED  | ✗ (400)  | —                               |
+| COMPLETED | →anderes   | ✗ (400)  | Endstatus, nur Idempotenz erlaubt. |
+
+Übrige Übergänge wie IT3 (siehe Section 2). Mail-Trigger
+`bookingConfirmationToCustomer` bleibt.
+
+---
+
+## 17. Endpoint-zu-Story-Matrix (Iteration 4 erweitert)
+
+| Endpoint                                       | US-25 | US-26 | US-27 | US-28 | US-29 |
+| ---------------------------------------------- | :---: | :---: | :---: | :---: | :---: |
+| `POST /api/customer/register`                  |   ✓   |       |       |       |       |
+| `POST /api/customer/login`                     |   ✓   |       |       |       |       |
+| `POST /api/customer/logout`                    |   ✓   |       |       |       |       |
+| `GET /api/customer/me`                         |   ✓   |       |       |       |       |
+| `PATCH /api/customer/me`                       |   ✓   |       |       |       |       |
+| `GET /api/customer/verify`                     |   ✓   |       |       |       |       |
+| `POST /api/customer/resend-verification`       |   ✓   |       |       |       |       |
+| `POST /api/customer/forgot-password`           |   ✓   |       |       |       |       |
+| `POST /api/customer/reset-password`            |   ✓   |       |       |       |       |
+| `GET /api/customer/bookings`                   |       |   ✓   |       |       |       |
+| `GET /api/customer/bookings/:id`               |       |   ✓   |       |   ✓   |   ✓   |
+| `POST /api/customer/bookings/:id/cancel`       |       |       |   ✓   |       |       |
+| `POST /api/admin/bookings/:id/payment`         |       |       |       |   ✓   |       |
+| `DELETE /api/admin/bookings/:id/payment`       |       |       |       |   ✓   |       |
+| `POST /api/payments/create-session`            |       |       |       |   ✓   |       |
+| `GET /api/payments/session-status`             |       |       |       |   ✓   |       |
+| `POST /api/payments/webhook`                   |       |       |       |   ✓   |       |
+| `POST /api/customer/reviews`                   |       |       |       |       |   ✓   |
+| `GET /api/reviews`                             |       |       |       |       |   ✓   |
+| `GET /api/admin/reviews`                       |       |       |       |       |   ✓   |
+| `PATCH /api/admin/reviews/:id`                 |       |       |       |       |   ✓   |
+| `POST /api/bookings` (erweitert)               |       |   ✓   |       |       |       |
+| `PATCH /api/bookings/:id` (COMPLETED)          |       |   ✓   |       |       |   ✓   |
+
+---
+
+## 18. Frontend-Aufrufer-Mapping (Iteration 4)
+
+| Endpoint                                       | Aufgerufen von                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------- |
+| `POST /api/customer/register`                  | `app/konto/registrieren/page.tsx` (Form)                                        |
+| `POST /api/customer/login`                     | `app/konto/login/page.tsx` (Form)                                               |
+| `POST /api/customer/logout`                    | `components/customer/CustomerHeaderMenu.tsx`                                    |
+| `GET /api/customer/me`                         | `app/konto/layout.tsx` (Server-Component) + `lib/customer-auth.ts` (Client-Hook) |
+| `PATCH /api/customer/me`                       | `app/konto/profil/page.tsx`                                                      |
+| `GET /api/customer/verify`                     | `app/konto/verifizieren/page.tsx` (Server-Action)                                |
+| `POST /api/customer/forgot-password`           | `app/konto/passwort-vergessen/page.tsx`                                          |
+| `POST /api/customer/reset-password`            | `app/konto/passwort-zuruecksetzen/page.tsx`                                      |
+| `GET /api/customer/bookings`                   | `app/konto/page.tsx` (Server-Component)                                          |
+| `GET /api/customer/bookings/:id`               | `app/konto/auftrag/[id]/page.tsx`                                                |
+| `POST /api/customer/bookings/:id/cancel`       | `components/customer/CancelBookingButton.tsx`                                    |
+| `POST /api/admin/bookings/:id/payment`         | `components/admin/PaymentEditor.tsx` (NEU IT4)                                   |
+| `POST /api/payments/create-session`            | `app/konto/zahlung/[bookingId]/page.tsx`                                         |
+| `GET /api/payments/session-status`             | `app/konto/zahlung/erfolg/page.tsx` (Polling, MAJOR-402)                         |
+| `POST /api/customer/reviews`                   | `components/customer/ReviewForm.tsx`                                             |
+| `GET /api/reviews`                             | `components/home/ReviewSection.tsx` (umgebaut IT4)                               |
+| `GET /api/admin/reviews`                       | `app/admin/reviews/page.tsx` (NEU IT4)                                           |
+| `PATCH /api/admin/reviews/:id`                 | `components/admin/ReviewModerationTable.tsx`                                     |
+
+---
+
+## 19. ENV-Variablen (Iteration 4 ergänzt)
+
+| Variable                  | Pflicht | Wert / Beispiel                        | Zweck                                  |
+| ------------------------- | ------- | -------------------------------------- | -------------------------------------- |
+| `STRIPE_SECRET_KEY`       | ja      | `sk_test_...` / `sk_live_...`          | Stripe-API-Auth (Server-side, US-28).  |
+| `STRIPE_PUBLISHABLE_KEY`  | ja      | `pk_test_...` / `pk_live_...`          | Stripe-Frontend (optional für Embedded).|
+| `STRIPE_WEBHOOK_SECRET`   | ja      | `whsec_...`                            | Webhook-Signatur-Validierung (US-28).  |
+| `AUTH_SECRET`             | ja      | bestehend (NEXTAUTH_SECRET kann genutzt werden) | Wird auch fürs Customer-JWT verwendet. |
+
+`AUTH_SECRET` ist im Bestand (NextAuth heißt sie `NEXTAUTH_SECRET` — Engineers können denselben Wert für Customer-JWT-Signing wiederverwenden, alternativ ein eigenes `CUSTOMER_AUTH_SECRET` setzen).
+
+---
+
+## 20. Rate-Limits (Iteration 4 ergänzt)
+
+| Endpoint                                  | Rate-Limit                                                |
+| ----------------------------------------- | --------------------------------------------------------- |
+| `POST /api/customer/register`             | 5 / 60 min / IP                                            |
+| `POST /api/customer/login`                | 10 / 15 min / IP                                           |
+| `POST /api/customer/forgot-password`      | 3 / 60 min / IP, 3 / 24h / Email                            |
+| `POST /api/customer/reset-password`       | 5 / 60 min / IP                                            |
+| `POST /api/customer/resend-verification`  | 3 / 60 min / IP, 3 / 24h / Email                            |
+| `POST /api/customer/reviews`              | 5 / 60 min / Customer (per customerId)                     |
+| `POST /api/payments/create-session`       | 20 / 60 min / IP (Stripe-API-Schutz)                       |
+| `GET /api/payments/session-status`        | 60 / 5 min / IP (sanity-cap; FE-Poll macht max 5 in 5s)    |
+| `POST /api/payments/webhook`              | Kein Limit (Stripe-IPs trusted, Signatur-Check ist Authority). |
+

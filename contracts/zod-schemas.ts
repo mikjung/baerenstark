@@ -1,5 +1,5 @@
 /**
- * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.3 — Iteration 3)
+ * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.4.1 — Iteration 4 Revision)
  *
  * Diese Datei ist die einzige Quelle der Wahrheit für die Form
  * der API-Payloads. Sowohl Frontend (Forms, Fetch-Wrapper) als auch
@@ -7,25 +7,58 @@
  *
  * Pfad in der Live-App: src/lib/schemas.ts (synchron mit dieser Datei).
  *
- * Änderungen v1.3 (Iteration 3 — US-17 bis US-24):
- *   - SERVICES erweitert um `'sonstiges'` (US-19).
- *   - CreateBookingSchema umgebaut: `slotId` ist DEPRECATED (nur Bestand);
- *     neue Buchungen senden `date + startTime + endTime` (US-17).
- *   - CreateBookingSchema enthält superRefine: bei service='sonstiges' muss
- *     description ≥ 30 Zeichen sein (US-19).
- *   - CreateBookingSchema enthält optionales `attachmentIds: string[]` (US-18).
- *   - Neue Schemas: AvailabilityTemplateSchema, UpdateAvailabilityTemplateSchema,
- *     DayOverrideSchema, CreateDayOverrideSchema, AvailableSlotsSchema.
- *   - Neue Schemas: BookingAttachmentSchema, UploadResponseSchema.
- *   - Neues Schema: UpcomingBookingSchema (US-21).
- *   - BookingAdminSchema erweitert um date/startTime/endTime/attachments.
- *   - SlotPublicSchema bleibt für Bestand erhalten; neuer
- *     `AvailableTimeSlotSchema` für IT3-Buchungs-UI.
+ * Änderungen v1.4.1 (QA-Revision):
+ *   - **BUG-402 Fix:** `CustomerProfileUpdateSchema` akzeptiert NUR
+ *     firstName / lastName / phone — kein `email`-Feld mehr. E-Mail-
+ *     Änderung erfordert Pending-Mechanismus (pendingEmail-Spalten),
+ *     der im MVP nicht implementiert ist. Versucht ein Frontend
+ *     trotzdem `email` zu senden, antwortet das Backend mit 400
+ *     `VALIDATION_ERROR` (unknown field).
+ *   - **MAJOR-402 Fix:** Neuer `SessionStatusSchema` für den
+ *     öffentlichen Endpunkt `GET /api/payments/session-status` —
+ *     Erfolgsseite kann den Stripe-Status auch ohne Customer-Session
+ *     prüfen (Polling-fähig).
+ *   - **MAJOR-403 Klärung:** `customerName` in ReviewSchema und
+ *     PublicReviewSchema bleibt im Response Pflicht; Backend leitet
+ *     ihn live aus dem Customer-Join ab (`firstName + lastName[0] + '.'`),
+ *     Fallback `"Anonym"` bei `customerId === null`. Kein Schema-
+ *     Eingriff (siehe ARCHITECTURE.md §17.1).
+ *   - **MAJOR-405 Fix:** `CustomerLoginSchema` akzeptiert optional
+ *     `redirectUrl`. Neuer `CustomerLoginResponseSchema` enthält den
+ *     vom Backend validierten Pfad als `redirectUrl`. Externe URLs /
+ *     Open-Redirects werden auf `/konto` gefiltert (siehe
+ *     `safeCustomerCallback()` in ARCHITECTURE.md §17.1).
  *
- * Änderungen v1.2 (Iteration 2):
- *   - BookingStatus erweitert: COUNTER_PROPOSED, CANCELLED.
- *   - customerEmail Pflicht, preprocess-Härtung.
- *   - Counter-Proposal, Rebooking, WeeklyAvailability, Calendar-Schemas.
+ * Änderungen v1.4 (Iteration 4 — US-25 bis US-29):
+ *   - **Kunden-Auth (US-25):**
+ *     - CustomerRegisterSchema, CustomerLoginSchema,
+ *       CustomerForgotPasswordSchema, CustomerResetPasswordSchema,
+ *       CustomerProfileUpdateSchema, CustomerVerifyTokenQuerySchema.
+ *     - CustomerUserPublicSchema (Response von GET /api/customer/me).
+ *   - **Kundenportal (US-26/27):**
+ *     - CustomerBookingSchema (reduzierte Booking-Antwort fürs Portal).
+ *     - CustomerBookingsResponseSchema (upcoming / past Split).
+ *   - **Zahlung (US-28):**
+ *     - CreatePaymentSchema (Admin: Betrag hinterlegen).
+ *     - PaymentSchema (Response).
+ *     - CreatePaymentSessionSchema (Body: bookingId).
+ *     - SessionStatusQuerySchema + SessionStatusSchema (öffentlicher
+ *       Status-Endpoint für Stripe-Erfolgsseite, MAJOR-402-Fix).
+ *     - StripeWebhookEventSchema (für Webhook-Validation).
+ *     - PaymentStatusSchema enum.
+ *   - **Reviews (US-29):**
+ *     - CreateReviewSchema (Body), ReviewSchema (Response),
+ *       PublicReviewSchema, ApproveReviewSchema (Admin).
+ *   - **Booking-Status erweitert:** COMPLETED.
+ *   - **BookingAdminSchema erweitert** um payment + customerId.
+ *   - **CreateBookingSchema unverändert** — `customerId` wird serverseitig
+ *     aus dem Cookie abgeleitet, NICHT aus dem Body.
+ *   - Neuer Fehlercode: EMAIL_NOT_VERIFIED (422), PAYMENT_REQUIRED (402)
+ *     bleibt Backlog.
+ *
+ * Änderungen v1.3 (Iteration 3 — US-17 bis US-24): siehe Git-History.
+ *
+ * Änderungen v1.2 (Iteration 2): siehe Git-History.
  */
 
 import { z } from 'zod';
@@ -53,7 +86,7 @@ export const CUSTOM_SERVICE_SLUG: Service = 'sonstiges';
 export const CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH = 30;
 
 // ---------------------------------------------------------------------------
-// Booking-Status
+// Booking-Status (Iteration 4: COMPLETED neu)
 // ---------------------------------------------------------------------------
 export const BookingStatusSchema = z.enum([
   'PENDING',
@@ -61,6 +94,7 @@ export const BookingStatusSchema = z.enum([
   'REJECTED',
   'COUNTER_PROPOSED',
   'CANCELLED',
+  'COMPLETED', // IT4 — Voraussetzung für Bewertung (US-29).
 ]);
 export type BookingStatus = z.infer<typeof BookingStatusSchema>;
 
@@ -74,6 +108,14 @@ export const TERMINAL_BOOKING_STATUSES: readonly BookingStatus[] = [
   'CONFIRMED',
   'REJECTED',
   'CANCELLED',
+  'COMPLETED', // IT4
+] as const;
+
+/** Status, in denen ein Kunde im Portal stornieren darf (vor 24h-Frist-Check). */
+export const PORTAL_CANCELLABLE_STATUSES: readonly BookingStatus[] = [
+  'PENDING',
+  'CONFIRMED',
+  'COUNTER_PROPOSED',
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -116,7 +158,7 @@ function timeStringToMinutes(t: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Slot (Bestand IT1/IT2 — DEPRECATED in IT3)
+// Slot (Bestand IT1/IT2 — DEPRECATED in IT3, unverändert IT4)
 // ---------------------------------------------------------------------------
 
 export const SlotPublicSchema = z.object({
@@ -183,6 +225,18 @@ const phoneSchema = z
     `Telefonnummer muss mindestens ${PHONE_MIN_DIGITS} Ziffern enthalten`,
   );
 
+const phoneOptionalSchema = z
+  .string()
+  .trim()
+  .max(40, 'Telefonnummer ist zu lang')
+  .regex(PHONE_ALLOWED_CHARS, 'Telefonnummer enthält ungültige Zeichen')
+  .refine(
+    (val) => (val.match(/\d/g)?.length ?? 0) >= PHONE_MIN_DIGITS,
+    `Telefonnummer muss mindestens ${PHONE_MIN_DIGITS} Ziffern enthalten`,
+  )
+  .optional()
+  .or(z.literal('').transform(() => undefined));
+
 const customerEmailRequiredSchema = z.preprocess(
   (v) => {
     if (typeof v !== 'string') return v;
@@ -200,28 +254,10 @@ const customerEmailRequiredSchema = z.preprocess(
 
 // ---------------------------------------------------------------------------
 // Booking — IT3 (Date/Time-basiert) + IT1/IT2-Bestandsfeld slotId
+// IT4-Anmerkung: customerId wird NICHT aus dem Body gelesen — Backend liest
+// die ID aus dem `customer-session`-Cookie und befüllt sie selbst.
 // ---------------------------------------------------------------------------
 
-/**
- * Body für POST /api/bookings (öffentlich, Kunde) — Iteration 3.
- *
- * Modus 1 (NEU IT3, Standard für neue Buchungen):
- *   - `date`, `startTime`, `endTime` sind Pflicht.
- *   - `slotId` darf NICHT gesetzt sein (oder ist leer/undefined).
- *
- * Modus 2 (Bestand IT1/IT2, Re-Booking-Flow für alte Buchungen):
- *   - `slotId` ist Pflicht.
- *   - `date`, `startTime`, `endTime` dürfen NICHT gesetzt sein.
- *
- * Genau einer der beiden Modi muss erfüllt sein. Wird im superRefine geprüft.
- *
- * Für US-19 (`service === 'sonstiges'`): description muss ≥ 30 Zeichen sein.
- *
- * Für US-18: optionales `attachmentIds`-Array — Frontend lädt Dateien zuerst
- * via `POST /api/upload` hoch, sammelt die zurückgegebenen IDs und schickt
- * sie zusammen mit der Buchung. Backend verknüpft die `BookingAttachment`-
- * Datensätze nach Insert mit der neuen Booking.
- */
 export const CreateBookingSchema = z
   .object({
     // IT3-Modus:
@@ -254,7 +290,6 @@ export const CreateBookingSchema = z
     }),
   })
   .superRefine((data, ctx) => {
-    // Modus-Check: genau einer der beiden Modi.
     const hasDateMode = !!(data.date && data.startTime && data.endTime);
     const hasSlotMode = !!data.slotId;
 
@@ -276,7 +311,6 @@ export const CreateBookingSchema = z
     }
 
     if (hasDateMode) {
-      // endTime > startTime (lexikographisch + numerisch).
       const startMin = timeStringToMinutes(data.startTime!);
       const endMin = timeStringToMinutes(data.endTime!);
       if (endMin <= startMin) {
@@ -287,13 +321,10 @@ export const CreateBookingSchema = z
         });
       }
 
-      // date in der Zukunft (Berlin-TZ-Datum-Vergleich).
-      // Hinweis: tagesgenauer Vergleich; das Backend führt zusätzlich
-      // einen Verfügbarkeitsfenster-Check durch.
       const today = new Date();
       const todayBerlin = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Europe/Berlin',
-      }).format(today); // "YYYY-MM-DD"
+      }).format(today);
       if (data.date! < todayBerlin) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -303,7 +334,6 @@ export const CreateBookingSchema = z
       }
     }
 
-    // US-19: Sonstiges-Service zwingt 30+ Zeichen Beschreibung.
     if (data.service === CUSTOM_SERVICE_SLUG) {
       if (data.description.length < CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH) {
         ctx.addIssue({
@@ -316,14 +346,6 @@ export const CreateBookingSchema = z
   });
 export type CreateBookingInput = z.infer<typeof CreateBookingSchema>;
 
-/**
- * Form-Schema für `BookingForm.tsx` — wie CreateBookingSchema, aber ohne
- * `date/startTime/endTime/slotId`. Diese Werte verwaltet die Komponente
- * außerhalb von React-Hook-Form (im React-State), damit der Bug aus
- * BUG_BOOKING_IT3.md (hidden Input + register) nicht erneut auftritt.
- *
- * Beim Submit setzt die Komponente programmatisch die fehlenden Felder.
- */
 export const BookingFormSchema = z
   .object({
     customerName: z
@@ -357,11 +379,13 @@ export const BookingFormSchema = z
 export type BookingFormInput = z.infer<typeof BookingFormSchema>;
 
 // ---------------------------------------------------------------------------
-// PATCH /api/bookings/:id (Admin — CONFIRMED|REJECTED)
+// PATCH /api/bookings/:id (Admin — CONFIRMED|REJECTED|COMPLETED)
+// IT4: COMPLETED ergänzt — Tom markiert Termin nach Erbringung als
+// abgeschlossen, was den Bewertungs-Flow im Kundenportal freischaltet.
 // ---------------------------------------------------------------------------
 
 export const UpdateBookingStatusSchema = z.object({
-  status: z.enum(['CONFIRMED', 'REJECTED']),
+  status: z.enum(['CONFIRMED', 'REJECTED', 'COMPLETED']),
 });
 export type UpdateBookingStatusInput = z.infer<typeof UpdateBookingStatusSchema>;
 
@@ -387,7 +411,7 @@ export const RebookingSchema = z.object({
 export type RebookingInput = z.infer<typeof RebookingSchema>;
 
 // ---------------------------------------------------------------------------
-// Booking — Admin-Antwort (erweitert in IT3)
+// Booking — Admin-Antwort (IT4 erweitert um payment + customerId)
 // ---------------------------------------------------------------------------
 
 export const BookingAttachmentSchema = z.object({
@@ -400,14 +424,6 @@ export const BookingAttachmentSchema = z.object({
 });
 export type BookingAttachment = z.infer<typeof BookingAttachmentSchema>;
 
-/**
- * Admin-Antwort für GET /api/bookings.
- *
- * Iteration 3:
- *  - `slot` ist nullable (neue Buchungen haben keinen Slot).
- *  - `date / startTime / endTime` für IT3-Buchungen.
- *  - `attachments` für Datei-Anhänge (US-18).
- */
 export const BookingAdminSchema = z.object({
   id: z.string(),
   slot: z
@@ -422,6 +438,8 @@ export const BookingAdminSchema = z.object({
   date: z.string().nullable(),
   startTime: z.string().nullable(),
   endTime: z.string().nullable(),
+  // IT4: optionale Verknüpfung zu einem registrierten Kunden.
+  customerId: z.string().nullable(),
   customerName: z.string(),
   customerPhone: z.string(),
   customerEmail: z.string(),
@@ -440,15 +458,26 @@ export const BookingAdminSchema = z.object({
     })
     .nullable(),
   attachments: z.array(BookingAttachmentSchema),
+  // IT4: optionale Zahlung.
+  payment: z
+    .object({
+      id: z.string(),
+      bookingId: z.string(),
+      amount: z.number().int().positive(),
+      currency: z.string(),
+      status: z.enum(['PENDING', 'PAID', 'FAILED', 'REFUNDED']),
+      paidAt: z.string().datetime({ offset: true }).nullable(),
+      stripeSessionId: z.string().nullable(),
+      description: z.string().nullable(),
+      createdAt: z.string().datetime({ offset: true }),
+      updatedAt: z.string().datetime({ offset: true }),
+    })
+    .nullable(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type BookingAdmin = z.infer<typeof BookingAdminSchema>;
 
-/**
- * US-21: Übersicht bevorstehender bestätigter Termine im Admin-Dashboard.
- * Reduzierte Form (kein customerPhone/Email/description), für die Liste.
- */
 export const UpcomingBookingSchema = z.object({
   id: z.string(),
   date: z.string(),
@@ -456,25 +485,19 @@ export const UpcomingBookingSchema = z.object({
   endTime: z.string(),
   customerName: z.string(),
   service: ServiceSchema,
-  /** true, wenn das Datum dem heutigen Tag (Berlin-TZ) entspricht. */
   isToday: z.boolean(),
 });
 export type UpcomingBooking = z.infer<typeof UpcomingBookingSchema>;
 
 // ---------------------------------------------------------------------------
-// Iteration 3 — AvailabilityTemplate (US-17)
+// Iteration 3 — AvailabilityTemplate (US-17, unverändert)
 // ---------------------------------------------------------------------------
 
 const SLOT_DURATION_MIN_MINUTES = 15;
-const SLOT_DURATION_MAX_MINUTES = 480; // 8h
+const SLOT_DURATION_MAX_MINUTES = 480;
 export const AVAILABILITY_TEMPLATE_SLOT_DURATION_MIN = SLOT_DURATION_MIN_MINUTES;
 export const AVAILABILITY_TEMPLATE_SLOT_DURATION_MAX = SLOT_DURATION_MAX_MINUTES;
 
-/**
- * Single Day in der AvailabilityTemplate.
- * `startTime < endTime`, `slotDurationMinutes` muss in das Fenster passen
- * (mind. ein Slot).
- */
 export const AvailabilityTemplateDaySchema = z
   .object({
     dayOfWeek: z.number().int().min(0).max(6),
@@ -507,7 +530,6 @@ export const AvailabilityTemplateDaySchema = z
   });
 export type AvailabilityTemplateDay = z.infer<typeof AvailabilityTemplateDaySchema>;
 
-/** Body für PUT /api/admin/availability-template (Bulk-Update). */
 export const UpdateAvailabilityTemplateSchema = z.object({
   days: z
     .array(AvailabilityTemplateDaySchema)
@@ -529,7 +551,7 @@ export const UpdateAvailabilityTemplateSchema = z.object({
 export type UpdateAvailabilityTemplateInput = z.infer<typeof UpdateAvailabilityTemplateSchema>;
 
 // ---------------------------------------------------------------------------
-// Iteration 3 — DayOverride (US-17)
+// Iteration 3 — DayOverride (unverändert)
 // ---------------------------------------------------------------------------
 
 export const DayOverrideSchema = z.object({
@@ -544,13 +566,6 @@ export const DayOverrideSchema = z.object({
 });
 export type DayOverride = z.infer<typeof DayOverrideSchema>;
 
-/**
- * Body für POST /api/admin/day-overrides.
- *
- * Wenn `isActive: false`, sind startTime/endTime irrelevant (Tag ist gesperrt).
- * Wenn `isActive: true`, MÜSSEN startTime/endTime entweder beide null sein
- * (= Template-Defaults nutzen) oder beide "HH:MM" mit endTime > startTime.
- */
 export const CreateDayOverrideSchema = z
   .object({
     date: DateStringSchema,
@@ -583,23 +598,15 @@ export const CreateDayOverrideSchema = z
   });
 export type CreateDayOverrideInput = z.infer<typeof CreateDayOverrideSchema>;
 
-/** Query für GET /api/admin/day-overrides?month=YYYY-MM. */
 export const DayOverrideMonthQuerySchema = z.object({
   month: z.string().regex(/^\d{4}-\d{2}$/, 'Monat muss im Format YYYY-MM sein'),
 });
 export type DayOverrideMonthQuery = z.infer<typeof DayOverrideMonthQuerySchema>;
 
 // ---------------------------------------------------------------------------
-// Iteration 3 — Verfügbare Zeitslots pro Tag (US-17)
+// Iteration 3 — Verfügbare Zeitslots pro Tag (unverändert)
 // ---------------------------------------------------------------------------
 
-/**
- * Ein berechneter Buchungs-Block für GET /api/slots/available?date=YYYY-MM-DD.
- *
- * `available: false` ⇔ es gibt eine aktive Buchung auf diesem Block.
- * Frontend rendert `available: true` als klickbar, `available: false` als
- * ausgegraut.
- */
 export const AvailableTimeSlotSchema = z.object({
   startTime: TimeStringSchema,
   endTime: TimeStringSchema,
@@ -607,19 +614,14 @@ export const AvailableTimeSlotSchema = z.object({
 });
 export type AvailableTimeSlot = z.infer<typeof AvailableTimeSlotSchema>;
 
-/** Antwort für GET /api/slots/available?date=YYYY-MM-DD. */
 export const AvailableSlotsResponseSchema = z.object({
   date: DateStringSchema,
-  /** false = der ganze Tag ist gesperrt (Override oder Wochentag inaktiv). */
   isDayActive: z.boolean(),
-  /** Nicht-leere Liste, wenn isDayActive=true; sonst leeres Array. */
   slots: z.array(AvailableTimeSlotSchema),
-  /** Optional: Override-Reason (Urlaub etc.), falls Tag durch Override gesperrt. */
   overrideReason: z.string().nullable().optional(),
 });
 export type AvailableSlotsResponse = z.infer<typeof AvailableSlotsResponseSchema>;
 
-/** Query für GET /api/slots/available. */
 export const AvailableSlotsQuerySchema = z.object({
   date: DateStringSchema,
 });
@@ -677,10 +679,10 @@ export const CalendarQuerySchema = z.object({
 export type CalendarQueryInput = z.infer<typeof CalendarQuerySchema>;
 
 // ---------------------------------------------------------------------------
-// Iteration 3 — Datei-Upload (US-18)
+// Iteration 3 — Datei-Upload (unverändert)
 // ---------------------------------------------------------------------------
 
-export const UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
+export const UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const UPLOAD_MAX_FILES_PER_BOOKING = 5;
 export const UPLOAD_ACCEPTED_CONTENT_TYPES = [
   'image/jpeg',
@@ -688,13 +690,12 @@ export const UPLOAD_ACCEPTED_CONTENT_TYPES = [
   'image/webp',
   'image/gif',
   'video/mp4',
-  'video/quicktime', // .mov
+  'video/quicktime',
   'application/pdf',
 ] as const;
 export type UploadContentType = (typeof UPLOAD_ACCEPTED_CONTENT_TYPES)[number];
 
 export const UploadResponseSchema = z.object({
-  /** Temporäre Attachment-ID, wird beim POST /api/bookings im `attachmentIds`-Array referenziert. */
   attachmentId: z.string(),
   url: z.string().url(),
   filename: z.string(),
@@ -704,7 +705,7 @@ export const UploadResponseSchema = z.object({
 export type UploadResponse = z.infer<typeof UploadResponseSchema>;
 
 // ---------------------------------------------------------------------------
-// Auth (Login + Setup) — unverändert
+// Auth (Login + Setup) — Admin (unverändert)
 // ---------------------------------------------------------------------------
 
 export const LoginSchema = z.object({
@@ -726,14 +727,424 @@ export const AdminSetupSchema = z
   });
 export type AdminSetupInput = z.infer<typeof AdminSetupSchema>;
 
+// ===========================================================================
+// ITERATION 4 — Kunden-Auth (US-25)
+// ===========================================================================
+
+/** Mindestlänge Passwort für Kunden-Konten (US-25 AC1). */
+export const CUSTOMER_PASSWORD_MIN_LENGTH = 8;
+export const CUSTOMER_PASSWORD_MAX_LENGTH = 200;
+
+const customerPasswordSchema = z
+  .string()
+  .min(CUSTOMER_PASSWORD_MIN_LENGTH, `Passwort muss mindestens ${CUSTOMER_PASSWORD_MIN_LENGTH} Zeichen haben`)
+  .max(CUSTOMER_PASSWORD_MAX_LENGTH, 'Passwort ist zu lang');
+
+const customerEmailLoginSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email('Bitte eine gültige E-Mail-Adresse angeben')
+  .max(254, 'E-Mail-Adresse ist zu lang');
+
+/** Body für POST /api/customer/register (US-25 AC1). */
+export const CustomerRegisterSchema = z.object({
+  email: customerEmailLoginSchema,
+  password: customerPasswordSchema,
+  firstName: z.string().trim().min(1, 'Bitte Vorname angeben').max(120, 'Vorname ist zu lang'),
+  lastName: z.string().trim().min(1, 'Bitte Nachname angeben').max(120, 'Nachname ist zu lang'),
+  phone: phoneOptionalSchema,
+  privacyAccepted: z.literal(true, {
+    errorMap: () => ({ message: 'Bitte den Datenschutzhinweis bestätigen' }),
+  }),
+});
+export type CustomerRegisterInput = z.infer<typeof CustomerRegisterSchema>;
+
+/**
+ * Body für POST /api/customer/login (US-25 AC3).
+ *
+ * **MAJOR-405-Fix (v1.4.1):** `redirectUrl` ist optional. Backend
+ * validiert ihn via `safeCustomerCallback()` (siehe ARCHITECTURE.md
+ * §17.1) und gibt den geprüften Wert in `data.redirectUrl` zurück.
+ * Ungültige Werte (externe Hosts, protokoll-relative URLs etc.)
+ * werden auf `/konto` zurückgesetzt — kein Fehler, sondern stiller
+ * Fallback. Damit ist Open-Redirect ausgeschlossen, ohne den UX-
+ * Flow zu unterbrechen.
+ */
+export const CustomerLoginSchema = z.object({
+  email: customerEmailLoginSchema,
+  password: z.string().min(1, 'Passwort darf nicht leer sein'),
+  /** Relativer Pfad ohne Host. Wird serverseitig validiert; sonst Fallback `/konto`. */
+  redirectUrl: z.string().max(512).optional(),
+});
+export type CustomerLoginInput = z.infer<typeof CustomerLoginSchema>;
+
+/** Body für POST /api/customer/forgot-password (US-25 AC5). */
+export const CustomerForgotPasswordSchema = z.object({
+  email: customerEmailLoginSchema,
+});
+export type CustomerForgotPasswordInput = z.infer<typeof CustomerForgotPasswordSchema>;
+
+/** Body für POST /api/customer/reset-password (US-25 AC6). */
+export const CustomerResetPasswordSchema = z
+  .object({
+    token: z.string().min(1, 'Token fehlt'),
+    password: customerPasswordSchema,
+    passwordConfirm: z.string(),
+  })
+  .refine((d) => d.password === d.passwordConfirm, {
+    message: 'Passwörter stimmen nicht überein',
+    path: ['passwordConfirm'],
+  });
+export type CustomerResetPasswordInput = z.infer<typeof CustomerResetPasswordSchema>;
+
+/** Query für GET /api/customer/verify?token=... */
+export const CustomerVerifyTokenQuerySchema = z.object({
+  token: z.string().min(1, 'Token fehlt'),
+});
+export type CustomerVerifyTokenQuery = z.infer<typeof CustomerVerifyTokenQuerySchema>;
+
+/**
+ * Body für PATCH /api/customer/me (Profil-Update, US-25 AC10).
+ *
+ * **BUG-402-Fix (v1.4.1):** `email`-Feld ist ENTFERNT. E-Mail-Änderung
+ * im MVP nicht erlaubt — sie würde einen Pending-State-Mechanismus
+ * erfordern (pendingEmail / pendingEmailToken / pendingEmailTokenExpiry),
+ * damit das Konto unter der alten E-Mail bedienbar bleibt, bis die neue
+ * verifiziert ist. Das ist Backlog (eigene Story IT5).
+ *
+ * Schema ist `.strict()` — unbekannte Felder (insb. `email`) führen zu
+ * 400 `VALIDATION_ERROR`. Frontend zeigt das `email`-Feld im Profil-
+ * Formular nur als read-only an mit Hinweistext.
+ */
+export const CustomerProfileUpdateSchema = z
+  .object({
+    firstName: z.string().trim().min(1).max(120).optional(),
+    lastName: z.string().trim().min(1).max(120).optional(),
+    phone: phoneOptionalSchema,
+  })
+  .strict();
+export type CustomerProfileUpdateInput = z.infer<typeof CustomerProfileUpdateSchema>;
+
+/** Response von GET /api/customer/me. Enthält keine sensiblen Felder. */
+export const CustomerUserPublicSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  firstName: z.string(),
+  lastName: z.string(),
+  phone: z.string().nullable(),
+  emailVerified: z.boolean(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type CustomerUserPublic = z.infer<typeof CustomerUserPublicSchema>;
+
+/**
+ * Response von POST /api/customer/login.
+ *
+ * Erweitert `CustomerUserPublicSchema` um `redirectUrl` — den
+ * vom Backend via `safeCustomerCallback()` validierten Ziel-Pfad
+ * (MAJOR-405-Fix v1.4.1). Frontend nutzt diesen Wert direkt für
+ * `router.push()` ohne weitere Prüfung; ungültige Eingaben sind
+ * bereits auf `/konto` zurückgesetzt.
+ */
+export const CustomerLoginResponseSchema = CustomerUserPublicSchema.extend({
+  redirectUrl: z.string().min(1),
+});
+export type CustomerLoginResponse = z.infer<typeof CustomerLoginResponseSchema>;
+
+// ===========================================================================
+// ITERATION 4 — Kundenportal-Buchungen (US-26/27)
+// ===========================================================================
+
+/**
+ * Reduzierte Booking-Antwort fürs Kundenportal.
+ *
+ * Enthält keine sensiblen Admin-Felder (mailError, cancelToken nur teilweise).
+ * cancelToken bleibt enthalten, damit die Storno-Mail-Aktion auch im Portal
+ * funktioniert (Hybrid-Flow).
+ */
+export const CustomerBookingSchema = z.object({
+  id: z.string(),
+  date: z.string().nullable(),
+  startTime: z.string().nullable(),
+  endTime: z.string().nullable(),
+  service: ServiceSchema,
+  description: z.string(),
+  status: BookingStatusSchema,
+  /** Liegt das Datum mehr als 24h in der Zukunft? Backend berechnet, Frontend zeigt Storno-Button. */
+  cancellableUntilHours: z.number().int().nullable(),
+  /** true wenn cancellable im Portal (Status erlaubt + 24h-Frist erfüllt). */
+  isCancellable: z.boolean(),
+  /** Wenn true: Bewertungs-Button im Detail-View zeigen (Status === 'COMPLETED' UND keine Review existiert). */
+  canReview: z.boolean(),
+  attachments: z.array(BookingAttachmentSchema),
+  payment: z
+    .object({
+      id: z.string(),
+      amount: z.number().int().positive(),
+      currency: z.string(),
+      status: z.enum(['PENDING', 'PAID', 'FAILED', 'REFUNDED']),
+      paidAt: z.string().datetime({ offset: true }).nullable(),
+    })
+    .nullable(),
+  /** Wenn die Buchung schon eine Review hat — fürs Detail-View, schreibgeschützt. */
+  review: z
+    .object({
+      id: z.string(),
+      stars: z.number().int().min(1).max(5),
+      text: z.string().nullable(),
+      approved: z.boolean(),
+      createdAt: z.string().datetime({ offset: true }),
+    })
+    .nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type CustomerBooking = z.infer<typeof CustomerBookingSchema>;
+
+/** Response von GET /api/customer/bookings — Split nach kommend/vergangen. */
+export const CustomerBookingsResponseSchema = z.object({
+  upcoming: z.array(CustomerBookingSchema),
+  past: z.array(CustomerBookingSchema),
+});
+export type CustomerBookingsResponse = z.infer<typeof CustomerBookingsResponseSchema>;
+
+/**
+ * Server-seitige Konstante: Stornierungsfrist (in Stunden) für US-27.
+ * Bei < 24h vor Termin ist Self-Service-Storno gesperrt — Kunde muss anrufen.
+ */
+export const PORTAL_CANCEL_DEADLINE_HOURS = 24;
+
+// ===========================================================================
+// ITERATION 4 — Zahlung (US-28)
+// ===========================================================================
+
+export const PaymentStatusSchema = z.enum(['PENDING', 'PAID', 'FAILED', 'REFUNDED']);
+export type PaymentStatus = z.infer<typeof PaymentStatusSchema>;
+
+/**
+ * Body für POST /api/admin/bookings/:id/payment.
+ *
+ * `amount` ist in **Cents** (Stripe-Konvention). Tom gibt im UI Euro ein,
+ * Frontend multipliziert × 100 (mit Math.round für Float-Sicherheit).
+ *
+ * Min-Betrag: 100 Cent (1 €) — verhindert Rückfall auf 0 oder negative Beträge.
+ * Max-Betrag: 1.000.000 Cent (10.000 €) — sanity-check für Tippfehler.
+ */
+export const CreatePaymentSchema = z.object({
+  amount: z
+    .number()
+    .int('Betrag muss eine ganze Zahl in Cents sein')
+    .min(100, 'Betrag muss mindestens 1 € (100 Cent) sein')
+    .max(1_000_000, 'Betrag darf höchstens 10.000 € sein'),
+  currency: z.literal('eur').optional(),
+  description: z.string().trim().max(500, 'Beschreibung ist zu lang').optional(),
+});
+export type CreatePaymentInput = z.infer<typeof CreatePaymentSchema>;
+
+/** Response-Schema für Payment (in BookingAdmin + GET /api/payments/:id eingebettet). */
+export const PaymentSchema = z.object({
+  id: z.string(),
+  bookingId: z.string(),
+  stripeSessionId: z.string().nullable(),
+  amount: z.number().int().positive(),
+  currency: z.string(),
+  status: PaymentStatusSchema,
+  description: z.string().nullable(),
+  paidAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type Payment = z.infer<typeof PaymentSchema>;
+
+/**
+ * Body für POST /api/payments/create-session.
+ *
+ * Authentication-Modi:
+ *   1. Eingeloggter Kunde (`customer-session`-Cookie): bookingId muss zu
+ *      `customerId === me.id` gehören.
+ *   2. Anonym mit `cancelToken` als Fallback (z.B. Kunde wurde nicht
+ *      registriert; Tom hat trotzdem Payment angelegt). Backend prüft,
+ *      dass `cancelToken` zur Buchung gehört.
+ */
+export const CreatePaymentSessionSchema = z
+  .object({
+    bookingId: z.string().min(1),
+    /** Optional: cancelToken für Gast-Zahlung (kein Login nötig). */
+    cancelToken: z.string().min(1).optional(),
+  });
+export type CreatePaymentSessionInput = z.infer<typeof CreatePaymentSessionSchema>;
+
+/** Response von POST /api/payments/create-session. */
+export const CreatePaymentSessionResponseSchema = z.object({
+  /** Stripe-Checkout-Session-URL (`https://checkout.stripe.com/...`). Frontend macht window.location = url. */
+  url: z.string().url(),
+  sessionId: z.string(),
+});
+export type CreatePaymentSessionResponse = z.infer<typeof CreatePaymentSessionResponseSchema>;
+
+/**
+ * Query für GET /api/payments/session-status?session_id=xxx
+ *
+ * **MAJOR-402-Fix (v1.4.1):** Öffentlicher Status-Endpoint, der nach
+ * Stripe-Redirect auf `/konto/zahlung/erfolg?session_id=...` aufgerufen
+ * wird. Die Erfolgsseite poll'd diesen Endpoint (max. 5 Versuche, 1s
+ * Intervall), bis der Webhook den Payment-Status auf PAID gesetzt hat.
+ *
+ * Sicherheits-Hinweis: Stripe-Session-IDs sind hochentropisch und nur
+ * dem Käufer bekannt — sie wirken token-artig. Der Endpoint liefert
+ * NUR den Status (kein Kunden-PII, kein Booking-Detail).
+ */
+export const SessionStatusQuerySchema = z.object({
+  session_id: z
+    .string()
+    .min(1, 'session_id fehlt')
+    .regex(/^cs_(test|live)_[A-Za-z0-9]+$/, 'Ungültige Stripe-Session-ID'),
+});
+export type SessionStatusQuery = z.infer<typeof SessionStatusQuerySchema>;
+
+/**
+ * Response von GET /api/payments/session-status.
+ *
+ * **MAJOR-402-Fix (v1.4.1):**
+ *   - `status === 'PAID'`     → Erfolgsseite zeigt finale Bestätigung.
+ *   - `status === 'PENDING'`  → weiter pollen (max 5×, dann Fallback).
+ *   - `status === 'FAILED'`   → Fehler-UI.
+ *   - `status === 'REFUNDED'` → akademisch — sollte direkt nach Redirect nie auftreten.
+ *
+ * `bookingId` kann der eingeloggte Kunde nutzen, um auf
+ * `/konto/auftrag/:id` zu verlinken. Gäste ignorieren das Feld.
+ */
+export const SessionStatusSchema = z.object({
+  sessionId: z.string(),
+  status: PaymentStatusSchema,
+  paidAt: z.string().datetime({ offset: true }).nullable(),
+  /** Hilft eingeloggten Kunden, auf Auftragsdetails zu navigieren. Bei Gästen wird der Link vom Frontend ausgeblendet. */
+  bookingId: z.string(),
+});
+export type SessionStatus = z.infer<typeof SessionStatusSchema>;
+
+/**
+ * Polling-Konstanten für die Stripe-Erfolgsseite (Frontend-Konsumenten).
+ * Sind hier zentral festgelegt, damit BE-Rate-Limits & FE-Polling
+ * synchron bleiben.
+ */
+export const PAYMENT_SESSION_POLL_MAX_ATTEMPTS = 5;
+export const PAYMENT_SESSION_POLL_INTERVAL_MS = 1000;
+
+/**
+ * Stripe-Webhook-Event-Schema (vereinfacht).
+ *
+ * Wir validieren NUR die Felder, die wir nutzen. Stripe-Signatur-Check
+ * (mit `STRIPE_WEBHOOK_SECRET`) passiert VOR dem Zod-Parsing — siehe
+ * `lib/stripe.ts.constructWebhookEvent()`.
+ */
+export const StripeWebhookEventSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  data: z.object({
+    object: z.record(z.unknown()),
+  }),
+});
+export type StripeWebhookEvent = z.infer<typeof StripeWebhookEventSchema>;
+
+/** Stripe-Event-Types, die wir verarbeiten. */
+export const HANDLED_STRIPE_EVENTS = [
+  'checkout.session.completed',
+  'checkout.session.expired',
+  'payment_intent.payment_failed',
+  'charge.refunded',
+] as const;
+export type HandledStripeEvent = (typeof HANDLED_STRIPE_EVENTS)[number];
+
+// ===========================================================================
+// ITERATION 4 — Reviews (US-29)
+// ===========================================================================
+
+/** Min/Max Sterne. */
+export const REVIEW_MIN_STARS = 1;
+export const REVIEW_MAX_STARS = 5;
+export const REVIEW_MAX_TEXT_LENGTH = 500;
+export const REVIEW_MIN_APPROVED_TO_REPLACE_STATIC = 4; // US-29 AC8
+
+/**
+ * Body für POST /api/customer/reviews (US-29).
+ *
+ * Voraussetzungen (Server-side):
+ *   - Eingeloggter Kunde.
+ *   - Booking gehört dem Kunden (booking.customerId === me.id).
+ *   - Booking-Status === 'COMPLETED'.
+ *   - Booking hat noch keine Review.
+ */
+export const CreateReviewSchema = z.object({
+  bookingId: z.string().min(1, 'Buchungs-ID fehlt'),
+  stars: z
+    .number()
+    .int()
+    .min(REVIEW_MIN_STARS, `Mindestens ${REVIEW_MIN_STARS} Stern`)
+    .max(REVIEW_MAX_STARS, `Höchstens ${REVIEW_MAX_STARS} Sterne`),
+  text: z
+    .string()
+    .trim()
+    .max(REVIEW_MAX_TEXT_LENGTH, `Maximal ${REVIEW_MAX_TEXT_LENGTH} Zeichen`)
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
+});
+export type CreateReviewInput = z.infer<typeof CreateReviewSchema>;
+
+/** Body für PATCH /api/admin/reviews/:id (Admin-Freigabe / Ablehnung). */
+export const ApproveReviewSchema = z.object({
+  approved: z.boolean(),
+});
+export type ApproveReviewInput = z.infer<typeof ApproveReviewSchema>;
+
+/** Response-Schema für Review (Admin sieht alles). */
+export const ReviewSchema = z.object({
+  id: z.string(),
+  customerId: z.string().nullable(),
+  bookingId: z.string().nullable(),
+  customerName: z.string(), // wird joined oder snapshot — siehe BE-Spec.
+  service: ServiceSchema.nullable(),
+  stars: z.number().int().min(1).max(5),
+  text: z.string().nullable(),
+  approved: z.boolean(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type Review = z.infer<typeof ReviewSchema>;
+
+/**
+ * Öffentliche Review-Antwort (GET /api/reviews) — keine internen IDs,
+ * Kundenname auf "Vorname N." gekürzt.
+ */
+export const PublicReviewSchema = z.object({
+  id: z.string(),
+  /** "Vorname N." — Backend kürzt Nachname. */
+  customerName: z.string(),
+  service: ServiceSchema.nullable(),
+  stars: z.number().int().min(1).max(5),
+  text: z.string().nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type PublicReview = z.infer<typeof PublicReviewSchema>;
+
 // ---------------------------------------------------------------------------
-// Einheitliches Fehler-Format
+// Einheitliches Fehler-Format (Iteration 4 erweitert)
 // ---------------------------------------------------------------------------
 
 /**
- * Iteration 3 — neue Fehlercodes:
- *  - `PAYLOAD_TOO_LARGE` (413): Datei-Upload überschreitet Größenlimit (US-18).
- *  - `UNSUPPORTED_MEDIA_TYPE` (415): Nicht erlaubter MIME-Type (US-18).
+ * Iteration 4 — neue Fehlercodes:
+ *  - `EMAIL_NOT_VERIFIED` (422): Login-Versuch mit nicht-verifiziertem
+ *    Kunden-Konto. Frontend zeigt "Bestätigungs-E-Mail erneut senden".
+ *  - `EMAIL_TAKEN` (409 Subkategorie): Registrierung mit bereits
+ *    existierender E-Mail-Adresse. Wird als `CONFLICT` mit field='email'
+ *    zurückgegeben.
+ *  - `INVALID_TOKEN` (400 Subkategorie): Reset/Verify-Token ungültig
+ *    oder abgelaufen. Wird als `VALIDATION_ERROR` mit field='token'
+ *    zurückgegeben — Engineers-Hinweis: keine Auskunft, ob Token
+ *    existiert hat oder abgelaufen ist (Enumeration-Schutz).
+ *  - `STRIPE_ERROR` (502): Stripe-Upstream-Fehler bei Session-Erstellung
+ *    oder Webhook-Verarbeitung.
  *
  * Bestehende Codes (unverändert):
  *  - VALIDATION_ERROR (400)
@@ -743,6 +1154,8 @@ export type AdminSetupInput = z.infer<typeof AdminSetupSchema>;
  *  - CONFLICT (409)
  *  - OVERLAP (409)
  *  - GONE (410)
+ *  - PAYLOAD_TOO_LARGE (413)
+ *  - UNSUPPORTED_MEDIA_TYPE (415)
  *  - RATE_LIMITED (429)
  *  - MAIL_FAILED (502)
  *  - INTERNAL_ERROR (500)
@@ -759,6 +1172,8 @@ export const ApiErrorSchema = z.object({
       'GONE',
       'PAYLOAD_TOO_LARGE',
       'UNSUPPORTED_MEDIA_TYPE',
+      'EMAIL_NOT_VERIFIED', // IT4
+      'STRIPE_ERROR', // IT4
       'RATE_LIMITED',
       'MAIL_FAILED',
       'INTERNAL_ERROR',

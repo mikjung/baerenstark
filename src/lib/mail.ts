@@ -849,6 +849,285 @@ export async function sendBookingRejectionToCustomer(
   });
 }
 
+// ===========================================================================
+// Iteration 4 — Kunden-Auth, Zahlungen, Reviews (US-25 / US-28 / US-29)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// IT4 Template — E-Mail-Verifikation (US-25 AC1, AC2)
+// ---------------------------------------------------------------------------
+
+function buildVerificationText(verificationUrl: string): string {
+  return [
+    'Willkommen bei Bärenstark Hausservice!',
+    '',
+    'Bitte bestätigen Sie Ihre E-Mail-Adresse, um Ihr Konto zu aktivieren.',
+    '',
+    `Bestätigungs-Link: ${verificationUrl}`,
+    '',
+    'Der Link ist 24 Stunden gültig.',
+    'Falls Sie diese Registrierung nicht ausgelöst haben, ignorieren Sie diese E-Mail einfach.',
+    '',
+    '— Ihr Haus in bärenstarken Händen!',
+  ].join('\n');
+}
+
+function buildVerificationHtml(verificationUrl: string): string {
+  return `<!doctype html>
+<html lang="de">
+<body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#F5EBDD; padding:24px; color:#3D2B1F;">
+  <div style="max-width:560px; margin:0 auto; background:#fff; border-radius:8px; padding:24px;">
+    <h1 style="margin:0 0 8px; font-size:20px;">Willkommen bei Bärenstark</h1>
+    <p style="margin:0 0 16px;">Bitte bestätigen Sie Ihre E-Mail-Adresse, um Ihr Konto zu aktivieren.</p>
+    <p style="margin:0 0 16px;">
+      <a href="${verificationUrl}" style="display:inline-block; padding:12px 24px; background:#7B5E3C; color:#fff; text-decoration:none; border-radius:6px;">E-Mail bestätigen</a>
+    </p>
+    <p style="margin:16px 0 0; color:#7B5E3C; font-size:12px;">Der Link ist 24 Stunden gültig.</p>
+    <p style="margin:8px 0 0; color:#7B5E3C; font-size:12px;">Falls Sie diese Registrierung nicht ausgelöst haben, ignorieren Sie diese E-Mail einfach.</p>
+    <p style="margin:24px 0 0; color:#7B5E3C; font-size:12px;">— Ihr Haus in bärenstarken Händen!</p>
+  </div>
+</body>
+</html>`;
+}
+
+export async function sendVerificationEmail(
+  to: string,
+  verificationUrl: string,
+): Promise<MailResult> {
+  if (!to) return { ok: false, error: 'No email address' };
+  return sendWithRetry({
+    from: fromAddress(),
+    to,
+    subject: 'Bitte bestätigen Sie Ihre E-Mail-Adresse',
+    text: buildVerificationText(verificationUrl),
+    html: buildVerificationHtml(verificationUrl),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// IT4 Template — Passwort-Reset (US-25 AC5)
+// ---------------------------------------------------------------------------
+
+function buildPasswordResetText(resetUrl: string): string {
+  return [
+    'Hallo,',
+    '',
+    'Sie haben einen Passwort-Reset für Ihr Bärenstark-Konto angefordert.',
+    '',
+    `Reset-Link: ${resetUrl}`,
+    '',
+    'Der Link ist 1 Stunde gültig.',
+    'Falls Sie diesen Reset nicht ausgelöst haben, ignorieren Sie diese E-Mail.',
+    '',
+    '— Ihr Haus in bärenstarken Händen!',
+  ].join('\n');
+}
+
+function buildPasswordResetHtml(resetUrl: string): string {
+  return `<!doctype html>
+<html lang="de">
+<body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#F5EBDD; padding:24px; color:#3D2B1F;">
+  <div style="max-width:560px; margin:0 auto; background:#fff; border-radius:8px; padding:24px;">
+    <h1 style="margin:0 0 8px; font-size:20px;">Passwort zurücksetzen</h1>
+    <p style="margin:0 0 16px;">Sie haben einen Passwort-Reset für Ihr Bärenstark-Konto angefordert.</p>
+    <p style="margin:0 0 16px;">
+      <a href="${resetUrl}" style="display:inline-block; padding:12px 24px; background:#7B5E3C; color:#fff; text-decoration:none; border-radius:6px;">Passwort zurücksetzen</a>
+    </p>
+    <p style="margin:16px 0 0; color:#7B5E3C; font-size:12px;">Der Link ist 1 Stunde gültig.</p>
+    <p style="margin:8px 0 0; color:#7B5E3C; font-size:12px;">Falls Sie diesen Reset nicht ausgelöst haben, ignorieren Sie diese E-Mail.</p>
+  </div>
+</body>
+</html>`;
+}
+
+export async function sendPasswordResetEmail(
+  to: string,
+  resetUrl: string,
+): Promise<MailResult> {
+  if (!to) return { ok: false, error: 'No email address' };
+  return sendWithRetry({
+    from: fromAddress(),
+    to,
+    subject: 'Passwort zurücksetzen — Bärenstark Hausservice',
+    text: buildPasswordResetText(resetUrl),
+    html: buildPasswordResetHtml(resetUrl),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// IT4 Template — Zahlungsaufforderung an Kunden (US-28 AC1)
+// ---------------------------------------------------------------------------
+
+export interface PaymentRequestMailPayload {
+  bookingId: string;
+  amount: number; // Cents
+  paymentUrl: string;
+  customerName: string;
+  service: Service;
+  date: string | null;
+  startTime?: string | null;
+  endTime?: string | null;
+}
+
+function formatEuro(amountCents: number): string {
+  const euros = amountCents / 100;
+  return new Intl.NumberFormat('de-DE', {
+    style: 'currency',
+    currency: 'EUR',
+  }).format(euros);
+}
+
+function buildPaymentRequestText(p: PaymentRequestMailPayload): string {
+  const dateLine =
+    p.date && p.startTime && p.endTime
+      ? `${formatBerlinDate(p.date)}, ${p.startTime}–${p.endTime} Uhr`
+      : p.date
+        ? formatBerlinDate(p.date)
+        : '(Datum unbekannt)';
+  return [
+    `Hallo ${p.customerName},`,
+    '',
+    'vielen Dank für Ihren Auftrag. Sie können den fälligen Betrag jetzt bequem online begleichen.',
+    '',
+    `Service:   ${SERVICE_LABELS[p.service]}`,
+    `Termin:    ${dateLine}`,
+    `Betrag:    ${formatEuro(p.amount)}`,
+    '',
+    `Zur Zahlung: ${p.paymentUrl}`,
+    '',
+    'Sie haben die Wahl zwischen Karte, PayPal, Apple Pay und Google Pay.',
+    '',
+    'Bei Fragen erreichen Sie uns unter 0157-74787512.',
+    '',
+    '— Ihr Haus in bärenstarken Händen!',
+  ].join('\n');
+}
+
+function buildPaymentRequestHtml(p: PaymentRequestMailPayload): string {
+  const dateLine =
+    p.date && p.startTime && p.endTime
+      ? `${formatBerlinDate(p.date)}, ${p.startTime}–${p.endTime} Uhr`
+      : p.date
+        ? formatBerlinDate(p.date)
+        : '(Datum unbekannt)';
+  return `<!doctype html>
+<html lang="de">
+<body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#F5EBDD; padding:24px; color:#3D2B1F;">
+  <div style="max-width:560px; margin:0 auto; background:#fff; border-radius:8px; padding:24px;">
+    <h1 style="margin:0 0 8px; font-size:20px;">Ihre Rechnung von Bärenstark</h1>
+    <p style="margin:0 0 16px;">Hallo ${escapeHtml(p.customerName)},</p>
+    <p style="margin:0 0 16px;">vielen Dank für Ihren Auftrag. Sie können den fälligen Betrag jetzt bequem online begleichen.</p>
+    <table style="border-collapse:collapse; width:100%; margin-bottom:16px;">
+      <tr><td style="padding:4px 12px 4px 0; color:#7B5E3C;"><strong>Service</strong></td><td>${escapeHtml(SERVICE_LABELS[p.service])}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0; color:#7B5E3C;"><strong>Termin</strong></td><td>${escapeHtml(dateLine)}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0; color:#7B5E3C;"><strong>Betrag</strong></td><td><strong>${escapeHtml(formatEuro(p.amount))}</strong></td></tr>
+    </table>
+    <a href="${p.paymentUrl}" style="display:inline-block; padding:12px 24px; background:#4A5D3A; color:#fff; text-decoration:none; border-radius:6px;">Jetzt bezahlen</a>
+    <p style="margin:16px 0 0; color:#7B5E3C; font-size:12px;">Karte, PayPal, Apple Pay oder Google Pay — Ihre Wahl.</p>
+    <p style="margin:8px 0 0; color:#7B5E3C; font-size:12px;">Bei Fragen: 0157-74787512</p>
+  </div>
+</body>
+</html>`;
+}
+
+export async function sendPaymentRequestEmail(
+  to: string,
+  payload: PaymentRequestMailPayload,
+): Promise<MailResult> {
+  if (!to) return { ok: false, error: 'No customer email' };
+  return sendWithRetry({
+    from: fromAddress(),
+    to,
+    subject: 'Ihre Rechnung von Bärenstark Hausservice',
+    text: buildPaymentRequestText(payload),
+    html: buildPaymentRequestHtml(payload),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// IT4 Template — Zahlung eingegangen, Tom-Mail (US-28 AC6)
+// ---------------------------------------------------------------------------
+
+export interface PaymentReceivedMailPayload {
+  amount: number; // Cents
+  customerName: string;
+  service: Service;
+  bookingId: string;
+}
+
+export async function sendPaymentReceivedEmail(
+  to: string,
+  payload: PaymentReceivedMailPayload,
+): Promise<MailResult> {
+  if (!to) return { ok: false, error: 'No email address' };
+  const subject = `Zahlung eingegangen: ${formatEuro(payload.amount)} von ${payload.customerName}`;
+  const text = [
+    `Es ist eine Zahlung eingegangen.`,
+    '',
+    `Kunde:    ${payload.customerName}`,
+    `Service:  ${SERVICE_LABELS[payload.service]}`,
+    `Betrag:   ${formatEuro(payload.amount)}`,
+    `Booking:  ${payload.bookingId}`,
+    '',
+    `Im Admin öffnen: ${adminBaseUrl()}/admin/bookings`,
+  ].join('\n');
+  const html = `<!doctype html>
+<html lang="de"><body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#F5EBDD; padding:24px; color:#3D2B1F;">
+<div style="max-width:560px; margin:0 auto; background:#fff; border-radius:8px; padding:24px;">
+  <h1 style="margin:0 0 12px; font-size:20px;">Zahlung eingegangen</h1>
+  <table style="border-collapse:collapse; width:100%; margin:16px 0;">
+    <tr><td style="padding:4px 12px 4px 0; color:#7B5E3C;"><strong>Kunde</strong></td><td>${escapeHtml(payload.customerName)}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0; color:#7B5E3C;"><strong>Service</strong></td><td>${escapeHtml(SERVICE_LABELS[payload.service])}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0; color:#7B5E3C;"><strong>Betrag</strong></td><td><strong>${escapeHtml(formatEuro(payload.amount))}</strong></td></tr>
+    <tr><td style="padding:4px 12px 4px 0; color:#7B5E3C;"><strong>Booking</strong></td><td>${escapeHtml(payload.bookingId)}</td></tr>
+  </table>
+  <a href="${adminBaseUrl()}/admin/bookings" style="display:inline-block; padding:10px 20px; background:#7B5E3C; color:#fff; text-decoration:none; border-radius:6px;">Im Admin öffnen</a>
+</div></body></html>`;
+  return sendWithRetry({
+    from: fromAddress(),
+    to,
+    subject,
+    text,
+    html,
+  });
+}
+
+/** Bestätigung an den Kunden, dass Zahlung eingegangen ist. */
+export async function sendPaymentReceivedToCustomer(
+  to: string,
+  payload: PaymentReceivedMailPayload,
+): Promise<MailResult> {
+  if (!to) return { ok: false, error: 'No email address' };
+  const subject = 'Zahlungsbestätigung — Bärenstark Hausservice';
+  const text = [
+    `Hallo ${payload.customerName},`,
+    '',
+    `vielen Dank! Wir haben Ihre Zahlung in Höhe von ${formatEuro(payload.amount)} erhalten.`,
+    '',
+    `Service: ${SERVICE_LABELS[payload.service]}`,
+    '',
+    'Sie erhalten in den nächsten Tagen Ihre Rechnung. Bei Fragen: 0157-74787512.',
+    '',
+    '— Ihr Haus in bärenstarken Händen!',
+  ].join('\n');
+  const html = `<!doctype html>
+<html lang="de"><body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#F5EBDD; padding:24px; color:#3D2B1F;">
+<div style="max-width:560px; margin:0 auto; background:#fff; border-radius:8px; padding:24px;">
+  <h1 style="margin:0 0 12px; font-size:20px;">Vielen Dank!</h1>
+  <p>Hallo ${escapeHtml(payload.customerName)},</p>
+  <p>wir haben Ihre Zahlung in Höhe von <strong>${escapeHtml(formatEuro(payload.amount))}</strong> erhalten.</p>
+  <p style="color:#7B5E3C;">Service: ${escapeHtml(SERVICE_LABELS[payload.service])}</p>
+  <p style="color:#7B5E3C; font-size:12px;">Bei Fragen: 0157-74787512</p>
+</div></body></html>`;
+  return sendWithRetry({
+    from: fromAddress(),
+    to,
+    subject,
+    text,
+    html,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Fire-and-forget Mail-Dispatch für POST /api/bookings (BUG US-04 Fix 1)
 // ---------------------------------------------------------------------------

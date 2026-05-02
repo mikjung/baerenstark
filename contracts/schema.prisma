@@ -1,30 +1,55 @@
-// Bärenstark Hausservice — Prisma Schema (MVP, v1.3 — Iteration 3)
+// Bärenstark Hausservice — Prisma Schema (MVP, v1.4.1 — Iteration 4 Revision)
 // Single source of truth für das Datenmodell.
 // Live-Schema unter prisma/schema.prisma muss mit dieser Datei synchron bleiben.
 //
+// Änderungen v1.4.1 (Iteration 4 — QA-Revision: BUG-401, BUG-402, MAJOR-403):
+//   - **BUG-401 Fix**: `CustomerUser.verificationTokenExpiry DateTime?` neu —
+//     dedizierter Ablauf-Timestamp (analog `resetTokenExpiry`). Wird bei
+//     Registrierung UND bei `POST /api/customer/resend-verification`
+//     auf `now + 24h` gesetzt. Verifikations-Endpunkt prüft gegen diese
+//     Spalte (statt vorher `createdAt`). Ohne diesen Fix bliebe ein
+//     Konto nach 24h+Resend permanent unaktivierbar.
+//   - **BUG-402 Fix**: E-Mail-Änderung im MVP NICHT erlaubt (siehe
+//     api-routes.md / zod-schemas.ts). Das Schema bleibt unverändert
+//     bezüglich `email`-Feld; ein `pendingEmail`-Mechanismus ist Backlog
+//     (eigene Story IT5). Der `customerEmailChangedMail`-Template-Eintrag
+//     entfällt damit ebenfalls.
+//   - **MAJOR-403**: `Review.customerName` wird NICHT als DB-Spalte ergänzt.
+//     Stattdessen wird der Anzeigename beim Lesen via Live-Join berechnet
+//     (`customer.firstName + ' ' + customer.lastName[0] + '.'`). Das ist
+//     datenschutzkonform UND kompatibel mit der MVP-Annahme „kein
+//     Self-Service-Account-Delete" (siehe ARCHITECTURE.md §17.7).
+//
+// Änderungen v1.4 (Iteration 4 — US-25 bis US-29):
+//   - **NEU**: `CustomerUser` (US-25) — separate Kunden-Auth-Entität.
+//     Vollständig getrennt vom Admin-`User` (eigene Tabelle, eigene
+//     Session-Mechanik via JWT-Cookie `customer-session`).
+//   - **NEU**: `Payment` (US-28) — Stripe-Zahlung pro Buchung. 1:1-Relation
+//     zu Booking. Status: PENDING|PAID|FAILED|REFUNDED.
+//   - **NEU**: `Review` (US-29) — Kundenbewertung mit Admin-Freigabe-
+//     Mechanismus (`approved` boolean). 1:1-Relation zu Booking, optional
+//     verknüpft mit CustomerUser.
+//   - **NEU**: `BookingStatus.COMPLETED` — neuer Endstatus für abgeschlossene
+//     Termine (Voraussetzung für Bewertung in US-29).
+//   - Booking erhält neue Felder:
+//       * `customerId String?` (FK → CustomerUser, ON DELETE SET NULL) —
+//         eingeloggte Kunden bekommen ihre Buchung automatisch zugeordnet.
+//         Gastbuchungen lassen das Feld leer.
+//       * `payment Payment?` (1:1-Backref).
+//       * `review Review?` (1:1-Backref).
+//   - Partial Unique Index `uniq_active_booking_per_timeslot` wird erweitert,
+//     damit auch COMPLETED-Buchungen den Slot belegt halten (Doppelbuchung
+//     von vergangenen Slots ist ohnehin durch das Datum-in-Zukunft-Check
+//     ausgeschlossen — der Index muss aber beide Endstatus berücksichtigen,
+//     siehe schema.sql).
+//
 // Änderungen v1.3 (Iteration 3 — US-17 bis US-24):
-//   - **NEU**: AvailabilityTemplate (US-17) — globale Wochentag-Standardzeiten.
-//   - **NEU**: DayOverride (US-17) — individuelle Tages-Überschreibung.
-//   - **NEU**: BookingAttachment (US-18) — Datei-Anhänge an Buchungen.
-//   - Booking erhält neue Felder date/startTime/endTime (US-17): konkrete
-//     gewählte Uhrzeit innerhalb des Verfügbarkeitsfensters. slotId wird
-//     optional (Rückwärtskompatibilität für Bestandsbuchungen).
-//   - WeeklyAvailability bleibt erhalten (Bestandsdaten / Migration), wird
-//     aber für neue Buchungen NICHT mehr genutzt — AvailabilityTemplate ist
-//     ihre Erweiterung mit Zeit-Komponenten.
-//   - Slot wird DEPRECATED (siehe Doku unten). Keine Schema-Änderung am
-//     Slot-Modell selbst — nur die Anwendung ändert sich.
-//   - Service-Slug 'sonstiges' wird in der App-Konstante ergänzt (kein
-//     Schema-Eintrag, weil Service als String persistiert wird).
+//   - AvailabilityTemplate, DayOverride, BookingAttachment.
+//   - Booking.date/startTime/endTime, slotId nullable.
 //
 // Änderungen v1.2 (Iteration 2 — US-13 bis US-16, BUG US-04):
-//   - Booking.cancelToken (String, unique, @default(cuid()))
-//   - Booking.counterProposalSlotId (String?)
-//   - BookingStatus erweitert um COUNTER_PROPOSED und CANCELLED.
-//   - Neues Modell WeeklyAvailability (US-15).
-//
-// Änderungen v1.1 (gegenüber v1.0):
-//   - Partial Unique Index, Soft-Delete für Slot, Mail-Reliability-Felder.
+//   - Booking.cancelToken, counterProposalSlotId, COUNTER_PROPOSED, CANCELLED.
+//   - WeeklyAvailability.
 
 generator client {
   provider = "prisma-client-js"
@@ -37,8 +62,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// Admin-Benutzer. Im MVP genau ein Datensatz (Tom).
+/// Admin-Benutzer (Tom). Im MVP genau ein Datensatz.
 /// Wird via Setup-Wizard /admin/setup angelegt.
+///
+/// **WICHTIG (Iteration 4):** Dieses Modell ist **ausschließlich** für
+/// Admin-Login (NextAuth Credentials Provider). Kunden nutzen das
+/// separate `CustomerUser`-Modell und ein eigenes Cookie. Admin-Sessions
+/// und Kunden-Sessions kollidieren NICHT (verschiedene Cookie-Namen).
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -52,18 +82,6 @@ model User {
 /// **DEPRECATED ab Iteration 3 (US-17).** Bestehende Buchungen behalten
 /// ihre Slot-Referenz für Rückwärtskompatibilität; neue Buchungen nutzen
 /// `Booking.date / startTime / endTime` direkt.
-///
-/// Das Modell bleibt im Schema, weil es:
-///   - Iteration-1- und Iteration-2-Bestandsdaten hostet,
-///   - der Counter-Proposal-Flow (US-13) noch über Slot-IDs läuft (Bestand),
-///   - die Soft-Delete-Logik weiterhin funktioniert.
-///
-/// Neue Engineering-Hinweise für IT3:
-///   - `POST /api/slots` und `DELETE /api/slots/:id` bleiben erhalten,
-///     werden aber im Admin-UI versteckt (kein neuer Slot anlegen).
-///   - `GET /api/slots` darf weiterhin abgerufen werden (öffentlich), liefert
-///     nur Bestandsslots — neue Buchungs-UI nutzt `GET /api/slots/available`
-///     (Iteration 3) statt `GET /api/slots`.
 ///
 /// Siehe ARCHITECTURE.md §16 für die Migration-Strategie.
 model Slot {
@@ -85,63 +103,64 @@ model Slot {
 
 /// Buchungsanfrage eines Kunden.
 ///
-/// **Iteration-3-Datenmodell (US-17):**
-///   Neue Buchungen haben `slotId = null` und stattdessen
-///   `date + startTime + endTime` direkt befüllt. Das ermöglicht den
-///   Verfügbarkeitsfenster-Flow ohne pre-allokierte Slot-Datensätze.
+/// **Iteration-4-Ergänzungen (US-25/US-26/US-28/US-29):**
+///   - `customerId`: optionaler Bezug zu einem registrierten Kunden.
+///     Wird beim `POST /api/bookings` automatisch befüllt, wenn ein
+///     gültiges `customer-session`-Cookie vorhanden ist. Gastbuchungen
+///     lassen das Feld leer (Verhalten bleibt rückwärtskompatibel zu IT1–IT3).
+///   - `payment`: optionale 1:1-Beziehung zu einer Stripe-Zahlung. Tom
+///     legt sie via `POST /api/admin/bookings/:id/payment` an, sobald er
+///     einen Betrag für eine bestätigte Buchung definiert.
+///   - `review`: optionale 1:1-Beziehung zu einer Kundenbewertung
+///     (nur möglich, wenn `customerId` gesetzt UND status === 'COMPLETED').
+///   - `status` erweitert um `COMPLETED` — Tom markiert nach Erbringung
+///     der Leistung den Auftrag als abgeschlossen, was den Bewertungs-
+///     Button im Kundenportal freischaltet (US-29 AC1).
 ///
-///   Bestehende Buchungen (Iteration 1/2) haben `slotId` befüllt und
-///   `date/startTime/endTime` leer.
+/// **Datenschutz-Hinweis:** Wird ein CustomerUser gelöscht, setzt ON
+/// DELETE SET NULL die `customerId` der zugehörigen Buchungen auf NULL.
+/// Die Buchung selbst bleibt erhalten (Tom hat ggf. weiterhin
+/// Geschäftsbedarf an Historie). Personenbezogene Daten in der Buchung
+/// (`customerName`, `customerPhone`, `customerEmail`) bleiben — der
+/// Auftraggeber bleibt also nachvollziehbar, das CustomerUser-Konto
+/// existiert aber nicht mehr.
 ///
-/// **Datums-/Zeit-Konvention (Iteration 3, Berlin-TZ-First):**
-///   - `date`:      "YYYY-MM-DD"  (Berlin-Lokalzeit, kein Offset)
-///   - `startTime`: "HH:MM"       (24h, Berlin)
-///   - `endTime`:   "HH:MM"       (24h, Berlin, > startTime)
-///   Begründung: Tom denkt in Berlin-Zeit. Kein Timezone-Shift bei
-///   Sommer/Winterzeit-Übergang (vermeidet "08:00 wird zu 07:00 nach
-///   DST"-Bug). Backend rendert in Mails via `Intl.DateTimeFormat`
-///   mit explizitem Berlin-TZ.
-///
-/// Status-Lebenszyklus (unverändert seit Iteration 2):
+/// Status-Lebenszyklus (Iteration 4 erweitert):
 ///   PENDING            → CONFIRMED         (Admin bestätigt)
 ///   PENDING            → REJECTED          (Admin lehnt ab)
 ///   PENDING            → COUNTER_PROPOSED  (Admin schlägt Alternativtermin vor)
-///   PENDING            → CANCELLED         (Kunde storniert per Token-Link)
+///   PENDING            → CANCELLED         (Kunde storniert per Token-Link ODER Portal)
 ///   CONFIRMED          → REJECTED          (Admin zieht Bestätigung zurück)
+///   CONFIRMED          → CANCELLED         (Kunde storniert per Portal, >24h vor Termin)
+///   CONFIRMED          → COMPLETED         (Admin markiert nach Leistungserbringung; **NEU IT4**)
 ///   COUNTER_PROPOSED   → CONFIRMED         (Kunde nimmt Vorschlag per Token-Link an)
 ///   COUNTER_PROPOSED   → PENDING           (Kunde wählt neuen Slot via Re-Booking-Flow)
-///   COUNTER_PROPOSED   → CANCELLED         (Kunde storniert per Token-Link)
+///   COUNTER_PROPOSED   → CANCELLED         (Kunde storniert per Token-Link ODER Portal)
 ///
-/// **Verfügbarkeits-Belegung (Iteration 3):**
+/// **Verfügbarkeits-Belegung (unverändert seit IT3):**
 ///   Pro (date, startTime, endTime) darf höchstens EINE aktive Buchung
 ///   (Status ∈ {PENDING, CONFIRMED, COUNTER_PROPOSED}) existieren.
-///   Garantie via Partial Unique Index (Raw-SQL-Migration):
-///
-///     CREATE UNIQUE INDEX uniq_active_booking_per_timeslot
-///       ON bookings(date, start_time, end_time)
-///       WHERE date IS NOT NULL
-///         AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
-///
-///   Bestandsindex `uniq_active_booking_per_slot` bleibt erhalten — er
-///   greift nur, wenn `slot_id IS NOT NULL`. Beide Indexe existieren parallel
-///   und decken die jeweiligen Buchungs-Modi ab.
+///   COMPLETED zählt **nicht** als aktiv (Termin liegt in der Vergangenheit).
 model Booking {
   id            String        @id @default(cuid())
 
-  // --- Iteration 1/2: Slot-basierte Buchung (DEPRECATED, nur Bestand) ---
-  // Optional ab Iteration 3. Neue Buchungen lassen das Feld leer.
+  // --- IT1/IT2 (Slot-basiert, DEPRECATED, nur Bestand) ---
   slotId        String?
   slot          Slot?         @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
 
-  // --- Iteration 3 (US-17): Date/Time-basierte Buchung ---
-  /// "YYYY-MM-DD" im Berlin-TZ. Pflicht für neue Buchungen.
+  // --- IT3 (Date/Time-basiert) ---
   date          String?
-  /// "HH:MM" im Berlin-TZ. Pflicht für neue Buchungen.
   startTime     String?
-  /// "HH:MM" im Berlin-TZ. Pflicht für neue Buchungen, > startTime.
   endTime       String?
 
-  // --- Kundendaten (unverändert) ---
+  // --- IT4 (US-25/26): optionale Verknüpfung mit Kundenkonto ---
+  /// Null = Gastbuchung. Sonst: Buchung gehört dem registrierten Kunden.
+  /// ON DELETE SET NULL: gelöschte Konten verlieren die Verknüpfung,
+  /// die Buchung bleibt für Tom sichtbar.
+  customerId    String?
+  customer      CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  // --- Kundendaten (immer erforderlich, auch bei eingeloggtem Kunden) ---
   customerName  String
   customerPhone String
   customerEmail String?
@@ -160,8 +179,11 @@ model Booking {
   counterProposalSlot   Slot?  @relation("BookingCounterProposalSlot", fields: [counterProposalSlotId], references: [id], onDelete: SetNull)
 
   // --- Iteration 3 Felder ---
-  /// 0..N hochgeladene Dateien (Fotos, Videos, PDFs) — Vercel Blob (US-18).
   attachments   BookingAttachment[]
+
+  // --- Iteration 4 Backrefs ---
+  payment       Payment?
+  review        Review?
 
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
@@ -169,44 +191,20 @@ model Booking {
   @@index([slotId])
   @@index([status, createdAt])
   @@index([counterProposalSlotId])
-  // Iteration 3 — Index für Verfügbarkeits-Lookup (GET /api/slots/available).
   @@index([date, status])
-  // Iteration 3 — Index für Admin-Dashboard (US-21: bevorstehende Termine).
   @@index([status, date, startTime])
-  // Hinweis: Partial Unique Indexe (`uniq_active_booking_per_slot` und
-  // `uniq_active_booking_per_timeslot`) werden per Raw-SQL-Migration angelegt.
+  // IT4 — Index für Kundenportal-Buchungs-Listen (`GET /api/customer/bookings`).
+  @@index([customerId, date])
   @@map("bookings")
 }
 
-/// Default-Vorlage pro Wochentag (Iteration 3 / US-17).
-///
-/// Tom definiert für jeden Wochentag (0=So..6=Sa) ein Verfügbarkeitsfenster
-/// (z.B. Mo–Fr 08:00–17:00). Genau **sieben** Datensätze (Initial-Seed).
-///
-/// Beziehung zu DayOverride: Wenn für ein konkretes Datum ein DayOverride
-/// existiert, hat er Vorrang vor der Template. Sonst gilt die Template.
-///
-/// Beziehung zu WeeklyAvailability (Iteration 2):
-/// AvailabilityTemplate.isActive ersetzt funktional WeeklyAvailability.isActive.
-/// Migration kopiert beim Iteration-3-Deploy die `isActive`-Werte aus
-/// WeeklyAvailability in AvailabilityTemplate. WeeklyAvailability bleibt für
-/// Iteration-2-Bestandsbuchungen lesbar; neue Endpunkte nutzen
-/// AvailabilityTemplate.
-///
-/// `slotDurationMinutes`: Tom kann pro Wochentag steuern, wie lang ein
-/// Buchungs-Block ist (Default 60). Beispiel: Mo 08:00–17:00 mit 60-min-Slots
-/// liefert Slots 08:00, 09:00, 10:00, ..., 16:00 (letzter Slot endet 17:00).
+/// Default-Vorlage pro Wochentag (Iteration 3 / US-17). Unverändert in IT4.
 model AvailabilityTemplate {
   id                  String   @id @default(cuid())
-  /// 0=Sonntag, 1=Montag, ..., 6=Samstag (analog Date.getDay()).
   dayOfWeek           Int      @unique
-  /// false = Tag standardmäßig nicht verfügbar (rot im Kalender).
   isActive            Boolean  @default(false)
-  /// "HH:MM" Beginn des Verfügbarkeitsfensters (Berlin-TZ).
   startTime           String   @default("08:00")
-  /// "HH:MM" Ende des Verfügbarkeitsfensters (Berlin-TZ), > startTime.
   endTime             String   @default("17:00")
-  /// Slot-Block-Länge in Minuten. Empfohlene Werte: 30, 60, 90, 120.
   slotDurationMinutes Int      @default(60)
   updatedAt           DateTime @updatedAt
 
@@ -214,34 +212,13 @@ model AvailabilityTemplate {
   @@map("availability_template")
 }
 
-/// Individuelle Tages-Überschreibung (Iteration 3 / US-17).
-///
-/// Erlaubt Tom, einzelne Tage abweichend zur Default-Vorlage zu konfigurieren:
-///   - `isActive: false` + `startTime/endTime: null` → Tag ist gesperrt
-///     (z.B. Urlaub, Feiertag).
-///   - `isActive: true` + `startTime/endTime: "09:00"/"15:00"` → Tag hat
-///     abweichende Zeiten (kürzeres Fenster).
-///   - `isActive: true` + `startTime/endTime: null` → Tag nutzt die Template-
-///     Zeiten, aber explizit aktiviert (selten genutzt; primär für
-///     "ausnahmsweise samstags geöffnet"-Szenarien).
-///
-/// Auflösungs-Logik im Backend (siehe lib/availability.ts):
-///   1. DayOverride für `date`? Wenn ja → daraus
-///      `(isActive, startTime ?? template.startTime, endTime ?? template.endTime)`
-///      ableiten.
-///   2. Sonst → AvailabilityTemplate für den Wochentag.
-///
-/// `date` ist UNIQUE: pro Datum existiert höchstens ein Override.
+/// Individuelle Tages-Überschreibung (Iteration 3 / US-17). Unverändert in IT4.
 model DayOverride {
   id        String   @id @default(cuid())
-  /// "YYYY-MM-DD" im Berlin-TZ.
   date      String   @unique
   isActive  Boolean
-  /// "HH:MM" oder null (= Template-Default übernehmen).
   startTime String?
-  /// "HH:MM" oder null.
   endTime   String?
-  /// Optionale Notiz für Tom: "Urlaub", "Feiertag", "Familienevent".
   reason    String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -250,34 +227,17 @@ model DayOverride {
   @@map("day_overrides")
 }
 
-/// Datei-Anhang an einer Buchung (Iteration 3 / US-18).
+/// Datei-Anhang an einer Buchung (Iteration 3 / US-18). Unverändert in IT4.
 ///
-/// Storage: Vercel Blob (kostenlos bis 2 GB). Frontend lädt Datei via
-/// `POST /api/upload` hoch und erhält eine Public-URL zurück, die im
-/// `BookingAttachment.url` persistiert wird.
-///
-/// Limits (im App-Layer durchgesetzt, nicht in der DB):
-///   - max. 5 Dateien pro Buchung
-///   - max. 20 MB pro Datei
-///   - akzeptierte Content-Types: image/* | video/mp4 | application/pdf
-///
-/// Lifecycle:
-///   - Cascade-Delete: wird die Buchung gelöscht, werden Attachments
-///     mitgelöscht (DB-Eintrag). Die Blob-Datei selbst muss separat über
-///     einen Cleanup-Job (Backlog) entfernt werden — Vercel Blob hat
-///     keine FK-Cascade auf Storage-Ebene.
-///   - Im MVP keine Soft-Delete; gelöscht ist gelöscht.
+/// **Hinweis IT3:** `bookingId` ist nullable, damit der Upload vor dem
+/// Booking-Insert möglich ist (siehe ARCHITECTURE.md §16.3).
 model BookingAttachment {
   id          String   @id @default(cuid())
-  bookingId   String
-  booking     Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  /// Public-URL aus Vercel Blob (https://*.public.blob.vercel-storage.com/...).
+  bookingId   String?
+  booking     Booking? @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   url         String
-  /// Originaldateiname (sanitized — kein Pfad-Traversal).
   filename    String
-  /// MIME-Type, wird vom Upload-Endpoint validiert.
   contentType String
-  /// Größe in Bytes (für UI-Anzeige; redundant zur Blob-Storage-Info).
   sizeBytes   Int
   createdAt   DateTime @default(now())
 
@@ -285,17 +245,7 @@ model BookingAttachment {
   @@map("booking_attachments")
 }
 
-/// Wochentag-basierte Verfügbarkeit (Iteration 2 / US-15).
-///
-/// **DEPRECATED ab Iteration 3** zugunsten von `AvailabilityTemplate`, das
-/// zusätzlich Zeit-Komponenten und Slot-Dauer enthält.
-///
-/// Bleibt im Schema für:
-///   - Bestand: alte Frontend-Pfade lesen evtl. noch GET /api/availability.
-///   - Migration: Iteration-3-Deploy übernimmt die isActive-Flags 1:1
-///     in AvailabilityTemplate (siehe `prisma/migrations/.../seed.sql`).
-///
-/// Neue Iteration-3-UI nutzt ausschließlich `/api/admin/availability-template`.
+/// **DEPRECATED ab Iteration 3** zugunsten von `AvailabilityTemplate`.
 model WeeklyAvailability {
   id        String   @id @default(cuid())
   dayOfWeek Int      @unique
@@ -306,13 +256,249 @@ model WeeklyAvailability {
   @@map("weekly_availability")
 }
 
+// ============================================================================
+// ITERATION 4 — Neue Modelle
+// ============================================================================
+
+/// Kunden-Account (Iteration 4 / US-25).
+///
+/// **Vollständig getrennt vom Admin-`User`-Modell.** Kunden haben:
+///   - eigene Tabelle (`customer_users`),
+///   - eigene Session-Mechanik (JWT in Cookie `customer-session`,
+///     signiert mit `AUTH_SECRET`, 7 Tage Gültigkeit, httpOnly + Secure),
+///   - eigene Auth-Endpunkte (`/api/customer/*` — kein NextAuth),
+///   - keinen Zugriff auf `/admin/*`-Routen.
+///
+/// **E-Mail-Verifikation:**
+///   - Bei Registrierung wird ein `verificationToken` (cuid) erzeugt und
+///     per Mail an die angegebene Adresse versendet.
+///   - Klick auf den Link → `GET /api/customer/verify?token=...` setzt
+///     `emailVerified: true` und löscht den Token.
+///   - **Login-Verhalten bei nicht verifiziertem Konto:** Login schlägt
+///     fehl mit Code `EMAIL_NOT_VERIFIED` (422), Frontend zeigt
+///     "Bestätigungs-E-Mail erneut senden"-Button.
+///   - Verifikations-Token läuft nach 24h ab. **Geprüft via dediziertem
+///     Feld `verificationTokenExpiry` (v1.4.1 / BUG-401-Fix).** Bei
+///     Registrierung UND bei `POST /api/customer/resend-verification`
+///     wird der Wert auf `now + 24h` gesetzt — damit ist ein Resend-
+///     Token nach Klick wieder gültig, auch wenn der Account-`createdAt`
+///     länger als 24h zurückliegt. Verifikations-Endpunkt vergleicht
+///     `verificationTokenExpiry > now`.
+///
+/// **Passwort-Reset (US-25 AC5/AC6):**
+///   - `resetToken` + `resetTokenExpiry` (1h Gültigkeit).
+///   - `POST /api/customer/forgot-password` setzt Token + sendet Mail.
+///   - `POST /api/customer/reset-password` validiert Token + setzt neues
+///     `passwordHash`.
+///   - Aus Sicherheitsgründen: Forgot-Endpoint antwortet immer 200, auch
+///     wenn Mail nicht existiert (Enumeration-Schutz).
+///
+/// **Passwort-Hashing:** bcrypt cost 10 (gleiche Lib wie Admin-User).
+///
+/// **Profil-Update (BUG-402-Fix, v1.4.1):**
+///   - `PATCH /api/customer/me` erlaubt im MVP NUR `firstName`, `lastName`,
+///     `phone` — kein `email`-Feld.
+///   - E-Mail-Änderung erfordert einen Pending-State-Mechanismus
+///     (`pendingEmail` + `pendingEmailToken` + `pendingEmailTokenExpiry`),
+///     der im MVP nicht implementiert ist und als Backlog/IT5 markiert
+///     bleibt. Tom kann eine E-Mail bei Bedarf manuell via Prisma Studio
+///     korrigieren.
+///
+/// **Daten-Constraints:**
+///   - `email` UNIQUE (case-insensitive im App-Layer; immer in lowercase
+///     persistiert).
+///   - `firstName` + `lastName` Pflicht (Display-Name in Navigation +
+///     Mail-Anrede).
+///   - `phone` optional (kann beim Profil-Update nachgepflegt werden).
+model CustomerUser {
+  id                String    @id @default(cuid())
+  /// Lowercase, UNIQUE. App-Layer normalisiert vor Insert/Lookup.
+  email             String    @unique
+  /// bcrypt-Hash, cost 10. Niemals plaintext speichern.
+  passwordHash      String
+  firstName         String
+  lastName          String
+  /// Optional. Format wie bei Booking.customerPhone (siehe phoneSchema).
+  phone             String?
+  /// false bis E-Mail-Verifikation abgeschlossen ist.
+  emailVerified     Boolean   @default(false)
+  /// cuid, gesetzt bei Registrierung. Null nach erfolgreicher Verifikation.
+  verificationToken       String?   @unique
+  /// Ablauf des `verificationToken` (24h nach Erstellung). Wird bei
+  /// `POST /api/customer/resend-verification` ZUSAMMEN mit dem neuen
+  /// Token aktualisiert (BUG-401-Fix v1.4.1). Null nach erfolgreicher
+  /// Verifikation.
+  verificationTokenExpiry DateTime?
+  /// cuid, gesetzt durch `/forgot-password`. Null nach erfolgreichem Reset
+  /// oder Ablauf.
+  resetToken              String?   @unique
+  /// Ablauf des `resetToken` (1h nach Anfrage).
+  resetTokenExpiry        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  bookings  Booking[]
+  reviews   Review[]
+
+  @@index([email])
+  @@map("customer_users")
+}
+
+/// Stripe-Zahlung für eine Buchung (Iteration 4 / US-28).
+///
+/// **1:1-Relation zu Booking** — pro Buchung gibt es höchstens eine
+/// aktive Payment-Anforderung. Tom legt sie an via
+/// `POST /api/admin/bookings/:id/payment` mit Betrag und optionaler
+/// Beschreibung.
+///
+/// **Stripe-Integration:**
+///   - `stripeSessionId` ist der Stripe-Checkout-Session-ID
+///     (`cs_test_...` / `cs_live_...`). Wird beim `POST
+///     /api/payments/create-session` gesetzt; bleibt null, solange der
+///     Kunde die Zahlungsseite noch nicht geöffnet hat.
+///   - Webhook `POST /api/payments/webhook` aktualisiert den Status:
+///       * `checkout.session.completed` → status: 'PAID', paidAt: now.
+///       * `checkout.session.expired` / `payment_intent.payment_failed`
+///         → status: 'FAILED'.
+///       * `charge.refunded` → status: 'REFUNDED'.
+///   - Webhook-Authentizität wird via `STRIPE_WEBHOOK_SECRET` und
+///     Stripe-Signatur-Header (`stripe-signature`) validiert.
+///
+/// **Beträge:** in Cents (`Int`), Währung 'eur'. Begründung: Stripe-API
+/// erwartet Cent-Beträge; Float-Persistenz ist fehleranfällig.
+///
+/// **Wiederholung bei Fehlversuchen:** Wenn `status: 'FAILED'` ist,
+/// erlaubt das Frontend dem Kunden, eine **neue** Stripe-Session zu
+/// erstellen (`POST /api/payments/create-session` ist idempotent: gibt
+/// bei `status === 'PENDING'` die bestehende Session zurück, bei
+/// `status === 'FAILED'` wird eine neue erstellt und `stripeSessionId`
+/// überschrieben).
+///
+/// **Erfolgs-Flow (`status: 'PAID'`):**
+///   1. Webhook setzt status + paidAt.
+///   2. Mail an Kunden ("Zahlungsbestätigung").
+///   3. Mail an Tom ("Zahlung eingegangen").
+///   4. Frontend pollt `GET /api/customer/bookings/:id` (oder lädt nach
+///      Redirect von Stripe success_url) — neue Daten zeigen Badge.
+model Payment {
+  id              String        @id @default(cuid())
+  /// 1:1 — UNIQUE. ON DELETE CASCADE (Booking-Löschung räumt auch das
+  /// Payment auf; im MVP wird nichts gelöscht, aber semantisch korrekt).
+  bookingId       String        @unique
+  booking         Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  /// Stripe-Checkout-Session-ID. Null vor erstem `create-session`-Aufruf.
+  stripeSessionId String?       @unique
+  /// Betrag in Cents. > 0 (Validation im App-Layer).
+  amount          Int
+  /// ISO-4217. MVP: nur "eur".
+  currency        String        @default("eur")
+  /// Optionale Notiz, die im Stripe-Checkout als `description` mitgeschickt
+  /// wird (z.B. "Entrümpelung am 15.05.2026, 4h").
+  description     String?
+  status          PaymentStatus @default(PENDING)
+  paidAt          DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([status])
+  @@index([stripeSessionId])
+  @@map("payments")
+}
+
+/// Kundenbewertung (Iteration 4 / US-29).
+///
+/// **Beziehung zu Booking:** 1:1 (UNIQUE auf `bookingId`). Pro Buchung
+/// kann ein Kunde genau **eine** Bewertung abgeben. Wenn die Buchung
+/// gelöscht wird, bleibt die Review erhalten (`onDelete: SetNull`) —
+/// dadurch fallen evtl. ältere veröffentlichte Reviews nicht weg, falls
+/// Tom Buchungs-Cleanup macht.
+///
+/// **Beziehung zu CustomerUser:** Nullable + `onDelete: SetNull`.
+/// Damit überlebt eine veröffentlichte Review die Konto-Löschung des
+/// Kunden.
+///
+/// **Anzeigename (`customerName`) — MAJOR-403-Klärung v1.4.1:**
+///   Der `customerName` wird im API-Response NICHT als DB-Spalte
+///   persistiert, sondern beim Lesen via Live-Join aus
+///   `customer.firstName + ' ' + customer.lastName[0] + '.'` berechnet
+///   (datenschutzkonform: nur Initial des Nachnamens). Endpunkte
+///   `GET /api/reviews` und `GET /api/admin/reviews` includen die
+///   Relation `customer` und mappen den Namen im Response-Layer.
+///
+///   **Fallback bei `customerId === null`** (Konto wurde nachträglich
+///   gelöscht): Anzeigename wird auf den Default `"Anonym"` gesetzt.
+///   Im MVP tritt dieser Fall **nicht** auf — Self-Service-Account-
+///   Delete ist Backlog (siehe ARCHITECTURE.md §17.7). Wenn Tom
+///   später Konten löscht, müssen Engineers eine Snapshot-Spalte
+///   `customerName` ergänzen, damit ältere Reviews nicht „Anonym"
+///   werden.
+///
+/// **Moderation:**
+///   - `approved: false` ist Default. Reviews sind erst sichtbar nach
+///     Tom-Freigabe via `PATCH /api/admin/reviews/:id`.
+///   - `GET /api/reviews` (öffentlich) liefert ausschließlich
+///     `approved: true`.
+///   - `GET /api/admin/reviews` (Admin) liefert alle, sortiert nach
+///     `createdAt desc`.
+///
+/// **Voraussetzungen für Review-Erstellung (`POST /api/customer/reviews`):**
+///   - Kunde eingeloggt (`customer-session`-Cookie).
+///   - Buchung gehört dem eingeloggten Kunden (`booking.customerId === me.id`).
+///   - Buchungs-Status === 'COMPLETED'.
+///   - Es existiert noch keine Review für diese Buchung
+///     (`booking.review === null`).
+///
+/// **Edit / Delete:** im MVP nicht erlaubt (write-once). Engineers können
+/// einen `DELETE /api/customer/reviews/:id`-Endpunkt ergänzen, falls Tom
+/// das Bedürfnis äußert; aktuell ist es Backlog.
+model Review {
+  id          String        @id @default(cuid())
+  /// Optional, da Konto-Löschung die Review verwaisen lässt (sie bleibt
+  /// trotzdem öffentlich sichtbar).
+  customerId  String?
+  customer    CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  /// 1:1 — UNIQUE. Kann bei Buchungs-Löschung null werden.
+  bookingId   String?       @unique
+  booking     Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  /// 1–5 (im App-Layer validiert via Zod `.min(1).max(5)`).
+  stars       Int
+  /// Optional. Max 500 Zeichen (App-Layer).
+  text        String?
+  /// false bis Admin freigibt.
+  approved    Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([approved, createdAt])
+  @@index([customerId])
+  @@map("reviews")
+}
+
 /// SQLite kennt kein natives ENUM — Prisma serialisiert es als TEXT.
 ///
-/// Iteration 3: keine Erweiterung an BookingStatus.
+/// Iteration 4: COMPLETED hinzugefügt. COMPLETED ist Endstatus, schaltet
+/// den Bewertungs-Button im Kundenportal frei (US-29 AC1).
 enum BookingStatus {
   PENDING
   CONFIRMED
   REJECTED
   COUNTER_PROPOSED
   CANCELLED
+  COMPLETED
+}
+
+/// Stripe-Zahlungs-Status (Iteration 4 / US-28).
+///
+/// PENDING:   Payment-Anforderung existiert, aber noch nicht bezahlt.
+///            stripeSessionId kann null oder eine offene Session sein.
+/// PAID:      Webhook hat checkout.session.completed gemeldet. paidAt gesetzt.
+/// FAILED:    Stripe meldete Fehler (Karten-Abweisung, expired, payment_failed).
+///            Kunde kann erneut versuchen (neue Session).
+/// REFUNDED:  Tom hat in Stripe Dashboard manuell zurückerstattet.
+///            Webhook charge.refunded setzt diesen Status.
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
 }

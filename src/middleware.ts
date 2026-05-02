@@ -1,36 +1,74 @@
 /**
- * Edge-Middleware — schützt /admin/* (außer /admin/login und /admin/setup).
+ * Edge-Middleware — schützt /admin/* und /konto/*.
  *
- * Nutzt die Edge-sichere `auth.config.ts` (kein bcrypt, kein Prisma).
- * API-Routen prüfen Session direkt im Handler, weil dort das einheitliche
- * JSON-Fehlerformat zurückgegeben werden soll.
+ * Iteration 4: zweite Schutz-Schicht für `/konto/*` mit eigener
+ * `customer-session`-Cookie-Logik (siehe `lib/customer-auth.ts`).
  *
- * Iteration 2: Der `matcher` matcht weiterhin nur `/admin/:path*`. Folgende
- * neue API-Endpunkte sind explizit öffentlich (kein Auth, Token-basiert):
- *   - GET  /api/bookings/respond    (Token-Aktion)
- *   - GET  /api/bookings/rebook     (Token-Lookup)
- *   - POST /api/bookings/rebook     (Token-Aktion)
- *   - GET  /api/availability        (Read-only)
- *   - GET  /api/calendar            (Read-only)
- *
- * Admin-only API-Endpunkte (Session-Prüfung im Handler):
- *   - POST /api/bookings/:id/counter-proposal
- *   - PUT  /api/availability
- *   - POST /api/slots, DELETE /api/slots/:id
- *   - GET/PATCH /api/bookings, /api/bookings/:id
- *   - POST /api/bookings/:id/resend-mail
+ * Edge-Sicherheit: hier laufen ausschließlich Edge-kompatible Module
+ * (NextAuth-`auth.config.ts` ohne Prisma/bcrypt; `customer-auth.ts` nutzt
+ * nur `jose`). Kein DB-Lookup — der findet im Route-Handler statt.
  */
 
 import NextAuth from 'next-auth';
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { authConfig } from '@/lib/auth.config';
+import {
+  readCustomerSessionFromRequest,
+  safeCustomerCallback,
+} from '@/lib/customer-auth';
 
 const PUBLIC_ADMIN_PATHS = ['/admin/login', '/admin/setup'];
 
+const PUBLIC_KONTO_PATHS = [
+  '/konto/login',
+  '/konto/registrieren',
+  '/konto/passwort-vergessen',
+  '/konto/passwort-zuruecksetzen',
+  '/konto/verifizieren',
+];
+
 const { auth } = NextAuth(authConfig);
 
-export default auth((req) => {
+async function handleKonto(req: NextRequest): Promise<Response | null> {
   const { pathname, search } = req.nextUrl;
+
+  // /konto/zahlung/:id ist mit cancelToken auch für Gäste zugänglich
+  // (Stripe-Mail-Link ohne Login-Pflicht). Ohne Token → wie sonst.
+  if (pathname.startsWith('/konto/zahlung/')) {
+    const token = req.nextUrl.searchParams.get('token');
+    if (token) return NextResponse.next();
+  }
+
+  if (
+    PUBLIC_KONTO_PATHS.some(
+      (p) => pathname === p || pathname.startsWith(`${p}/`),
+    )
+  ) {
+    return NextResponse.next();
+  }
+
+  const session = await readCustomerSessionFromRequest(req);
+  if (session) return NextResponse.next();
+
+  const loginUrl = new URL('/konto/login', req.nextUrl.origin);
+  // safeCustomerCallback verhindert Open-Redirect-Schmuggel über das
+  // pathname (kann theoretisch von Reverse-Proxy manipuliert werden).
+  loginUrl.searchParams.set(
+    'callbackUrl',
+    safeCustomerCallback(`${pathname}${search}`),
+  );
+  return NextResponse.redirect(loginUrl);
+}
+
+export default auth(async (req) => {
+  const { pathname, search } = req.nextUrl;
+
+  // /konto/* — IT4
+  if (pathname.startsWith('/konto')) {
+    const res = await handleKonto(req as unknown as NextRequest);
+    if (res) return res;
+    return NextResponse.next();
+  }
 
   if (!pathname.startsWith('/admin')) return NextResponse.next();
 
@@ -48,5 +86,5 @@ export default auth((req) => {
 });
 
 export const config = {
-  matcher: ['/admin/:path*'],
+  matcher: ['/admin/:path*', '/konto/:path*'],
 };

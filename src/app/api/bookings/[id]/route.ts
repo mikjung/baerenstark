@@ -30,15 +30,16 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const AdminPatchBookingSchema = z.object({
-  status: z.enum(['CONFIRMED', 'REJECTED', 'CANCELLED']),
+  status: z.enum(['CONFIRMED', 'REJECTED', 'CANCELLED', 'COMPLETED']),
 });
 
 const ADMIN_ALLOWED_TRANSITIONS: Record<string, ReadonlyArray<string>> = {
   PENDING: ['CONFIRMED', 'REJECTED', 'CANCELLED'],
-  CONFIRMED: ['REJECTED', 'CANCELLED', 'CONFIRMED'],
+  CONFIRMED: ['REJECTED', 'CANCELLED', 'CONFIRMED', 'COMPLETED'],
   REJECTED: ['CONFIRMED', 'REJECTED'],
   COUNTER_PROPOSED: ['CONFIRMED', 'REJECTED', 'CANCELLED', 'COUNTER_PROPOSED'],
   CANCELLED: [],
+  COMPLETED: ['COMPLETED'],
 };
 
 export async function PATCH(

@@ -1,44 +1,89 @@
 /**
- * US-22 — Feedback-Sektion auf der Startseite.
+ * ReviewSection (US-22 / US-29 — Iteration 4 umgebaut).
  *
- * - Statische Daten aus `lib/reviews.ts` (Iteration 4 → Backend-Modell).
- * - Karten in 1-Spalten (Mobile) / 2 (Tablet) / 3 (Desktop).
- * - Sterne als ⭐-Unicode (visuell + sr-only Aria-Label).
- * - Header zeigt Durchschnittsbewertung + Anzahl.
+ * Server-Component — lädt `GET /api/reviews`. Wenn weniger als
+ * `REVIEW_MIN_APPROVED_TO_REPLACE_STATIC` (4) freigegebene Reviews
+ * vorhanden sind, fällt sie auf die statische Liste aus `lib/reviews.ts`
+ * zurück und zeigt einen dezenten Hinweis.
+ *
+ * Die UI-Darstellung bleibt identisch zur IT3-Version (gleiches Grid,
+ * gleiche Karten-Optik) — nur die Datenquelle hat sich geändert.
  */
 
+import { headers } from 'next/headers';
+import {
+  REVIEW_MIN_APPROVED_TO_REPLACE_STATIC,
+  type PublicReview,
+} from '@/lib/schemas';
 import { REVIEWS, REVIEWS_AVERAGE, REVIEWS_COUNT } from '@/lib/reviews';
-import { getServiceLabel } from '@/lib/services';
+import { ReviewSectionShowMore } from './ReviewSectionShowMore';
 
-const FULL = '★';
-const EMPTY = '☆';
-
-function StarRating({ stars }: { stars: number }) {
-  const rounded = Math.round(stars);
-  return (
-    <span aria-label={`${stars} von 5 Sternen`} className="text-amber-accent">
-      <span aria-hidden="true">
-        {FULL.repeat(rounded)}
-        {EMPTY.repeat(5 - rounded)}
-      </span>
-    </span>
-  );
+interface FetchedReviews {
+  items: PublicReview[];
+  average: number;
+  total: number;
 }
 
-function formatGermanDate(iso: string): string {
-  // "2026-04-20" → "20.04.2026"
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
-  if (!m) return iso;
-  return `${m[3]}.${m[2]}.${m[1]}`;
+function getBaseUrl(): string {
+  const envUrl = process.env.NEXT_PUBLIC_BASE_URL ?? process.env.BASE_URL;
+  if (envUrl) return envUrl.replace(/\/$/, '');
+  const h = headers();
+  const host = h.get('x-forwarded-host') ?? h.get('host');
+  const proto = h.get('x-forwarded-proto') ?? 'http';
+  if (host) return `${proto}://${host}`;
+  return 'http://localhost:3000';
 }
 
-function truncate(text: string, max = 220): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max - 1).trimEnd() + '…';
+async function fetchReviews(): Promise<FetchedReviews | null> {
+  try {
+    const res = await fetch(`${getBaseUrl()}/api/reviews?limit=20`, {
+      // Server-Component-Cache: 60s, stale-while-revalidate analog Spec.
+      next: { revalidate: 60 },
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { data: FetchedReviews };
+    return body.data ?? null;
+  } catch {
+    return null;
+  }
 }
 
-export function ReviewSection() {
-  const averageLabel = REVIEWS_AVERAGE.toFixed(1).replace('.', ',');
+export async function ReviewSection() {
+  const live = await fetchReviews();
+  const useLive =
+    live !== null && live.items.length >= REVIEW_MIN_APPROVED_TO_REPLACE_STATIC;
+
+  // Datenstruktur unifizieren für die Render-Schleife.
+  type ViewItem = {
+    id: string;
+    customerName: string;
+    service: string | null;
+    stars: number;
+    text: string;
+    createdAt: string; // ISO oder YYYY-MM-DD
+  };
+
+  const items: ViewItem[] = useLive
+    ? live!.items.map((r) => ({
+        id: r.id,
+        customerName: r.customerName,
+        service: r.service,
+        stars: r.stars,
+        text: r.text ?? '',
+        createdAt: r.createdAt,
+      }))
+    : REVIEWS.map((r) => ({
+        id: r.id,
+        customerName: r.customerName,
+        service: r.service === 'allgemein' ? null : r.service,
+        stars: r.stars,
+        text: r.text,
+        createdAt: r.date,
+      }));
+
+  const average = useLive ? live!.average : REVIEWS_AVERAGE;
+  const total = useLive ? live!.total : REVIEWS_COUNT;
+  const averageLabel = average.toFixed(1).replace('.', ',');
 
   return (
     <section
@@ -56,45 +101,18 @@ export function ReviewSection() {
           <span className="text-xl text-amber-accent" aria-hidden="true">
             ★
           </span>{' '}
-          <strong>{averageLabel} / 5,0</strong> — basierend auf {REVIEWS_COUNT}{' '}
-          Bewertungen
+          <strong>{averageLabel} / 5,0</strong> — basierend auf {total}{' '}
+          {total === 1 ? 'Bewertung' : 'Bewertungen'}
         </p>
+        {!useLive && (
+          <p className="mt-2 text-xs text-baerenstark-bark/60">
+            Basierend auf Beispielbewertungen — sobald genug echte
+            Erfahrungsberichte vorliegen, werden diese hier angezeigt.
+          </p>
+        )}
       </div>
 
-      <ul
-        role="list"
-        className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3"
-      >
-        {REVIEWS.map((review) => (
-          <li key={review.id}>
-            <article
-              aria-labelledby={`review-${review.id}-name`}
-              className="flex h-full flex-col rounded-2xl border border-baerenstark-sand bg-baerenstark-cream/70 p-5 shadow-soft"
-            >
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p
-                  id={`review-${review.id}-name`}
-                  className="font-serif text-lg font-semibold text-baerenstark-bark"
-                >
-                  {review.customerName}
-                </p>
-                <StarRating stars={review.stars} />
-              </div>
-              <p className="mb-3 text-xs font-medium uppercase tracking-wide text-baerenstark-wood">
-                {review.service === 'allgemein'
-                  ? 'Allgemein'
-                  : getServiceLabel(review.service)}
-              </p>
-              <p className="flex-1 text-sm text-baerenstark-bark/85">
-                „{truncate(review.text)}"
-              </p>
-              <p className="mt-3 text-xs text-baerenstark-bark/60">
-                {formatGermanDate(review.date)}
-              </p>
-            </article>
-          </li>
-        ))}
-      </ul>
+      <ReviewSectionShowMore items={items} />
     </section>
   );
 }

@@ -32,6 +32,7 @@ import { runMailDispatch, type BookingMailPayload } from '@/lib/mail';
 import { bookingLimiter, getClientIp } from '@/lib/ratelimit';
 import { getAvailabilityForDate } from '@/lib/availability';
 import { revalidateTag } from 'next/cache';
+import { readCustomerSessionFromRequest } from '@/lib/customer-auth';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -77,6 +78,7 @@ export async function GET(req: NextRequest): Promise<Response> {
         attachments: {
           orderBy: { createdAt: 'asc' },
         },
+        payment: true,
       },
     });
 
@@ -94,6 +96,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       date: b.date,
       startTime: b.startTime,
       endTime: b.endTime,
+      customerId: b.customerId,
       customerName: b.customerName,
       customerPhone: b.customerPhone,
       customerEmail: b.customerEmail,
@@ -119,6 +122,24 @@ export async function GET(req: NextRequest): Promise<Response> {
         sizeBytes: a.sizeBytes,
         createdAt: a.createdAt.toISOString(),
       })),
+      payment: b.payment
+        ? {
+            id: b.payment.id,
+            bookingId: b.payment.bookingId,
+            stripeSessionId: b.payment.stripeSessionId,
+            amount: b.payment.amount,
+            currency: b.payment.currency,
+            status: b.payment.status as
+              | 'PENDING'
+              | 'PAID'
+              | 'FAILED'
+              | 'REFUNDED',
+            description: b.payment.description,
+            paidAt: b.payment.paidAt ? b.payment.paidAt.toISOString() : null,
+            createdAt: b.payment.createdAt.toISOString(),
+            updatedAt: b.payment.updatedAt.toISOString(),
+          }
+        : null,
       createdAt: b.createdAt.toISOString(),
       updatedAt: b.updatedAt.toISOString(),
     }));
@@ -259,6 +280,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     // ---------------------------------------------------------------------
     // Booking-Insert
     // ---------------------------------------------------------------------
+    // IT4 (US-25 AC8): eingeloggte Kunden bekommen ihre Buchung automatisch
+    // zugeordnet. Gastbuchungen lassen `customerId` leer.
+    const customerSession = await readCustomerSessionFromRequest(req);
+
     let booking;
     try {
       booking = await prisma.booking.create({
@@ -267,6 +292,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           date: isDateMode ? data.date : null,
           startTime: isDateMode ? data.startTime : null,
           endTime: isDateMode ? data.endTime : null,
+          customerId: customerSession?.customerId ?? null,
           customerName: data.customerName,
           customerPhone: data.customerPhone,
           customerEmail: data.customerEmail,

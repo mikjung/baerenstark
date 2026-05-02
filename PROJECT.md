@@ -515,7 +515,53 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 
 #### US-25: Kundenportal — Optionale Registrierung und Login
 
-**Als** Kunde möchte ich optional ein Kundenkonto anlegen und mich einloggen können, damit ich meine Aufträge zentral verwalten kann — ohne zur Buchung gezwungen zu sein.
+**Als** Kunde  
+**möchte ich** optional ein Kundenkonto anlegen und mich einloggen können,  
+**damit** ich meine Aufträge zentral verwalten kann — ohne zur Buchung gezwungen zu sein.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/konto/registrieren` auf,  
+  **When** ich E-Mail-Adresse und Passwort (mind. 8 Zeichen) eingebe und auf „Konto erstellen" klicke,  
+  **Then** erhalte ich eine Bestätigungs-E-Mail mit Verifizierungslink und sehe den Hinweis „Bitte bestätigen Sie Ihre E-Mail-Adresse".
+
+- **Given** ich klicke auf den Verifizierungslink in der E-Mail,  
+  **When** der Link gültig ist (max. 24 h),  
+  **Then** wird mein Konto aktiviert und ich werde automatisch zu `/konto` weitergeleitet.
+
+- **Given** ich rufe `/konto/login` auf,  
+  **When** ich meine verifizierten Zugangsdaten eingebe und auf „Einloggen" klicke,  
+  **Then** werde ich zu `/konto` weitergeleitet und sehe meinen Namen in der Navigation.
+
+- **Given** ich gebe beim Login falsche Zugangsdaten ein,  
+  **When** ich auf „Einloggen" klicke,  
+  **Then** erscheint die Fehlermeldung „E-Mail oder Passwort ungültig" — ohne Hinweis, welches Feld falsch ist.
+
+- **Given** ich bin auf `/konto/login`,  
+  **When** ich auf „Passwort vergessen" klicke und meine E-Mail eingebe,  
+  **Then** erhalte ich innerhalb von 2 Minuten eine E-Mail mit einem Passwort-Reset-Link (gültig 1 Stunde).
+
+- **Given** ich klicke auf den Passwort-Reset-Link,  
+  **When** ich ein neues Passwort (mind. 8 Zeichen) eingebe und bestätige,  
+  **Then** wird das Passwort geändert und ich werde zu `/konto/login` weitergeleitet.
+
+- **Given** ich möchte keine Registrierung,  
+  **When** ich die Buchungsseite aufrufe und das Formular abschicke,  
+  **Then** funktioniert die Gastbuchung wie bisher — inklusive cancelToken per E-Mail.
+
+- **Given** ich bin eingeloggt und buche einen neuen Auftrag,  
+  **When** das Formular abgeschickt wird,  
+  **Then** wird die neue Buchung automatisch meinem Kundenkonto zugeordnet.
+
+- **Given** ich rufe eine geschützte Seite unter `/konto/*` auf ohne eingeloggt zu sein,  
+  **When** die Seite geladen wird,  
+  **Then** werde ich zu `/konto/login` weitergeleitet.
+
+- **Given** ich bin eingeloggt,  
+  **When** ich unter `/konto/profil` meinen Namen, meine Telefonnummer oder E-Mail ändere und speichere,  
+  **Then** werden die Änderungen gespeichert und eine Bestätigungsmeldung erscheint.
+
+**Hinweis:** `CustomerUser` ist eine separate Entität vom Admin-`User`. Kunden haben keinen Zugang zum Admin-Bereich. Gastbuchungen werden nicht rückwirkend einem Konto zugeordnet.
 
 **Priorität:** Must Have | **Story Points:** 8
 
@@ -523,7 +569,33 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 
 #### US-26: Kundenportal — Auftragsübersicht
 
-**Als** eingeloggter Kunde möchte ich alle meine Aufträge (vergangene und bevorstehende) in einer Übersicht sehen, damit ich Status und Details jederzeit nachverfolgen kann.
+**Als** eingeloggter Kunde  
+**möchte ich** alle meine Aufträge in einer übersichtlichen Liste sehen,  
+**damit** ich Status, Datum und Details jederzeit nachverfolgen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt und rufe `/konto` auf,  
+  **When** die Seite geladen ist,  
+  **Then** sehe ich zwei Bereiche: „Bevorstehende Termine" (Datum >= heute) und „Vergangene Aufträge" (Datum < heute), jeweils chronologisch sortiert.
+
+- **Given** ich sehe einen Eintrag in der Auftragsübersicht,  
+  **When** die Zeile angezeigt wird,  
+  **Then** enthält sie: Datum, Uhrzeit, Service, Status-Badge auf Deutsch und — sofern hinterlegt — den Preis.
+
+- **Given** Status-Badges werden angezeigt,  
+  **When** ein Auftrag verschiedene Zustände hat,  
+  **Then** lauten die Beschriftungen: „Offen" (PENDING), „Bestätigt" (CONFIRMED), „Abgelehnt" (REJECTED), „Storniert" (CANCELLED), „Gegenvorschlag ausstehend" (COUNTER_PROPOSED).
+
+- **Given** ich klicke auf einen Auftrag,  
+  **When** die Detailseite geladen ist,  
+  **Then** sehe ich alle Buchungsdetails: Datum, Uhrzeit, Service, Beschreibung, hochgeladene Dateien, Status und Zahlungsstatus.
+
+- **Given** ich habe noch keine Aufträge,  
+  **When** ich `/konto` aufrufe,  
+  **Then** erscheint die Meldung „Sie haben noch keine Aufträge" mit dem CTA-Button „Ersten Auftrag buchen".
+
+**Hinweis:** Nur Buchungen nach Kontoerstellung erscheinen hier. Gastbuchungen bleiben unsichtbar.
 
 **Priorität:** Must Have | **Story Points:** 5
 
@@ -531,23 +603,125 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 
 #### US-27: Kundenportal — Stornierung über Portal
 
-**Als** eingeloggter Kunde möchte ich einen bevorstehenden Auftrag direkt im Portal stornieren, damit ich keine E-Mail mit Stornierungslink suchen muss.
+**Als** eingeloggter Kunde  
+**möchte ich** einen bevorstehenden Auftrag direkt im Portal stornieren können,  
+**damit** ich keine E-Mail mit Stornierungslink suchen muss.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich sehe einen Auftrag mit Status „Offen" (PENDING) oder „Gegenvorschlag ausstehend" (COUNTER_PROPOSED),  
+  **When** ich auf „Stornieren" klicke,  
+  **Then** öffnet sich ein Confirm-Dialog: „Möchten Sie diesen Termin wirklich stornieren?" mit „Ja, stornieren" und „Abbrechen".
+
+- **Given** ich bestätige die Stornierung,  
+  **When** sie verarbeitet ist,  
+  **Then** ändert sich der Status-Badge sofort auf „Storniert", der Button verschwindet und Tom erhält eine Benachrichtigungs-E-Mail.
+
+- **Given** ein bestätigter Termin liegt mehr als 24 Stunden in der Zukunft,  
+  **When** ich auf „Stornieren" klicke und bestätige,  
+  **Then** wird der Auftrag storniert und der Zeitslot wird wieder freigegeben.
+
+- **Given** ein bestätigter Termin liegt weniger als 24 Stunden in der Zukunft,  
+  **When** ich die Auftragsdetails aufrufe,  
+  **Then** ist der „Stornieren"-Button deaktiviert mit dem Hinweis: „Stornierung nur bis 24 Stunden vor dem Termin möglich. Bitte kontaktieren Sie uns direkt: 0157-74787512."
+
+- **Given** ein Auftrag hat Status „Abgelehnt", „Storniert" oder liegt in der Vergangenheit,  
+  **When** ich die Auftragsdetails aufrufe,  
+  **Then** ist kein „Stornieren"-Button sichtbar.
+
+**Hinweis:** Stornierungsfrist 24 Stunden ist festgelegt. Ergänzt US-14 (cancelToken) für Portal-Nutzer.
 
 **Priorität:** Must Have | **Story Points:** 3
 
 ---
 
-#### US-28: Zahlungsabwicklung PayPal und Apple Pay
+#### US-28: Zahlungsabwicklung
 
-**Als** Kunde möchte ich nach Bestätigung meines Auftrags per PayPal oder Apple Pay bezahlen, damit keine Banküberweisung nötig ist.
+**Als** Kunde  
+**möchte ich** nach Bestätigung meines Auftrags per PayPal, Apple Pay oder Google Pay bezahlen können,  
+**damit** keine Banküberweisung nötig ist und die Transaktion sicher und schnell abläuft.
+
+**Akzeptanzkriterien:**
+
+- **Given** Tom hat einen Betrag für einen bestätigten Auftrag im Admin-Dashboard hinterlegt,  
+  **When** der Betrag gespeichert wird,  
+  **Then** erhält der Kunde eine E-Mail mit Betreff „Ihre Rechnung von Bärenstark Hausservice", dem fälligen Betrag und dem Link zur Zahlungsseite `/konto/zahlung/:bookingId`.
+
+- **Given** ich rufe `/konto/zahlung/:bookingId` auf,  
+  **When** die Seite geladen ist,  
+  **Then** sehe ich Auftragsdetails, den fälligen Betrag und Zahlungsoptionen: PayPal, Apple Pay, Google Pay.
+
+- **Given** ich wähle PayPal,  
+  **When** ich auf „Mit PayPal bezahlen" klicke,  
+  **Then** öffnet sich der Stripe-Payment-Flow mit PayPal-Option.
+
+- **Given** ich wähle Apple Pay auf einem kompatiblen Gerät,  
+  **When** ich auf „Mit Apple Pay bezahlen" klicke,  
+  **Then** öffnet sich der native Apple-Pay-Dialog zur Bestätigung per Touch ID / Face ID.
+
+- **Given** ich wähle Google Pay auf einem kompatiblen Gerät,  
+  **When** ich auf „Mit Google Pay bezahlen" klicke,  
+  **Then** öffnet sich der Google-Pay-Dialog.
+
+- **Given** eine Zahlung wurde erfolgreich abgeschlossen,  
+  **When** Stripe die Zahlung bestätigt (Webhook),  
+  **Then** ändert sich der Zahlungsstatus im Admin-Dashboard auf „Bezahlt" und beide Parteien erhalten eine Zahlungsbestätigung per E-Mail.
+
+- **Given** eine Zahlung schlägt fehl,  
+  **When** der Fehler eintritt,  
+  **Then** sehe ich eine deutschsprachige Fehlermeldung und kann es erneut versuchen.
+
+- **Given** der Zahlungsstatus ist „Bezahlt",  
+  **When** ich die Auftragsdetails im Portal öffne,  
+  **Then** sehe ich den Badge „Bezahlt" und den bezahlten Betrag. Der Zahlungs-Button ist nicht mehr sichtbar.
+
+**Hinweis:** Empfohlener Zahlungs-Stack: **Stripe** — unterstützt PayPal, Apple Pay und Google Pay über eine einzige Integration (Stripe Payment Element), ohne separaten PayPal-API-Account. Betrag wird manuell von Tom hinterlegt. Apple Pay / Google Pay nur auf kompatiblen Geräten sichtbar (progressive enhancement).
 
 **Priorität:** Must Have | **Story Points:** 8
 
 ---
 
-#### US-29: Kundenportal — Feedback und Bewertung abgeben
+#### US-29: Kundenbewertungen (echtes Backend)
 
-**Als** eingeloggter Kunde mit abgeschlossenem Auftrag möchte ich eine Bewertung (1–5 Sterne + Text) hinterlassen, damit andere Besucher von meiner Erfahrung profitieren.
+**Als** eingeloggter Kunde mit einem abgeschlossenen Auftrag  
+**möchte ich** eine Bewertung (1–5 Sterne + optionaler Text) hinterlassen können,  
+**damit** andere Besucher von meiner Erfahrung profitieren und Tom Feedback erhält.
+
+**Akzeptanzkriterien:**
+
+- **Given** mein Auftrag hat den Status „Abgeschlossen" (COMPLETED),  
+  **When** ich die Auftragsdetails im Portal öffne,  
+  **Then** sehe ich den Button „Bewertung abgeben".
+
+- **Given** ich klicke auf „Bewertung abgeben",  
+  **When** das Formular erscheint,  
+  **Then** kann ich 1–5 Sterne auswählen (Pflicht) und einen optionalen Freitext eingeben (max. 500 Zeichen, Zeichenzähler sichtbar).
+
+- **Given** ich versuche die Bewertung ohne Sternauswahl abzuschicken,  
+  **When** ich auf „Absenden" klicke,  
+  **Then** erscheint die Fehlermeldung „Bitte wählen Sie eine Sternebewertung".
+
+- **Given** ich schicke eine gültige Bewertung ab,  
+  **When** sie gespeichert wurde,  
+  **Then** erscheint die Bestätigung „Vielen Dank für Ihre Bewertung! Sie wird nach Freigabe veröffentlicht." und der Button ist deaktiviert.
+
+- **Given** ich habe für einen Auftrag bereits eine Bewertung abgegeben,  
+  **When** ich den Auftrag erneut öffne,  
+  **Then** ist der Bewertungs-Button deaktiviert und meine Bewertung wird schreibgeschützt angezeigt.
+
+- **Given** Tom öffnet im Admin-Bereich die Bewertungsverwaltung,  
+  **When** eine neue Bewertung vorliegt,  
+  **Then** sieht er Kundename, Sternebewertung, Freitext, Service und kann „Freigeben" oder „Ablehnen" klicken.
+
+- **Given** Tom gibt eine Bewertung frei,  
+  **When** die Freigabe gespeichert wird,  
+  **Then** erscheint die Bewertung auf der Startseite in der Feedback-Sektion (US-22).
+
+- **Given** genug echte Bewertungen vorhanden sind (mind. 4 freigegebene),  
+  **When** die Feedback-Sektion auf der Startseite geladen wird,  
+  **Then** werden ausschließlich echte Bewertungen angezeigt — die Platzhalter aus US-22 (IT3) werden ersetzt.
+
+**Hinweis:** Admin-Freigabe vor Veröffentlichung ist Pflicht. Datenstruktur muss kompatibel mit US-22 sein.
 
 **Priorität:** Must Have | **Story Points:** 5
 
@@ -669,6 +843,8 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 - Zeitfenster-Schritte für Kundenbuchung: 30 Minuten (Annahme — Tom bestätigen).
 - Maximale Dateianzahl pro Buchungsanfrage: 5 Dateien, max. 20 MB pro Datei, 50 MB gesamt (Annahme).
 - Preise in US-20 sind Richtwerte — Tom gibt finale Werte vor Go-Live frei.
-- Bewertungsmoderation (US-29, Iteration 4): Tom entscheidet, ob er Bewertungen vor Veröffentlichung freigeben möchte.
-- Stornierungsfrist im Kundenportal (US-27): 24 Stunden angenommen — Tom bestätigen.
-- Zahlungsauslöser (US-28): Betrag wird manuell von Tom hinterlegt — automatische Preisberechnung ist Backlog.
+- Bewertungsmoderation (US-29, Iteration 4): Tom gibt Bewertungen manuell frei, bevor sie auf der Startseite erscheinen. Entschieden.
+- Stornierungsfrist im Kundenportal (US-27): 24 Stunden vor dem Termin. Entschieden.
+- Zahlungsauslöser (US-28): Betrag wird manuell von Tom nach Terminbestätigung hinterlegt — E-Mail-Aufforderung an Kunden wird beim Speichern des Betrags ausgelöst. Automatische Preisberechnung ist Backlog.
+- Zahlungs-Stack (US-28): Stripe wird eingesetzt — unterstützt PayPal, Apple Pay und Google Pay über eine einzige Integration. Entschieden.
+- Kunden-Auth (US-25): Separate `CustomerUser`-Entität, vollständig getrennt vom Admin-`User`. Entschieden.

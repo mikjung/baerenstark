@@ -1,5 +1,6 @@
 import Image from 'next/image';
 import Link from 'next/link';
+import { CustomerHeaderMenu } from '@/components/customer/CustomerHeaderMenu';
 import { CONTACT } from '@/lib/contact';
 
 export function Header() {
@@ -23,16 +24,17 @@ export function Header() {
             Bärenstark <span className="hidden sm:inline">Hausservice</span>
           </span>
         </Link>
-        <nav aria-label="Hauptnavigation" className="flex items-center gap-2 sm:gap-4">
+        <nav aria-label="Hauptnavigation" className="flex items-center gap-2 sm:gap-3">
           <Link
             href="/buchung"
             className="rounded-lg bg-baerenstark-wood px-3 py-2 text-sm font-medium text-baerenstark-cream transition-colors hover:bg-baerenstark-bark sm:px-5 sm:py-2.5 sm:text-base"
           >
             Termin buchen
           </Link>
+          <CustomerHeaderMenu />
           <a
             href={`tel:${CONTACT.phoneTel}`}
-            className="hidden rounded-lg border border-baerenstark-wood/40 px-3 py-2 text-sm font-medium text-baerenstark-bark transition-colors hover:bg-baerenstark-sand/40 sm:inline-flex sm:px-4"
+            className="hidden rounded-lg border border-baerenstark-wood/40 px-3 py-2 text-sm font-medium text-baerenstark-bark transition-colors hover:bg-baerenstark-sand/40 lg:inline-flex lg:px-4"
             aria-label={`Anrufen unter ${CONTACT.phoneDisplay}`}
           >
             📞 {CONTACT.phoneDisplay}

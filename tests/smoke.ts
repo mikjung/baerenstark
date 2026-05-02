@@ -722,8 +722,342 @@ async function run() {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Iteration 4 — Customer Auth, Cancellation, Stripe, Reviews
+  // -------------------------------------------------------------------------
+  await group('Iteration 4 — safeCustomerCallback', async () => {
+    const { safeCustomerCallback } = await import('../src/lib/customer-auth');
+    const cases: Array<{ input: unknown; expected: string; label: string }> = [
+      { input: '/konto', expected: '/konto', label: 'plain path' },
+      { input: '/konto/auftrag/abc', expected: '/konto/auftrag/abc', label: 'nested path' },
+      { input: '/konto?a=b', expected: '/konto?a=b', label: 'with query' },
+      { input: '', expected: '/konto', label: 'empty string' },
+      { input: 'konto', expected: '/konto', label: 'no leading slash' },
+      { input: '//evil.example/login', expected: '/konto', label: 'protocol-relative' },
+      { input: 'http://x', expected: '/konto', label: 'absolute http URL' },
+      { input: 'https://evil.example', expected: '/konto', label: 'https URL' },
+      { input: '\\\\evil', expected: '/konto', label: 'backslash' },
+      { input: '/konto with space', expected: '/konto', label: 'whitespace' },
+      { input: null, expected: '/konto', label: 'null' },
+      { input: 123, expected: '/konto', label: 'number' },
+    ];
+    for (const c of cases) {
+      const got = safeCustomerCallback(c.input);
+      if (got === c.expected) ok(`safeCustomerCallback: ${c.label}`);
+      else bad(`safeCustomerCallback: ${c.label} (got "${got}", expected "${c.expected}")`);
+    }
+  });
+
+  await group('Iteration 4 — Customer JWT roundtrip', async () => {
+    const { createCustomerSession, verifyCustomerSession } = await import(
+      '../src/lib/customer-auth'
+    );
+    process.env.AUTH_SECRET ??= 'test-secret-with-at-least-32-characters-aaa';
+    const token = await createCustomerSession('cu_smoke_1', 'smoke@example.com');
+    if (typeof token === 'string' && token.split('.').length === 3) {
+      ok('createCustomerSession produces JWT-shaped string');
+    } else {
+      bad('createCustomerSession produces JWT-shaped string');
+    }
+    const decoded = await verifyCustomerSession(token);
+    if (
+      decoded?.customerId === 'cu_smoke_1' &&
+      decoded?.email === 'smoke@example.com'
+    ) {
+      ok('verifyCustomerSession round-trips payload');
+    } else {
+      bad(`verifyCustomerSession round-trip: ${JSON.stringify(decoded)}`);
+    }
+    const bad1 = await verifyCustomerSession('not-a-token');
+    if (bad1 === null) ok('verifyCustomerSession rejects garbage');
+    else bad('verifyCustomerSession rejects garbage');
+  });
+
+  await group('Iteration 4 — Cancellation algorithm (DST-fest)', async () => {
+    const { isCancellable, parseBerlinDateTime, todayInBerlin } = await import(
+      '../src/lib/cancellation'
+    );
+
+    // Spring-forward (29.03.2026): Termin 10:00 Berlin, Storno 28.03 10:00 Berlin
+    // → echte Differenz 23h → CONFIRMED → false (zu spät).
+    const stornoDST_spring = parseBerlinDateTime('2026-03-28', '10:00');
+    const cancelledSpring = isCancellable(
+      {
+        status: 'CONFIRMED',
+        date: '2026-03-29',
+        startTime: '10:00',
+        slot: null,
+      },
+      stornoDST_spring,
+    );
+    if (!cancelledSpring) ok('DST spring-forward: 23h → not cancellable');
+    else bad('DST spring-forward should NOT be cancellable');
+
+    // Fall-back (25.10.2026 ist letzter So Oktober 2026): Termin 10:00
+    // Berlin, Storno 24.10 10:00 Berlin → echte Differenz 25h → CONFIRMED
+    // → true (erlaubt). Letzter Sonntag im Oktober 2026 ist der 25.10.
+    const stornoDST_fall = parseBerlinDateTime('2026-10-24', '10:00');
+    const cancelledFall = isCancellable(
+      {
+        status: 'CONFIRMED',
+        date: '2026-10-25',
+        startTime: '10:00',
+        slot: null,
+      },
+      stornoDST_fall,
+    );
+    if (cancelledFall) ok('DST fall-back: 25h → cancellable');
+    else bad('DST fall-back should be cancellable');
+
+    // PORTAL_CANCELLABLE_STATUSES: REJECTED → false.
+    const rejected = isCancellable({
+      status: 'REJECTED',
+      date: '2099-01-01',
+      startTime: '10:00',
+      slot: null,
+    });
+    if (!rejected) ok('REJECTED is never cancellable');
+    else bad('REJECTED is never cancellable');
+
+    // CONFIRMED 26h Zukunft → true.
+    const future26h = new Date(Date.now() + 26 * 3600 * 1000);
+    const dateStr = future26h.toISOString().slice(0, 10);
+    // Wir nutzen die Stunde aus UTC und +1 für Berlin-Approximation, aber
+    // einfacher: setze Datum/Zeit weit genug in die Zukunft.
+    const farFuture = isCancellable(
+      {
+        status: 'CONFIRMED',
+        date: '2099-01-01',
+        startTime: '10:00',
+        slot: null,
+      },
+    );
+    if (farFuture) ok('CONFIRMED far future → cancellable');
+    else bad('CONFIRMED far future should be cancellable');
+
+    // PENDING in past → false.
+    const pendingPast = isCancellable({
+      status: 'PENDING',
+      date: '2020-01-01',
+      startTime: '10:00',
+      slot: null,
+    });
+    if (!pendingPast) ok('PENDING past → not cancellable');
+    else bad('PENDING past should NOT be cancellable');
+
+    // MAJOR-404: keine date+slot → defensiv true.
+    const noDate = isCancellable({
+      status: 'CONFIRMED',
+      date: null,
+      startTime: null,
+      slot: null,
+    });
+    if (noDate) ok('No date+slot → defensive true');
+    else bad('No date+slot should be defensive true');
+
+    // todayInBerlin → YYYY-MM-DD
+    const today = todayInBerlin();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(today)) ok('todayInBerlin returns YYYY-MM-DD');
+    else bad(`todayInBerlin: ${today}`);
+    void dateStr;
+  });
+
+  await group('Iteration 4 — Customer schemas', async () => {
+    const {
+      CustomerRegisterSchema,
+      CustomerLoginSchema,
+      CustomerProfileUpdateSchema,
+      CreatePaymentSchema,
+      SessionStatusQuerySchema,
+      CreateReviewSchema,
+      ApproveReviewSchema,
+    } = await import('../contracts/zod-schemas');
+
+    const reg = CustomerRegisterSchema.safeParse({
+      email: 'TEST@example.com',
+      password: 'longenoughpw',
+      firstName: 'Maria',
+      lastName: 'Müller',
+      phone: '0157-1234567',
+      privacyAccepted: true,
+    });
+    reg.success ? ok('Register accepts valid input + lowercases email')
+      : bad('Register valid input', reg.error);
+    if (reg.success && reg.data.email === 'test@example.com') {
+      ok('Register email lowercased');
+    } else {
+      bad('Register email should be lowercased');
+    }
+
+    const regBad = CustomerRegisterSchema.safeParse({
+      email: 'foo@example.com',
+      password: 'short',
+      firstName: 'Maria',
+      lastName: 'Müller',
+      privacyAccepted: true,
+    });
+    !regBad.success ? ok('Register rejects short password')
+      : bad('Register should reject short password');
+
+    const noPrivacy = CustomerRegisterSchema.safeParse({
+      email: 'foo@example.com',
+      password: 'longenoughpw',
+      firstName: 'Maria',
+      lastName: 'Müller',
+      privacyAccepted: false,
+    });
+    !noPrivacy.success ? ok('Register rejects privacyAccepted=false')
+      : bad('Register should reject privacy false');
+
+    const login = CustomerLoginSchema.safeParse({
+      email: 'a@b.de',
+      password: 'x',
+      redirectUrl: '/konto',
+    });
+    login.success ? ok('Login accepts valid input')
+      : bad('Login valid input', login.error);
+
+    const profileBadEmail = CustomerProfileUpdateSchema.safeParse({
+      firstName: 'Maria',
+      email: 'neu@example.com',
+    });
+    !profileBadEmail.success ? ok('ProfileUpdate strict rejects email field')
+      : bad('ProfileUpdate should reject email');
+
+    const profileOk = CustomerProfileUpdateSchema.safeParse({
+      firstName: 'Maria',
+    });
+    profileOk.success ? ok('ProfileUpdate accepts firstName only')
+      : bad('ProfileUpdate firstName only');
+
+    const payOk = CreatePaymentSchema.safeParse({ amount: 14000 });
+    payOk.success ? ok('CreatePayment accepts 14000 cents')
+      : bad('CreatePayment 14000 cents');
+    const payTooLow = CreatePaymentSchema.safeParse({ amount: 50 });
+    !payTooLow.success ? ok('CreatePayment rejects <100 cents')
+      : bad('CreatePayment should reject <100 cents');
+
+    const sessOk = SessionStatusQuerySchema.safeParse({
+      session_id: 'cs_test_abc123',
+    });
+    sessOk.success ? ok('SessionStatus accepts cs_test_*')
+      : bad('SessionStatus cs_test_*');
+    const sessBad = SessionStatusQuerySchema.safeParse({
+      session_id: 'foo_bar',
+    });
+    !sessBad.success ? ok('SessionStatus rejects bogus IDs')
+      : bad('SessionStatus should reject bogus IDs');
+
+    const revOk = CreateReviewSchema.safeParse({
+      bookingId: 'bk_1',
+      stars: 5,
+      text: 'Top!',
+    });
+    revOk.success ? ok('CreateReview accepts valid input')
+      : bad('CreateReview valid', revOk.error);
+    const revBad = CreateReviewSchema.safeParse({
+      bookingId: 'bk_1',
+      stars: 6,
+    });
+    !revBad.success ? ok('CreateReview rejects stars=6')
+      : bad('CreateReview should reject stars=6');
+
+    const approveOk = ApproveReviewSchema.safeParse({ approved: true });
+    approveOk.success ? ok('ApproveReview accepts approved=true')
+      : bad('ApproveReview valid');
+  });
+
+  await group('Iteration 4 — Customer DB roundtrip', async () => {
+    const bcrypt = await import('bcryptjs');
+    const email = `__smoke_${Date.now()}@example.com`;
+    const hash = await bcrypt.default.hash('test-password-123', 10);
+    const u = await prisma.customerUser.create({
+      data: {
+        email,
+        passwordHash: hash,
+        firstName: 'Smoke',
+        lastName: 'Test',
+        emailVerified: true,
+      },
+    });
+    if (u.id && u.email === email && !u.passwordHash.startsWith('test-')) {
+      ok('CustomerUser created with bcrypt-hashed password');
+    } else {
+      bad('CustomerUser create roundtrip');
+    }
+
+    // Booking mit customerId
+    const future = new Date(Date.now() + 7 * 24 * 3600 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const booking = await prisma.booking.create({
+      data: {
+        date: future,
+        startTime: '09:00',
+        endTime: '10:00',
+        customerId: u.id,
+        customerName: 'Smoke',
+        customerPhone: '0157-1111111',
+        customerEmail: email,
+        service: 'reinigung',
+        description: '__SMOKE__customer-link',
+        status: 'COMPLETED',
+      },
+    });
+
+    // Review anlegen (UNIQUE auf bookingId)
+    const review = await prisma.review.create({
+      data: {
+        customerId: u.id,
+        bookingId: booking.id,
+        stars: 5,
+        text: '__SMOKE__ review',
+      },
+    });
+    if (review.id && !review.approved) ok('Review created (approved=false default)');
+    else bad('Review default approved should be false');
+
+    // Doppelte Review → P2002 (UNIQUE bookingId)
+    let doubleFailed = false;
+    try {
+      await prisma.review.create({
+        data: { customerId: u.id, bookingId: booking.id, stars: 4 },
+      });
+    } catch {
+      doubleFailed = true;
+    }
+    doubleFailed ? ok('Review UNIQUE bookingId enforced')
+      : bad('Review duplicate should fail');
+
+    // Payment anlegen
+    const pay = await prisma.payment.create({
+      data: { bookingId: booking.id, amount: 5000, status: 'PENDING' },
+    });
+    if (pay.amount === 5000 && pay.currency === 'eur') ok('Payment created with default eur');
+    else bad('Payment defaults');
+
+    // Cleanup
+    await prisma.payment.delete({ where: { id: pay.id } });
+    await prisma.review.delete({ where: { id: review.id } });
+    await prisma.booking.delete({ where: { id: booking.id } });
+    await prisma.customerUser.delete({ where: { id: u.id } });
+    ok('Cleanup IT4 customer/booking/review/payment');
+  });
+
+  await group('Iteration 4 — Stripe singleton (no key)', async () => {
+    const { getStripe, isStripeConfigured } = await import('../src/lib/stripe');
+    // Im Smoke-Test ist STRIPE_SECRET_KEY nicht gesetzt → null.
+    const before = process.env.STRIPE_SECRET_KEY;
+    delete process.env.STRIPE_SECRET_KEY;
+    const inst = getStripe();
+    if (inst === null) ok('getStripe() returns null without key');
+    else bad('getStripe() should be null without key');
+    if (!isStripeConfigured()) ok('isStripeConfigured() false without key');
+    else bad('isStripeConfigured() should be false');
+    if (before !== undefined) process.env.STRIPE_SECRET_KEY = before;
+  });
+
   await cleanup();
-  // Auch unsere Iteration-2-Marker säubern.
   await prisma.booking.deleteMany({ where: { description: { startsWith: '__SMOKE__' } } });
   await prisma.slot.deleteMany({ where: { description: { startsWith: '__SMOKE__' } } });
 

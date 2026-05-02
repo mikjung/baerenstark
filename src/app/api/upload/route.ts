@@ -107,10 +107,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
     if (!blobToken) {
       return apiError({
-        code: 'INTERNAL_ERROR',
+        code: 'BLOB_NOT_CONFIGURED',
         message:
           'Datei-Upload ist nicht konfiguriert (BLOB_READ_WRITE_TOKEN fehlt). Bitte den Administrator informieren.',
-        status: 502,
+        status: 503,
       });
     }
 

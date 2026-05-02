@@ -1,18 +1,12 @@
-// Bärenstark Hausservice — Live Prisma Schema (v1.3 — Iteration 3)
+// Bärenstark Hausservice — Live Prisma Schema (v1.4.1 — Iteration 4)
 // Synchron gehalten mit /contracts/schema.prisma.
 //
-// Iteration 3 Änderungen:
-//   - NEU: AvailabilityTemplate (US-17) — globale Wochentag-Standardzeiten.
-//   - NEU: DayOverride (US-17) — individuelle Tages-Überschreibung.
-//   - NEU: BookingAttachment (US-18) — Datei-Anhänge an Buchungen.
-//   - Booking erhält neue Felder date/startTime/endTime (US-17).
-//   - Booking.slotId wird optional (Rückwärtskompatibilität).
-//
-// Iteration 2 Änderungen (Bestand):
-//   - Booking.cancelToken (UNIQUE, default cuid)
-//   - Booking.counterProposalSlotId (FK → Slot.id, ON DELETE SET NULL)
-//   - Status erweitert um COUNTER_PROPOSED, CANCELLED.
-//   - WeeklyAvailability.
+// Iteration 4 Änderungen:
+//   - NEU: CustomerUser (US-25) — separate Kunden-Auth-Entität.
+//   - NEU: Payment (US-28) — Stripe-Zahlung 1:1 zu Booking.
+//   - NEU: Review (US-29) — Kundenbewertung mit Admin-Freigabe.
+//   - Booking.customerId? (FK → CustomerUser, ON DELETE SET NULL).
+//   - Booking.status erlaubt zusätzlich 'COMPLETED'.
 
 generator client {
   provider = "prisma-client-js"
@@ -31,6 +25,31 @@ model User {
   createdAt    DateTime @default(now())
 
   @@map("users")
+}
+
+/// Kunden-Account (Iteration 4 / US-25).
+/// Vollständig getrennt vom Admin-`User`-Modell.
+model CustomerUser {
+  id                      String    @id @default(cuid())
+  email                   String    @unique
+  passwordHash            String
+  firstName               String
+  lastName                String
+  phone                   String?
+  emailVerified           Boolean   @default(false)
+  verificationToken       String?   @unique
+  /// 24h-Ablauf (BUG-401-Fix v1.4.1) — wird bei Resend mit-aktualisiert.
+  verificationTokenExpiry DateTime?
+  resetToken              String?   @unique
+  resetTokenExpiry        DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  bookings  Booking[]
+  reviews   Review[]
+
+  @@index([email])
+  @@map("customer_users")
 }
 
 model Slot {
@@ -52,7 +71,7 @@ model Slot {
 
 /// SQLite kennt kein natives ENUM. Status wird als TEXT abgelegt; gültige Werte
 /// werden im API-Layer durch Zod (BookingStatusSchema) erzwungen.
-/// Werte: 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'COUNTER_PROPOSED' | 'CANCELLED'.
+/// Werte (IT4): 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'COUNTER_PROPOSED' | 'CANCELLED' | 'COMPLETED'.
 model Booking {
   id            String   @id @default(cuid())
 
@@ -61,12 +80,13 @@ model Booking {
   slot          Slot?    @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
 
   // Iteration 3 (US-17): Date/Time-basierte Buchung.
-  /// "YYYY-MM-DD" Berlin-TZ.
   date          String?
-  /// "HH:MM" Berlin-TZ.
   startTime     String?
-  /// "HH:MM" Berlin-TZ, > startTime.
   endTime       String?
+
+  // Iteration 4 (US-25/26): optionale Verknüpfung mit Kundenkonto.
+  customerId    String?
+  customer      CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   customerName  String
   customerPhone String
@@ -87,6 +107,10 @@ model Booking {
   // Iteration 3: Datei-Anhänge.
   attachments   BookingAttachment[]
 
+  // Iteration 4 Backrefs.
+  payment   Payment?
+  review    Review?
+
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -95,6 +119,7 @@ model Booking {
   @@index([counterProposalSlotId])
   @@index([date, status])
   @@index([status, date, startTime])
+  @@index([customerId, date])
   @@map("bookings")
 }
 
@@ -129,8 +154,6 @@ model DayOverride {
 }
 
 /// Datei-Anhang an einer Buchung (Iteration 3 / US-18).
-/// `bookingId` ist nullable, weil der Upload vor dem Booking-Insert passiert.
-/// Beim POST /api/bookings wird die ID nachgepflegt.
 model BookingAttachment {
   id          String   @id @default(cuid())
   bookingId   String?
@@ -156,4 +179,43 @@ model WeeklyAvailability {
 
   @@index([dayOfWeek])
   @@map("weekly_availability")
+}
+
+/// Stripe-Zahlung für eine Buchung (Iteration 4 / US-28).
+/// 1:1 zu Booking. Tom legt sie an via POST /api/admin/bookings/:id/payment.
+model Payment {
+  id              String    @id @default(cuid())
+  bookingId       String    @unique
+  booking         Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  stripeSessionId String?   @unique
+  amount          Int
+  currency        String    @default("eur")
+  description     String?
+  status          String    @default("PENDING")
+  paidAt          DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([status])
+  @@index([stripeSessionId])
+  @@map("payments")
+}
+
+/// Kundenbewertung (Iteration 4 / US-29).
+/// 1:1 zu Booking, optional zu CustomerUser.
+model Review {
+  id          String        @id @default(cuid())
+  customerId  String?
+  customer    CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  bookingId   String?       @unique
+  booking     Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  stars       Int
+  text        String?
+  approved    Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([approved, createdAt])
+  @@index([customerId])
+  @@map("reviews")
 }

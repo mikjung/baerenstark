@@ -1134,4 +1134,501 @@ Alle Fixes sind 1–3-Zeilen-Spec-Edits. Engineers können den Build starten, so
 
 Implementation kann beginnen.
 
+---
+
+## Iteration 4 Design Review
+
+**Modus:** Design QA (vor Code-Erstellung)
+**Datum:** 2026-05-02
+**Iteration:** 4 (US-25 Kunden-Auth & Portal, US-26 Auftragsübersicht, US-27 Stornierung, US-28 Stripe-Zahlung, US-29 Reviews mit Backend)
+**Reviewer:** Senior QA Engineer
+**Geprüfte Artefakte:**
+- `PROJECT.md` (US-25 bis US-29)
+- `ARCHITECTURE.md` §17 (Iteration 4 Detail-Spec)
+- `contracts/schema.prisma` v1.4
+- `contracts/api-routes.md` v1.4 §11–§20
+- `contracts/zod-schemas.ts` v1.4
+
+### Verdict (Kurzfassung)
+
+**Design muss überarbeitet werden.**
+
+Pass-Quote der Akzeptanzkriterien (Testbarkeit gegen Spec): 28/35 (80 %).
+Kritische Defekte: **2**, Wichtige: **5**, Minor: **6**.
+
+Die Iteration-4-Spec ist umfangreich, sicherheitsbewusst und behandelt die meisten Race-Conditions explizit (Stripe-Webhook-Idempotenz, UNIQUE auf `reviews.bookingId`, separate Cookie-Namen für Admin/Customer). Drei Subsysteme sind im Großen und Ganzen schlüssig spezifiziert — **aber zwei kritische Lücken müssen vor dem Build geschlossen werden**, weil sie im Live-Betrieb zu Datenverlust bzw. dauerhaft kaputten Konten führen:
+
+1. **BUG-401 (Critical):** Verifikations-Token-Ablauf ist fehlerhaft an `customer_users.createdAt` geknüpft. Resend-Verification erzeugt einen neuen Token, ohne dass das Ablaufkriterium aktualisiert wird → Konto wird nach 24 h **nicht mehr aktivierbar**.
+2. **BUG-402 (Critical):** E-Mail-Änderung im Profil ist intern widersprüchlich spezifiziert. „Konto bleibt unter alter E-Mail bedienbar bis zur Verifikation der neuen" lässt sich mit dem aktuellen Schema nicht umsetzen — es gibt keine Pending-E-Mail-Spalte.
+
+Alle anderen Findings sind durch kleine Spec-Edits oder Engineer-Disziplin lösbar; sie sollten in den Engineering-Notes als bekannte Build-Disziplin verankert werden.
+
+### 1. Test-Matrix (Akzeptanzkriterien gegen Spec)
+
+| Story | AC      | Test-Case (gegen Spec)                                                                              | Layer    | Status   | Anmerkung                                                                       |
+| ----- | ------- | --------------------------------------------------------------------------------------------------- | -------- | -------- | ------------------------------------------------------------------------------- |
+| US-25 | AC-1    | Registrierung (Email + Passwort ≥ 8) → Mail mit Verifikationslink                                    | BE       | Pass     | `CustomerRegisterSchema` + Mail-Template `customerVerificationMail`.            |
+| US-25 | AC-2    | Klick auf Verifikationslink (max 24 h) aktiviert Konto + Redirect auf `/konto`                       | BE       | **Fail** | **BUG-401**: Token-Ablauf an `createdAt` gekoppelt — bleibt nach Resend stehen. |
+| US-25 | AC-3    | Login mit verifizierten Daten → Redirect `/konto`                                                    | BE+FE    | Pass     | `POST /api/customer/login`, JWT-Cookie. Cookie-Name `customer-session`.         |
+| US-25 | AC-4    | Falsche Credentials → generische Meldung „E-Mail oder Passwort ungültig"                              | BE       | Pass     | Konstante bcrypt-Last gegen DUMMY-Hash + 401.                                   |
+| US-25 | AC-5    | Forgot-Password → Mail mit Reset-Link in 1 h gültig                                                   | BE       | Pass     | Token + Expiry persistiert (`resetTokenExpiry`), Enumeration-Schutz dokumentiert.|
+| US-25 | AC-6    | Reset-Link → neues Passwort → Redirect `/konto/login`                                                 | BE       | Pass     | `CustomerResetPasswordSchema` + bcrypt-Hash-Update.                             |
+| US-25 | AC-7    | Gastbuchung funktioniert weiterhin                                                                    | BE+FE    | Pass     | `customerId` ist nullable; CreateBookingSchema unverändert.                     |
+| US-25 | AC-8    | Eingeloggter Kunde bucht → wird automatisch dem Konto zugeordnet                                      | BE       | Pass     | §15 von `api-routes.md`: Backend liest `customer-session` und befüllt `customerId`.|
+| US-25 | AC-9    | Direktaufruf von `/konto/*` ohne Login → Redirect auf `/konto/login`                                  | FE       | Pass     | Middleware §17.1 incl. Public-Whitelist.                                        |
+| US-25 | AC-10   | Profil-Update (Name, Telefon, E-Mail) → speichert + Bestätigung                                       | BE+FE    | **Fail** | **BUG-402**: E-Mail-Wechsel ist intern widersprüchlich spezifiziert.            |
+| US-26 | AC-1    | `/konto` zeigt zwei Listen: Bevorstehend + Vergangen                                                  | BE+FE    | Pass     | `GET /api/customer/bookings` mit `upcoming/past`-Split.                         |
+| US-26 | AC-2    | Eintrag enthält Datum, Uhrzeit, Service, Status-Badge, Preis (wenn vorhanden)                         | BE+FE    | Pass     | `CustomerBookingSchema` + `payment.amount`.                                     |
+| US-26 | AC-3    | Status-Badges DE: Offen, Bestätigt, Abgelehnt, Storniert, Gegenvorschlag ausstehend                   | FE       | Pass     | DE-Mapping ist ein FE-Konstante; Status-Enum vollständig.                       |
+| US-26 | AC-4    | Detailseite zeigt alle Buchungsdetails inkl. Anhänge + Zahlungsstatus                                  | BE+FE    | Pass     | `GET /api/customer/bookings/:id` liefert vollen `CustomerBookingSchema`.        |
+| US-26 | AC-5    | Empty-State + CTA „Ersten Auftrag buchen"                                                              | FE       | Pass     | UI-State in §17.6 dokumentiert.                                                  |
+| US-27 | AC-1    | Confirm-Dialog vor Storno                                                                              | FE       | Pass     | UI-State `CancelDialog`.                                                         |
+| US-27 | AC-2    | Storno → Status sofort „Storniert", Button verschwindet, Mail an Tom                                   | BE+FE    | Pass     | `POST /api/customer/bookings/:id/cancel` + `cancellationToAdmin`-Template.       |
+| US-27 | AC-3    | CONFIRMED-Termin > 24 h → Storno erlaubt, Slot wird wieder frei                                       | BE       | Partial  | **MAJOR-401**: 24-h-Berechnung ist nicht eindeutig DST-fest dokumentiert.       |
+| US-27 | AC-4    | CONFIRMED-Termin < 24 h → Button disabled mit Hinweis + Telefonnummer                                  | BE+FE    | Pass     | `isCancellable`-Algorithmus + `cancellableUntilHours: null`-Trigger.            |
+| US-27 | AC-5    | Termin in Endstatus / Vergangenheit → kein Storno-Button                                              | BE+FE    | Pass     | `PORTAL_CANCELLABLE_STATUSES`-Whitelist + Datum-Check.                           |
+| US-28 | AC-1    | Tom hinterlegt Betrag → Mail an Kunden mit Link zur Zahlungsseite                                     | BE       | Pass     | `POST /api/admin/bookings/:id/payment` + `paymentRequestToCustomer`-Template.   |
+| US-28 | AC-2    | `/konto/zahlung/:id` zeigt Auftragsdetails + Betrag + Zahlungsoptionen                                 | FE       | Pass     | UI-State in §17.6 + Stripe-Checkout-Integration.                                 |
+| US-28 | AC-3    | „Mit PayPal bezahlen" startet Stripe-Flow                                                              | FE+BE    | Pass     | `payment_method_types: ['card', 'paypal']` in §13.                              |
+| US-28 | AC-4    | Apple Pay nur auf kompatiblem Gerät                                                                     | FE       | Pass     | Stripe Checkout rendert Wallet automatisch (Annahme dokumentiert).              |
+| US-28 | AC-5    | Google Pay analog                                                                                       | FE       | Pass     | Wie AC-4.                                                                        |
+| US-28 | AC-6    | Erfolgreiche Zahlung → Status „Bezahlt" im Admin + Mail an beide Parteien                              | BE       | Pass     | Webhook `checkout.session.completed` setzt PAID + sendet beide Mails.           |
+| US-28 | AC-7    | Zahlung fehlgeschlagen → DE-Fehlermeldung + Retry möglich                                              | BE+FE    | Partial  | **MAJOR-402**: Fehler-UX bei Stripe-Embedded-Errors zwischen Submit und Webhook unklar; Polling-Logik der Erfolgsseite ist nicht für Gäste definiert. |
+| US-28 | AC-8    | Bezahlt-Badge sichtbar; Zahlungs-Button verschwindet                                                   | FE       | Pass     | UI-State `AlreadyPaid`.                                                          |
+| US-29 | AC-1    | COMPLETED-Status → „Bewertung abgeben"-Button in Detailseite                                           | BE+FE    | Pass     | `canReview = (status === 'COMPLETED' && review === null)` aus Backend.          |
+| US-29 | AC-2    | Formular: 1–5 Sterne (Pflicht) + optional Text (max 500, Zähler)                                      | FE       | Pass     | `CreateReviewSchema` + UI-State `ReviewForm`.                                    |
+| US-29 | AC-3    | Ohne Sterne → Inline-Fehler                                                                              | FE       | Pass     | Zod min(1).                                                                      |
+| US-29 | AC-4    | Erfolgreiche Abgabe → Bestätigung + Button disabled                                                    | BE+FE    | Pass     | Response liefert die soeben angelegte Review zurück.                            |
+| US-29 | AC-5    | Bereits bewertete Buchung → Read-only-Anzeige                                                          | FE       | Pass     | UI-State `ReviewExisting`.                                                       |
+| US-29 | AC-6    | Admin-Moderationsliste mit Approve/Reject                                                              | BE+FE    | Pass     | `GET/PATCH /api/admin/reviews/:id`.                                              |
+| US-29 | AC-7    | Tom gibt Bewertung frei → erscheint auf der Startseite                                                 | BE+FE    | Pass     | `GET /api/reviews` filter `approved=true`.                                       |
+| US-29 | AC-8    | Bei mind. 4 echten Reviews ersetzen sie die Platzhalter aus IT3                                        | FE       | Partial  | **MINOR-401**: `<ReviewSection>` umgebaut — Migrationsweg von `lib/reviews.ts` zu Live-Daten ist nicht in §17.3 verankert. |
+
+### 2. Kritische Defekte (Blocker — vor Code beheben)
+
+#### BUG-401 (Critical, Design): Verifikations-Token-Ablauf ist nicht resend-fest
+
+**Story:** US-25 AC-1, AC-2
+**Layer:** Datenmodell / Backend
+**Quellen:** `schema.prisma` Z. 296 (`verificationToken String? @unique`), §17.1 Sicherheits-Praktiken („verificationToken: 24 h (geprüft via createdAt)"), `api-routes.md` Z. 1140–1158 (`POST /api/customer/resend-verification`).
+
+**Beschreibung:**
+Die Spec sagt explizit: „Verifikations-Token läuft nach 24 h ab (Backend-Check via `createdAt`, kein dedizierter Expiry-Timestamp — verworfener Token bleibt einfach in der Tabelle)." Gleichzeitig erlaubt `POST /api/customer/resend-verification`, den Token neu zu generieren („neuen `verificationToken` generieren, Mail neu senden") — **ohne** `createdAt` zu aktualisieren (Prisma würde `createdAt` ohnehin nicht überschreiben).
+
+**Konsequenz:**
+- Tag 0: Maria registriert sich um 10 Uhr. `createdAt = T0`. Mail kommt nicht an (Spam-Filter).
+- Tag 0 + 25 h: Maria klickt „Bestätigungs-E-Mail erneut senden". Backend setzt `verificationToken = newCuid()`, sendet Mail.
+- Maria klickt sofort den neuen Link.
+- Backend prüft: `now - createdAt > 24h` → 400 „Der Verifikationslink ist ungültig oder bereits verwendet". **Das Konto ist permanent unaktivierbar.**
+
+Maria kann sich nicht erneut registrieren (E-Mail bereits in `customer_users`, AC-1 → 409). Sie kann sich nicht einloggen (`emailVerified: false` → 422 EMAIL_NOT_VERIFIED). Sie kann sich nicht selbst löschen (kein DELETE-Endpoint im MVP). **Sackgasse.**
+
+**Erwartet:**
+US-25 AC-1 garantiert „Bestätigungs-E-Mail … Bitte bestätigen Sie Ihre E-Mail-Adresse" — das impliziert, dass eine erneut gesendete Mail **funktional** sein muss.
+
+**Vorschlag:**
+- **Empfohlen:** Eigene Spalte `verificationTokenExpiry DateTime?` analog zu `resetTokenExpiry`. Bei `POST /register` und `POST /resend-verification` setzen auf `now + 24h`. Verifikations-Endpunkt prüft gegen diese Spalte. Spec-Edit in `schema.prisma` (1 Feld) + §17.1 + `api-routes.md` Z. 1131 (Verify-Logik) + Z. 1154 (Resend-Logik).
+- **Alternative:** `verificationTokenIssuedAt DateTime?` neu, beim Insert/Resend gesetzt, Endpoint prüft `now - verificationTokenIssuedAt > 24h`. Gleicher Effekt, anderer Name.
+- **Ohne neue Spalte (NICHT empfohlen):** Bei `resend-verification` zusätzlich `createdAt = now` aktualisieren — verfälscht aber das Audit-Feld, mit dem Tom sehen würde, wann das Konto entstand.
+
+**Routing:** `solution-architect`
+
+---
+
+#### BUG-402 (Critical, Design): E-Mail-Änderung im Profil hat keinen Pending-Mechanismus — Spec ist intern widersprüchlich
+
+**Story:** US-25 AC-10
+**Layer:** Datenmodell / Backend
+**Quellen:** `api-routes.md` Z. 1102–1108 („`email`-Änderung: setzt `emailVerified: false`, generiert neuen `verificationToken`, sendet Verifikations-Mail an die NEUE Adresse. Bis zur Verifikation funktioniert das Konto **mit der alten E-Mail weiter** …"), `schema.prisma` (kein `pendingEmail`-Feld vorhanden), §17.1 (Spec-Annahme: „Konto bleibt unter alter E-Mail bedienbar, bis neue verifiziert ist").
+
+**Beschreibung:**
+`PATCH /api/customer/me` mit neuer E-Mail bekommt zwei zueinander widersprüchliche Anforderungen:
+
+1. **„Konto bleibt unter alter E-Mail bedienbar, bis neue verifiziert ist"** (Annahme §17.10, API-Spec Z. 1106).
+2. **„setzt `emailVerified: false`, generiert neuen `verificationToken`"** (API-Spec Z. 1103).
+
+Wenn Punkt 2 wörtlich umgesetzt wird (also die Spalte `email` direkt mit der neuen Adresse überschrieben wird), tritt **eines** der folgenden Probleme auf:
+
+- (a) Login mit alter E-Mail-Adresse schlägt fehl, weil die DB sie nicht mehr kennt (UNIQUE-Lookup mit alter E-Mail → 0 Treffer → 401).
+- (b) Login mit neuer E-Mail-Adresse schlägt mit `EMAIL_NOT_VERIFIED` fehl, weil `emailVerified=false` ist.
+- (c) Das Customer-JWT enthält die alte E-Mail im Payload (`{ customerId, email }`); ein Server-Side-Decode-Lookup über `me.id` würde noch funktionieren, aber das Cookie wird nach Logout (oder Cookie-Verlust) nutzlos, weil keiner der beiden E-Mail-Werte mehr funktioniert.
+
+→ **Das Konto ist effektiv für Login gesperrt, bis die neue E-Mail verifiziert ist.** Genau das, was die Annahme verhindern wollte.
+
+**Schritte zur Reproduktion (gedanklich gegen Spec):**
+1. Maria ist eingeloggt (`customer-session` enthält alte E-Mail).
+2. Maria ändert Profil-E-Mail auf neu@example.com → 200 OK, `email = 'neu@example.com'`, `emailVerified = false`.
+3. Maria loggt sich aus (oder Cookie läuft ab).
+4. Maria versucht Login mit alter E-Mail → 401 (nicht mehr in DB).
+5. Maria versucht Login mit neuer E-Mail → 422 EMAIL_NOT_VERIFIED.
+6. Maria klickt „Erneut senden" → bekommt Mail an neue Adresse, klickt Link → `emailVerified=true`, kann jetzt einloggen.
+
+→ Funktioniert technisch, **aber nur, wenn die Verifikations-Mail ankommt**. Der Spec-Wortlaut „mit alter E-Mail weiter bedienbar" trifft nicht zu.
+
+**Erwartet:**
+- Entweder die Annahme dahingehend korrigieren, dass das Konto ab Profil-Update **gesperrt bleibt**, bis Maria die neue E-Mail verifiziert (Engineers-Hinweis: Maria muss vor Logout verifizieren).
+- Oder ein `pendingEmail String?` + `pendingEmailToken String?` einführen, sodass `email` erst nach Verifikation umgesetzt wird. Bis dahin Login mit alter E-Mail weiter möglich.
+
+**Vorschlag:**
+- **Empfohlen (Alternative B):** Spec auf das einfachere Modell zurückziehen: „Bei E-Mail-Änderung wird das Konto gesperrt (`emailVerified = false`) bis die neue E-Mail verifiziert ist. Frontend zeigt nach dem Profil-Update den Hinweis ‚Bitte bestätigen Sie Ihre neue E-Mail-Adresse, bevor Sie sich erneut einloggen.‘"
+  - Schema-Edit: keiner.
+  - API-Spec-Edit: Z. 1106 streichen / umformulieren.
+  - Risiko-mindernd: Frontend hindert daran, sich abzumelden, solange Verifikation aussteht (nicht zwingend, aber UX-freundlich).
+- **Alternative A (sauberer, aber Mehraufwand):** `pendingEmail` + `pendingEmailToken` + `pendingEmailTokenExpiry`. Verify-Endpoint überschreibt `email = pendingEmail` und löscht alle drei Pending-Felder. Schema bekommt 3 neue Spalten + 1 Index.
+
+**Routing:** `solution-architect`
+
+### 3. Wichtige Defekte (Major — Fix vor Build empfohlen, vom Architekten klären)
+
+#### MAJOR-401 (Major, Design): 24-h-Stornofrist ist nicht DST-fest dokumentiert
+
+**Story:** US-27 AC-3
+**Layer:** Backend
+**Quelle:** `api-routes.md` Z. 1287–1296 (`isCancellable()`-Algorithmus), §17.7 Race-Conditions („Frontend-Check + Server-Check beide vorhanden; Server-Check ist Authority").
+
+**Beschreibung:**
+Der `isCancellable`-Algorithmus berechnet `parseBerlinDateTime(b.date, b.startTime).getTime() - Date.now() > 24*60*60*1000`. Beim DST-Wechsel (letzter Sonntag im März / Oktober) ist ein Berliner Tag 23 oder 25 Stunden lang. Wenn der Termin am Tag des DST-Wechsels liegt:
+
+- März-DST (Spring-forward): „Tom hat um 10 Uhr Berlin am Sonntag einen Termin. Maria will Samstag 10 Uhr stornieren." → Differenz physisch nur 23 h, Algorithmus sieht aber 24 h Berlin-Strings → erlaubt Storno, obwohl in Wirklichkeit < 24 h Echtzeit.
+- Oktober-DST (Fall-back): umgekehrt — Frist verstreicht 1 h früher als erwartet.
+
+Das Risiko ist klein (nur 2 Tage/Jahr betroffen), aber spürbar: ein Kunde könnte sich „nur knapp innerhalb der Frist" wähnen und bekommt 409. Oder umgekehrt: er kann „nicht mehr stornieren" laut Frontend, aber Server würde es erlauben.
+
+**Erwartet:**
+Die Spec sollte explizit dokumentieren, ob `parseBerlinDateTime` einen UTC-Zeitpunkt erzeugt (richtig) oder eine naïve Berlin-Wall-Clock (falsch).
+
+**Vorschlag:**
+- 1-Zeile-Spec-Edit in §17.6 oder §17.7: „`parseBerlinDateTime(date, time)` interpretiert die Berlin-Wall-Clock korrekt und liefert einen UTC-Zeitpunkt (z.B. via `Intl.DateTimeFormat` + `Date.UTC`). DST-Übergänge werden korrekt aufgelöst — ein Termin am 26.10.2025 02:30 Berlin existiert zweimal; im MVP wird die spätere Belegung gewählt." Engineers übernehmen das in `parseBerlinDateTime()`.
+- Engineering-Test: 2 explizite Test-Cases im Test-Plan §17.8 ergänzen (Spring-forward + Fall-back).
+
+**Routing:** `solution-architect`
+
+---
+
+#### MAJOR-402 (Major, Design): `/konto/zahlung/erfolg` Polling-Logik fehlt für Gäste
+
+**Story:** US-28 AC-6, AC-7
+**Layer:** Frontend / Backend
+**Quelle:** §17.6 UI-State `WaitingWebhook` („Page polled `/api/customer/bookings/:id`"), §13 `cancel_url` und `success_url`, `api-routes.md` Z. 1494 (`success_url: ${BASE_URL}/konto/zahlung/erfolg?session_id=...`).
+
+**Beschreibung:**
+Die Erfolgsseite `/konto/zahlung/erfolg` polled laut §17.6 `GET /api/customer/bookings/:id` — dieser Endpunkt erfordert Customer-Session. Aber die Stripe-Integration erlaubt auch **Gäste**: Tom kann einem nicht-registrierten Kunden via `cancelToken` eine Zahlungsseite schicken. Wenn dieser Gast nach erfolgreicher Stripe-Zahlung auf `/konto/zahlung/erfolg?session_id=...` landet, hat er kein `customer-session`-Cookie:
+
+- Polling auf `GET /api/customer/bookings/:id` → 401 → Page bricht ab oder hängt.
+- Auf `/konto/auftrag/:id` (Detail) klicken → Middleware-Redirect auf `/konto/login` → Login-Hürde, obwohl Gast-Konto gar nicht existiert.
+
+**Konsequenz:** Gäste sehen nach Zahlung keine saubere Erfolgsbestätigung. Spec ist hier lückenhaft.
+
+**Erwartet:**
+- Entweder: Erfolgsseite zeigt für Gäste eine reduzierte Bestätigung („Vielen Dank, Ihre Zahlung wurde verarbeitet. Tom wurde benachrichtigt.") **ohne Polling**.
+- Oder: ein öffentlicher Status-Endpoint `GET /api/payments/by-session?session_id=...` (kein Login nötig, Stripe-Session-ID ist tokenartig).
+- Oder: Polling per `cancelToken`-Auth — analog zu `POST /api/payments/create-session` Auth-Fallback.
+
+**Vorschlag:**
+- Spec ergänzen in §17.6 (UI-State `WaitingWebhook`): „Wenn kein Customer-Cookie vorhanden ist, zeigt die Erfolgsseite die statische Meldung ‚Vielen Dank, Ihre Zahlung wurde übermittelt. Eine Bestätigung erhalten Sie per Mail‘ — kein Polling. Mit Cookie polled die Page `/api/customer/bookings/:id`."
+- Engineering-Test in §17.8: „Stripe-Erfolg ohne Login → Erfolgsseite zeigt statische Meldung, keine 401-Fehler".
+
+**Routing:** `solution-architect`
+
+---
+
+#### MAJOR-403 (Major, Design): Schema-Inkonsistenz — `Review.customerName` wird in der Zod-Spec verlangt, aber im DB-Schema fehlt sie
+
+**Story:** US-29 AC-7, AC-8
+**Layer:** Datenmodell / Contract
+**Quellen:**
+- `zod-schemas.ts` Z. 989–1001 (`ReviewSchema.customerName: z.string()`).
+- `zod-schemas.ts` Z. 1010 (`PublicReviewSchema.customerName: z.string()`).
+- `schema.prisma` Z. 408–429 (`Review`-Modell — **kein** `customerName`-Feld).
+- `schema.prisma` Z. 380–388 (Doc-Block: „Engineers persistieren daher `customerName` (Snapshot) bei der Review-Erstellung. Diese Snapshot-Spalte ist aktuell **nicht** im Schema").
+
+**Beschreibung:**
+Die Zod-Schemas verlangen `customerName` in der API-Antwort (für Admin-Moderation und öffentliche Reviews). Das Prisma-Modell hat aber **kein** `customerName`-Feld auf `Review`. Spec sagt: live-Join mit `CustomerUser.firstName + lastName[0]`. Aber:
+
+- **Konto-Löschung-Pfad:** Wenn `CustomerUser` gelöscht wird → `Review.customerId` per `SET NULL` → kein Join möglich → öffentliche `GET /api/reviews` würde `customerName` als leeren String oder Fallback liefern. Der Doc-Block selbst sagt: „Engineers ergänzen Snapshot-Spalte, falls Konto-Löschung implementiert wird" — aber bis dahin ist die DB-Schema-Spec unvollständig: die `ReviewSchema` Pflicht-Spalte hat keinen DB-Backup.
+- **Test-Story-Pfad:** US-29 AC-7 sagt „Bewertung erscheint auf der Startseite". `<ReviewSection>` zeigt Reviews mit Name. Wenn der Kunde kein registriertes Konto hat (was im MVP nicht passiert, aber theoretisch durch `customer_id?` möglich ist), gibt es keinen Namen.
+
+Aktueller Zustand ist ein Spec-Widerspruch: Zod sagt „immer present", Prisma sagt „nicht persistiert". Engineers können das **erst** beim Build entscheiden — dabei drohen Inkonsistenzen zwischen Frontend (rendert `customerName` immer) und Backend (kann ihn nicht garantieren).
+
+**Erwartet:**
+Eindeutige Spec, ob (a) `Review.customerName` als Snapshot persistiert wird oder (b) im API-Layer durchgängig joined wird und Konto-Löschung im MVP ausgeschlossen ist.
+
+**Vorschlag:**
+- **Empfohlen:** `Review` bekommt `customerName String` (Snapshot bei Review-Erstellung, Format „Vorname Nachname"). Backend kürzt für `GET /api/reviews` auf „Vorname N.". Damit ist die Anzeige konto-unabhängig stabil. Schema-Edit + 1-Zeile in §17.5.
+- **Alternative:** Spec explizit auf „MVP hat keine Konto-Löschung" festlegen (steht schon in §17.7), und im `ReviewSchema` `customerName` aus dem Live-Join herleiten. Engineers-Hinweis: bei `customerId === null` muss ein Default („Anonym") greifen.
+
+**Routing:** `solution-architect`
+
+---
+
+#### MAJOR-404 (Major, Design): `isCancellable()` ist nicht null-fest gegen Bestandsbuchungen
+
+**Story:** US-27
+**Layer:** Backend
+**Quelle:** `api-routes.md` Z. 1287–1296 (`isCancellable`-Algorithmus referenziert `b.date`, `b.startTime`).
+
+**Beschreibung:**
+`isCancellable()` greift direkt auf `b.date` und `b.startTime` zu, ohne null-Check. In der Praxis (IT4) sollten Bestandsbuchungen (IT1/IT2 Slot-basiert, mit `slotId` und `date=null`) **nie** im Customer-Portal erscheinen, weil sie keinen `customerId` haben. Aber:
+
+- Die Filterung in `GET /api/customer/bookings` ist `where: { customerId: me.id }` — Bestandsbuchungen mit `customerId` (theoretisch falls Tom oder ein Engineer `customerId` manuell setzt) würden auftauchen.
+- Wenn die Frist-Logik `parseBerlinDateTime(null, null)` aufruft → NaN-Vergleich → `> 24*60*60*1000` ist `false` → Storno gesperrt → Customer hängt fest.
+
+Spec sollte robust sein: `if (!b.date || !b.startTime) return false` als Vorab-Check, oder die Customer-Portal-Query explizit auf `date IS NOT NULL` filtern.
+
+**Erwartet:**
+Algorithmus dokumentiert das Null-Verhalten oder fängt es ab.
+
+**Vorschlag:**
+- In §17.7 oder API-Spec Z. 1289 ergänzen: „`isCancellable` setzt `date` und `startTime` voraus. Für Bestandsbuchungen ohne Date/Time-Felder gibt die Funktion `false` zurück." Engineers fügen 1 Zeile im Code ein.
+
+**Routing:** `solution-architect`
+
+---
+
+#### MAJOR-405 (Major, Design): Open-Redirect-Schutz für `/konto/login?callbackUrl=...` fehlt
+
+**Story:** US-25 AC-9
+**Layer:** Frontend / Middleware
+**Quelle:** `api-routes.md` §11 (Customer-Auth — kein Hinweis auf callbackUrl-Validation), ARCHITECTURE.md §5 BUG-005 (Admin-Login-Schutz), §17.1 Middleware (`loginUrl.searchParams.set('callbackUrl', pathname)` — schreibt, aber liest nicht später validierend).
+
+**Beschreibung:**
+Die Customer-Middleware leitet Unauthentifizierte mit `?callbackUrl=<pathname>` auf `/konto/login`. Beim Login erfolgt im Frontend dann die Weiterleitung an `callbackUrl`. Spec dokumentiert **nicht**, dass nur relative Pfade akzeptiert werden — analog BUG-005 für Admin.
+
+**Konsequenz:** Phishing-Angriff via `https://baerenstark.de/konto/login?callbackUrl=https://evil.example/clone-login` möglich.
+
+**Erwartet:**
+Der Login-Erfolgs-Redirect validiert callbackUrl strikt (relativ oder selbe Origin). Sonst Default `/konto`.
+
+**Vorschlag:**
+- Spec-Edit in §17.1 nach dem Middleware-Pseudocode: „Frontend (`LoginForm.tsx`) validiert `callbackUrl` analog zu `auth.config.ts.callbacks.redirect` (nur relative Pfade ODER selbe Origin; sonst Fallback auf `/konto`)."
+- 1 Hilfs-Funktion `safeCustomerCallback(url)` in `lib/customer-auth.ts`.
+
+**Routing:** `solution-architect`
+
+### 4. Minor-Findings (nicht-blocking)
+
+- **MINOR-401 (FE/Design):** §17.3 erwähnt `<ReviewSection>` umgebaut, aber der Migrationsweg von `lib/reviews.ts` zur Live-API ist nicht detailliert. AC US-29 AC-8 verlangt aber einen klar geregelten Übergang (≥ 4 approved → echt; sonst Fallback). Empfehlung: 1-Zeile in §17.3 — „Engineers behalten `lib/reviews.ts` als Fallback bei `total < REVIEW_MIN_APPROVED_TO_REPLACE_STATIC`."
+- **MINOR-402 (Sicherheit):** Gemeinsame `AUTH_SECRET` für NextAuth-Admin und Customer-JWT. Da Cookie-Namen verschieden sind und Middleware sauber trennt, ist die praktische Angriffsfläche null — defense-in-depth wäre aber zwei separate Secrets (`CUSTOMER_AUTH_SECRET`). Spec empfiehlt das bereits als Option (§17.9). Empfehlung: Engineering-Hinweis, dass das in der Production-Konfig **vorgenommen** werden soll.
+- **MINOR-403 (Sicherheit):** Customer-JWT-Payload enthält `email` — bei Profil-E-Mail-Wechsel (BUG-402) wird das Cookie nicht rotiert; das Cookie bleibt 7 Tage gültig mit altem `email`-Claim. Konsequenz hängt mit BUG-402 zusammen — ohnehin bei Architekt-Klärung mit erledigt.
+- **MINOR-404 (Sicherheit):** `resetToken` wird bei jedem Forgot-Password-Aufruf überschrieben (`resetToken @unique`). Wenn ein Angreifer mit Mail-Zugriff einen Reset auslöst, bevor der echte Kunde es bemerkt, würde das den Reset-Link rotieren. Akzeptabel, aber Spec könnte das als bewusste Entscheidung dokumentieren (§17.1).
+- **MINOR-405 (Idempotenz):** Stripe-Webhook-Idempotenz nutzt Status-Check. Best-Practice wäre zusätzlich `Stripe-Event-ID` deduplizieren (z.B. `processed_stripe_events` Tabelle). Status-Check reicht im MVP, weil unsere Übergänge monoton sind, aber die Spec sollte das ausdrücklich vermerken (§17.4).
+- **MINOR-406 (Datenschutz):** §17.7 Datenschutz-Block dokumentiert „Reviews mit Konto-Löschung bleiben sichtbar". Aber DSGVO-Recht-zur-Löschung verlangt theoretisch Entfernung personenbezogener Daten. Wenn ein Kunde explizit Löschung anfordert, muss Tom in Prisma Studio die Review **selbst** löschen oder anonymisieren. Spec sollte das erwähnen (1-Zeilen-Note).
+
+### 5. Vertrags-Mismatches (FE/BE-Sicht)
+
+Keine Field-Name-Mismatches zwischen `zod-schemas.ts` und `api-routes.md` gefunden — die Zod-Schemas sind die Quelle der Wahrheit, und alle dokumentierten Endpoints verwenden die korrekten Schema-Imports. **Ausnahme:** `Review.customerName` (siehe MAJOR-403).
+
+Status-Codes / Fehlerformat:
+- `EMAIL_NOT_VERIFIED` (422) ist konsistent in `ApiErrorSchema`-Enum + API-Spec + UI-State.
+- `STRIPE_ERROR` (502) konsistent in `ApiErrorSchema`-Enum + `POST /api/payments/create-session`.
+- Customer-spezifische 401/404-Strategie („404 statt 403 bei Fremdzugriff") ist in §17.7 dokumentiert und in den Endpoints einheitlich.
+
+### 6. Anforderungs-Lücken
+
+- **GAP-401:** Spec erwähnt im AC US-28 AC-6 „Beide Parteien erhalten eine Zahlungsbestätigung per E-Mail". Mail-Templates `paymentReceivedToCustomer` + `paymentReceivedToAdmin` sind in §17.5 gelistet — Inhalte sind aber nicht weiter detailliert. Engineers sollen das analog zu IT2/IT3-Templates lösen — 1-Zeile-Note ausreichend.
+- **GAP-402:** US-28 AC-7 (Fehlerfall-DE-Meldung): Spec sagt nur „deutschsprachige Fehlermeldung". UI-State `Failed` in §17.6 sagt „Letzte Zahlung fehlgeschlagen — bitte erneut versuchen". Welche Stripe-Fehler werden mit DE-Texten gemappt (Karten-Abweisung, 3DS-Fail, etc.)? Im MVP wahrscheinlich akzeptabel mit generischer Message — Spec sollte das explizit als Annahme verankern.
+- **GAP-403:** US-29 AC-8 sagt „Platzhalter werden ersetzt". Aber: was passiert mit `<ReviewSection>` zwischen 1 und 3 echten approved Reviews (also mehr als 0, weniger als 4)? Spec REVIEW_MIN_APPROVED_TO_REPLACE_STATIC=4 bedeutet: bis 3 echte Reviews → 100% statisch. Das ist eine harte Schwelle, die Frontend nicht erklären muss. OK, aber sollte als bewusste Entscheidung dokumentiert sein.
+- **GAP-404:** Tom kann eine Buchung als COMPLETED markieren (PATCH-Bookings). Aber: gibt es einen Hinweis, **welcher** Kunde Tom dazu auffordert (z.B. Mail an Tom „Heute ist Marias Termin — bitte als COMPLETED markieren")? Spec §17.10 sagt: „manuelle Markierung via Admin-UI". Akzeptabel als MVP-Pragmatismus, aber Engineers sollten im Test-Plan §17.8 das auch testen (heute keine Erinnerung — Tom muss aktiv).
+
+### 7. Out-of-Scope-Findings
+
+Keine.
+
+### 8. Nicht-funktionale Findings
+
+- **Sicherheit:** bcrypt cost 10, Cookie-Flags, Stripe-Signatur-Check, Enumeration-Schutz, Ownership-Check (404 statt 403) — alles sauber spezifiziert. Open-Redirect-Schutz fehlt für Customer (MAJOR-405).
+- **Rate-Limits:** Auth-Endpoints, Reviews, Payments — alle dokumentiert (§20). Reasonably restrictive ohne übermäßig hart.
+- **Observability:** Webhook-Fehler werden geloggt; Mail-Status pro Booking persistiert (Bestand IT2). Spec für Stripe-Webhook-Logs nicht detailliert — Engineers sollen analog zu §17.4 strukturierte Logs (event.id, type, durations) hinzufügen.
+- **Performance:** Indexe sind in §17.2 erwähnt; `@@index([customerId, date])` auf `bookings` ist vorhanden. `@@index([approved, createdAt])` auf `reviews` für `GET /api/reviews`. PASS.
+- **Accessibility:** Stripe-Checkout ist eine externe Page — wir haben keinen Einfluss auf deren a11y. Eigene Customer-Pages sollten sich an die IT3-Tailwind/Radix-UI-Pattern halten (§9). Spec erwähnt das nicht explizit — Engineers sollen die a11y-Checkliste aus IT3 weiterführen.
+
+### 9. Empfehlungen für die nächste Iteration
+
+- **Build-Disziplin:** Engineers müssen vor dem ersten Commit die Architekt-Antworten zu BUG-401 und BUG-402 abwarten. Beide sind Schema-relevant, also kostet eine spätere Korrektur eine Migration.
+- **Reihenfolge im Build:**
+  1. **Schema-Migration** (US-25/26/28/29): nach BUG-401/BUG-402-Klärung. Erst dann `prisma migrate dev`.
+  2. **Customer-Auth** (US-25, isoliert): Helper-Funktionen, Endpoints, Pages, Middleware-Erweiterung.
+  3. **Customer-Portal Read-Only** (US-26): `GET /api/customer/bookings` + `/konto`-Page + `/konto/auftrag/:id`.
+  4. **Customer-Portal Write** (US-27): Storno-Endpoint + UI.
+  5. **Stripe-Integration** (US-28): erstmal `POST /api/admin/bookings/:id/payment` + `paymentRequestToCustomer`-Mail. Dann `create-session` + Webhook + Test-Flow mit Stripe CLI.
+  6. **Reviews** (US-29): zuletzt — keine Abhängigkeit auf Stripe, aber abhängig von COMPLETED-Status (PATCH-Erweiterung).
+- **Test-Plan ergänzen:** DST-Test (MAJOR-401), Resend-Verification-nach-25h-Test (BUG-401), Profil-E-Mail-Wechsel-Login-Pfad (BUG-402), Gast-Erfolgsseite (MAJOR-402).
+- **Sicherheits-Audit nach Stripe-Integration:** Webhook-Endpoint mit unsigniertem POST testen; ohne `STRIPE_WEBHOOK_SECRET`-Konfig testen (sollte konfig-Fehler werfen, nicht offen sein).
+
+### 10. Sign-off-Checkliste
+
+- [ ] **BUG-401 (Critical) — Verifikations-Token-Ablauf:** Architekt entscheidet zwischen `verificationTokenExpiry`-Spalte (empfohlen) oder Resend-aktualisiertes `createdAt`. Schema + §17.1 + API-Spec angepasst.
+- [ ] **BUG-402 (Critical) — E-Mail-Profil-Update:** Architekt entscheidet zwischen „Konto wird gesperrt bis Verifikation" (Spec-Edit) oder `pendingEmail`-Schema-Erweiterung. API-Spec Z. 1102–1108 angepasst.
+- [ ] **MAJOR-401 — DST-Verhalten** in §17.6/17.7 dokumentiert.
+- [ ] **MAJOR-402 — Erfolgsseiten-Logik für Gäste** in §17.6 dokumentiert.
+- [ ] **MAJOR-403 — `Review.customerName`-Quelle** entschieden + Schema-Edit (falls Snapshot-Variante) oder Annahme dokumentiert (falls Live-Join).
+- [ ] **MAJOR-404 — `isCancellable` Null-Verhalten** in API-Spec dokumentiert.
+- [ ] **MAJOR-405 — Customer-Login-Open-Redirect-Schutz** spezifiziert.
+- [ ] (Empfohlen, nicht-blocking) MINOR-401 bis MINOR-406 als Engineering-Notes erfassen.
+
+### Finales Urteil (Iteration 4)
+
+**Design muss überarbeitet werden.**
+
+Es gibt **zwei echte Blocker** (BUG-401, BUG-402), bei denen Schema- und API-Spec-Anpassungen vor dem Build erforderlich sind. Beide sind klein im Code-Aufwand (1–3 Spalten / 1 Pseudocode-Block), aber sie erfordern explizit eine Architekt-Entscheidung — Engineers können das nicht inline klären, weil es um Datenmodell-Form geht.
+
+Sobald diese zwei Defekte behoben sind, sind die fünf Major-Findings als Spec-Klarstellungen lösbar (1–5 Zeilen je Defekt). Das Subsystem-Design (Kunden-Auth getrennt vom Admin-Auth, Stripe-Checkout statt Elements, Admin-moderierte Reviews) ist überzeugend und sicherheitsbewusst.
+
+Sobald BUG-401 und BUG-402 entschieden sind, kann der Build starten — die Major-Findings können parallel zur Implementierung als kleine Spec-Edits eingespielt werden.
+
+**Empfohlene nächste Schritte:**
+1. Architekt entscheidet BUG-401 + BUG-402 (Spec-Edit, kein Code).
+2. Architekt klärt MAJOR-401 bis MAJOR-405 (Spec-Edit, kein Code).
+3. QA re-reviewt **nur die geänderten Abschnitte** (10 min).
+4. Bei „Design freigegeben" → Implementation-Start (Reihenfolge oben).
+
+### Zweite Review (v1.4.1)
+
+**Modus:** Design QA — Re-Review nach Architekt-Revision
+**Datum:** 2026-05-02
+**Reviewer:** Senior QA Engineer
+**Geprüfte Artefakte (v1.4.1):**
+- `contracts/schema.prisma` v1.4.1
+- `contracts/api-routes.md` v1.4.1
+- `contracts/zod-schemas.ts` v1.4.1
+- `ARCHITECTURE.md` §17 (insb. §17.1, §17.5, §17.6, §17.7, §17.8 + Änderungslog v1.4.1)
+
+#### Verdict (Kurzfassung)
+
+**Design freigegeben.**
+
+Alle 2 kritischen Defekte und alle 5 Major-Findings aus der ersten Review sind sauber, konsistent und über alle drei Contract-Artefakte hinweg synchron behoben. Es wurden **keine** neuen kritischen oder Major-Probleme durch die Fixes eingebracht. Die Schema-Änderung beschränkt sich auf eine einzige neue Spalte (`verificationTokenExpiry`) — der Build kann ohne weitere Architekt-Loops starten.
+
+#### Re-Check der kritischen Defekte
+
+**BUG-401 — Verifikations-Token-Ablauf (Status: ✅ Pass)**
+
+| Prüfpunkt                                                                                      | Quelle                                          | Status |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------ |
+| Neue Spalte `verificationTokenExpiry DateTime?` im Schema                                       | `schema.prisma` Z. 326–331                      | ✅     |
+| Spalte ist nullable und wird nach erfolgreicher Verifikation auf NULL gesetzt                   | `schema.prisma` Doc-Block + `api-routes.md` Z. 1194 | ✅     |
+| Registrierung setzt `verificationTokenExpiry = now + 24h`                                      | `api-routes.md` Z. 988                          | ✅     |
+| `POST /api/customer/resend-verification` setzt **beide** Felder in einer Transaktion            | `api-routes.md` Z. 1220–1227                    | ✅     |
+| Verify-Endpoint prüft `verificationTokenExpiry > now`, NICHT mehr `createdAt`                   | `api-routes.md` Z. 1188–1193                    | ✅     |
+| `createdAt` bleibt unverändert (Audit-Feld intakt)                                              | `api-routes.md` Z. 1225                         | ✅     |
+| Engineering-Hinweis im Architecture-Doc, dass `createdAt` nicht mehr für Ablauf benutzt werden darf | ARCHITECTURE.md §17.1 (Sicherheits-Praktiken)   | ✅     |
+| Pflicht-Test im Test-Plan §17.8 ergänzt (25h-Resend-Szenario)                                   | ARCHITECTURE.md §17.8 (Zeile „BUG-401 Resend")  | ✅     |
+| Mail-Template-Doc dokumentiert, dass `customerVerificationMail` aus beiden Triggern den Expiry mit-aktualisiert | ARCHITECTURE.md §17.5                           | ✅     |
+| Migration-Hinweis (kein Backfill nötig, alte unverifizierte Konten brauchen Resend)             | ARCHITECTURE.md Änderungslog v1.4.1, Z. 29       | ✅     |
+
+Maria-Szenario re-walked: Registrieren → 25h warten → Resend → Token-Klick → `verificationTokenExpiry = now + 24h` ist jetzt frisch → Verify ist erfolgreich. **Sackgasse beseitigt.**
+
+---
+
+**BUG-402 — E-Mail-Änderung im Profil (Status: ✅ Pass)**
+
+| Prüfpunkt                                                                                       | Quelle                                          | Status |
+| ----------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------ |
+| `CustomerProfileUpdateSchema` enthält **kein** `email`-Feld                                      | `zod-schemas.ts` Z. 818–824                     | ✅     |
+| Schema ist `.strict()` — unbekannte Felder werfen 400 `VALIDATION_ERROR`                         | `zod-schemas.ts` Z. 824                         | ✅     |
+| API-Spec dokumentiert die Strict-Validation explizit (mit `email` als Beispiel)                  | `api-routes.md` Z. 1133–1156                    | ✅     |
+| Frontend-Hinweis (Profil-Form: E-Mail read-only mit Erklär-Text)                                 | `api-routes.md` Z. 1157–1159                    | ✅     |
+| Architecture-Begründung dokumentiert, warum Pending-Mechanismus erforderlich wäre                | ARCHITECTURE.md §17.1 (Profil-E-Mail-Änderung)  | ✅     |
+| `customerEmailChangedMail`-Template aus §17.5 entfernt + Backlog-Hinweis hinterlegt              | ARCHITECTURE.md §17.5 Z. 2414–2417              | ✅     |
+| Backlog-Eintrag „Pending-State-Mechanismus für E-Mail-Änderung" in §17.10 verankert              | ARCHITECTURE.md §17.10 Z. 2755–2759             | ✅     |
+| Schema-Doc-Block referenziert die Backlog-Story                                                  | `schema.prisma` Z. 297–305                      | ✅     |
+| Pflicht-Test im Test-Plan §17.8 ergänzt (PATCH mit `email` → 400, mit `firstName` → 200)         | ARCHITECTURE.md §17.8 (Zeile „BUG-402 Profile") | ✅     |
+| Notbehelf für Tom (manuelle Korrektur via Prisma Studio) im Doc verankert                        | `schema.prisma` Z. 305 + ARCHITECTURE.md §17.1  | ✅     |
+
+Der frühere intern widersprüchliche Spec-Wortlaut „Konto bleibt unter alter E-Mail bedienbar" ist **vollständig** entfernt. Der Trade-off (Komfort vs. Schema-Mehraufwand) ist transparent zugunsten der einfachen, sicheren Variante entschieden.
+
+#### Re-Check der Major-Findings
+
+**MAJOR-401 — DST-Festigkeit der 24-h-Stornofrist (Status: ✅ Pass)**
+
+- ARCHITECTURE.md §17.7 hat einen eigenen Block „Storno-Frist-Algorithmus — Berlin-Zeitzone & DST" (Z. 2593–2642).
+- `parseBerlinDateTime()` ist explizit über `fromZonedTime` aus `date-fns-tz` definiert; DST-Verhalten ist sowohl für Spring-forward als auch Fall-back textuell **und** als Pseudocode dokumentiert.
+- Die intuitive Tom-Lesart („physische 24 h echte Vorlaufzeit") ist als bewusste Designentscheidung markiert; die alternative Interpretation („Kalender-24h") wird ausdrücklich verworfen.
+- Zwei explizite Pflicht-Tests in §17.8 (29.03.2026 / 26.10.2026).
+- API-Spec Z. 1359–1414 zeigt die `isCancellable`-Implementierung mit den richtigen Helper-Aufrufen — konsistent zu §17.7.
+
+**MAJOR-402 — Erfolgsseite für Gäste (Status: ✅ Pass)**
+
+- Neuer öffentlicher Endpoint `GET /api/payments/session-status?session_id=...` (`api-routes.md` Z. 1637–1694).
+- Sicherheits-Begründung: Stripe-Session-IDs sind hochentropisch / token-artig; Endpoint liefert ausschließlich `{ sessionId, status, paidAt, bookingId }` — kein PII (`api-routes.md` + ARCHITECTURE.md §17.7 „Stripe-Session-Status-Endpoint").
+- Schema neu in `zod-schemas.ts`: `SessionStatusQuerySchema` mit Pattern-Validation `^cs_(test|live)_[A-Za-z0-9]+$` (Z. 996–1001), `SessionStatusSchema` (Z. 1016–1023).
+- Frontend-Polling konstanten zentral festgelegt (`PAYMENT_SESSION_POLL_MAX_ATTEMPTS = 5`, `PAYMENT_SESSION_POLL_INTERVAL_MS = 1000`, Z. 1030–1031), Rate-Limit synchron auf 60 / 5 min / IP (api-routes.md §20).
+- UI-States in §17.6 dokumentieren WaitingWebhook, Success, Failed, StillProcessing **und** NotFound (Race-Case), inkl. Gäste-Erkennung über `/api/customer/me`-Probe.
+- Pflicht-Test in §17.8 (Stripe-Checkout ohne Login → keine 401-Fehler).
+- **Race-Robustheit verifiziert:** Im Endpoint-Verhalten wird `stripeSessionId` in `POST /api/payments/create-session` Schritt 5 **vor** dem Return der URL gesetzt — d.h. wenn der Browser auf `/erfolg` landet, ist der DB-Eintrag schon vorhanden. Der `NotFound`-Fallback im UI ist trotzdem für den seltenen Race korrekt vorgesehen.
+
+**MAJOR-403 — `Review.customerName` Schema-Inkonsistenz (Status: ✅ Pass)**
+
+- Klare Architekten-Entscheidung: **kein DB-Feld**, Live-Join im Response-Mapper.
+- Code-Skizze in ARCHITECTURE.md §17.7 „Review-Anzeigename" (Z. 2682–2714) zeigt vollständige Mapper-Funktion mit Fallback `'Anonym'`.
+- API-Spec dokumentiert die Berechnung in `GET /api/reviews` (Z. 1808–1812) und `GET /api/admin/reviews` (Z. 1862–1865), inklusive der Unterschiedlichkeit (öffentlich gekürzt vs. Admin volltändig).
+- Schema-Doc-Block in `schema.prisma` Z. 420–434 hat den expliziten Hinweis, dass `customerName` **nicht** persistiert wird, sowie die Zukunfts-Bedingung für Snapshot-Spalte (falls Self-Service-Account-Delete kommt).
+- Zod-Schemas (`ReviewSchema.customerName`, `PublicReviewSchema.customerName`) bleiben Pflicht-Strings — der Mapper garantiert immer einen Wert (entweder „Vorname N.", „Vorname Nachname" oder „Anonym"). **Kein Schema-Null-Risiko mehr.**
+- DSGVO-Hinweis in §17.7 Datenschutz-Abschnitt (Z. 2567–2582) dokumentiert manuelles Löschen via Prisma Studio + automatischen `'Anonym'`-Fallback.
+- Pflicht-Test in §17.8 (Review mit `customerId = NULL` → kein 500, sondern `'Anonym'`).
+
+**MAJOR-404 — `isCancellable()` Null-Robustheit (Status: ✅ Pass)**
+
+- Explizite Helper-Funktion `bookingStartUTC()` in API-Spec (Z. 1371–1375) UND ARCHITECTURE.md §17.7 (Z. 2650–2654) — **identisch**, kein Drift.
+- Drei Eingangsfälle dokumentiert: `date+startTime` (IT3+, DST-fest), `slot.startsAt` (IT1/IT2-Bestand, UTC), und **null** (defensiv `true` zurückgeben, Server bleibt Authority via 24h-Frist im POST-Cancel).
+- Pflicht-Test in §17.8 (Slot-Bestand-Buchung mit `date = null`, `slot.startsAt 26h` in der Zukunft → cancellable).
+- **Hinweis (akzeptabel, nicht-blocking):** Die Wahl, bei unbekanntem Termin defensiv `true` zurückzugeben (statt `false`), ist eine klare Architekten-Entscheidung mit Begründung („Kunde nicht in Sackgasse, Server prüft nochmal"). Ein Restrisiko (Cancel-Endpoint mit ebenfalls `bookingStartUTC === null`) muss Engineers im Cancel-Endpoint sauber behandeln; das war bereits in der ersten Review als „Engineer-Disziplin" markiert. Die API-Spec für `POST /api/customer/bookings/:id/cancel` Z. 1455–1462 ruft `isCancellable()` auf und antwortet 409 — sollte ein null-Termin durchschlüpfen, wird er hier **fälschlich erlaubt**. **Nicht blockierend**, aber engineering-Hinweis: Cancel-Endpoint sollte `bookingStartUTC === null` analog zur Frontend-Authority-Regel als 409 zurückweisen ODER Status-Update durchwinken (defensiver Default → 200). Die Spec lässt beide Lesarten zu — Engineer kann das in der Pull-Request-Review zur Sprache bringen.
+
+**MAJOR-405 — Open-Redirect-Schutz für Customer-Login (Status: ✅ Pass)**
+
+- Helper `safeCustomerCallback()` mit vollständigem Pseudocode in ARCHITECTURE.md §17.1 (Z. 2182–2203). Validierung deckt Schema, protokoll-relativ (`//evil.example`), Whitespace, Backslash, Backtick und Längen-Sanity ab.
+- API-Spec dokumentiert die Validation an drei Wirkungsstellen: Login-Body, Login-Response, Middleware-Redirect (Z. 2205–2211).
+- `CustomerLoginSchema` akzeptiert optional `redirectUrl` (`zod-schemas.ts` Z. 776).
+- Neuer `CustomerLoginResponseSchema` enthält geprüften `redirectUrl`-Wert (Z. 848–850) — Frontend nutzt diesen ohne weitere Prüfung.
+- Pflicht-Tests in §17.8: Externe URL → Fallback `/konto`, protokoll-relativ → Fallback, gültiger Pfad → durchgereicht. Plus separater Unit-Test für `safeCustomerCallback` mit 6 Eingaben.
+- Architecture §17.7 referenziert konsistent das Pattern aus BUG-005 (Admin-Login).
+
+#### Querprüfung — neue Risiken durch die Fixes?
+
+| Bereich                                                                                       | Befund                                                                                            |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Schema-Migration (`verificationTokenExpiry`)                                                   | Eine neue nullable Spalte — keine Datenverlustgefahr; kein Backfill (alte Konten brauchen Resend). |
+| `CustomerLoginResponseSchema` extends `CustomerUserPublicSchema`                               | Konsistenz geprüft: Login-Response und Me-Response teilen die Felder; keine Drift.                |
+| `SessionStatusSchema` ist öffentlich, enthält `bookingId` (nicht-nullable)                     | `Payment.bookingId` ist `@unique` und CASCADE — kein Null-Risiko. Gäste ignorieren das Feld.      |
+| `PaymentSchema` Reihenfolge der Felder im Response                                             | Konsistent zwischen `BookingAdminSchema.payment` (api-routes-Beispiele) und Stand-Alone-Response. |
+| `Review`-Mapper für Admin vs. öffentlich                                                       | Klarer Split (gekürzt vs. volltändig) — keine Vermischung. Cache-Header korrekt verschieden.       |
+| Mail-Templates                                                                                 | `customerEmailChangedMail` ist sauber entfernt, kein Trigger-Pfad mehr. Andere Templates unverändert. |
+| Test-Plan §17.8                                                                                | 8 neue Tests für die Fixes — gute Abdeckung; Engineers haben klare Akzeptanzkriterien.             |
+| API-Versionierung                                                                              | Versionsbump auf v1.4.1 in allen drei Contract-Files identisch.                                    |
+
+**Keine** neuen Inkonsistenzen, Contract-Drifts oder Sicherheitslücken festgestellt.
+
+#### Restliche Minor-Findings
+
+- **MINOR-401 (FE/Design)** — Migrationsweg `lib/reviews.ts` → Live-API: API-Spec Z. 1797–1798 referenziert jetzt `REVIEW_MIN_APPROVED_TO_REPLACE_STATIC = 4` als Schwelle, FE-Komponenten-Tabelle in §17.3 markiert `<ReviewSection>` als „UMGEBAUT" mit Fallback. **Hinreichend für Build.**
+- **MINOR-402 bis MINOR-406** — Engineering-Hinweise (separate Customer-Secret, Cookie-Rotation bei E-Mail-Wechsel ist mit BUG-402-Fix obsolet, `resetToken`-Rotation, Stripe-Event-ID-Idempotenz, DSGVO-Manual-Delete) — alle als Backlog/Engineering-Notes belassen, **kein Build-Blocker**.
+
+Eine kleine ergänzende Beobachtung (nicht-blocking, Engineering-Note für die Implementierung): Im POST-Cancel-Endpoint sollte der Server beim Aufruf von `isCancellable()` bei `bookingStartUTC === null` defensiv entscheiden — die Spec lässt beide Lesarten offen. Empfehlung in Engineer-PR-Review: bei null-Start → 409 mit Hinweis „Termin nicht eindeutig — bitte telefonisch melden", konsistent zur sonstigen Authority-Logik.
+
+#### Sign-off-Checkliste (Re-Check)
+
+- [x] **BUG-401** — Schema, Register-, Resend-, Verify-Endpunkt + ARCHITECTURE + Test ✓
+- [x] **BUG-402** — Strict-Schema, API-Spec, ARCHITECTURE, Mail-Template-Removal, Backlog-Eintrag, Test ✓
+- [x] **MAJOR-401** — DST-Algorithmus + Pflicht-Tests ✓
+- [x] **MAJOR-402** — Öffentlicher Status-Endpoint + Polling-Spec + Rate-Limit + UI-States + Test ✓
+- [x] **MAJOR-403** — Live-Join-Mapper + Fallback + DSGVO-Note + Test ✓
+- [x] **MAJOR-404** — Helper `bookingStartUTC` + 3-Fall-Behandlung + Test ✓
+- [x] **MAJOR-405** — `safeCustomerCallback`-Helper + 3 Wirkungsstellen + Schema-Erweiterung + Test ✓
+- [x] Keine neuen Critical/Major-Probleme durch die Fixes eingebracht ✓
+- [x] Schema-Migration ist trivial (1 nullable Spalte, kein Backfill) ✓
+- [x] Versions-Synchronität v1.4.1 in `schema.prisma`, `api-routes.md`, `zod-schemas.ts`, `ARCHITECTURE.md` ✓
+
+#### Finales Urteil (Iteration 4, Zweite Review v1.4.1)
+
+**Design freigegeben.**
+
+Alle Blocker sind sauber und konsistent über die drei Contract-Artefakte und das Architecture-Doc hinweg behoben. Engineers können mit der Iteration-4-Implementierung in der vorgeschlagenen Reihenfolge (Schema-Migration → Customer-Auth → Read-Portal → Cancel → Stripe → Reviews) starten. QA empfiehlt:
+
+1. **Build-Start freigegeben** — keine weitere Architekt-Loop nötig.
+2. **Engineering-Notes** für Build mitgeben:
+   - Cancel-Endpoint: bei `bookingStartUTC === null` defensive 409-Antwort wählen (nicht-blocking, Best-Practice).
+   - Customer-JWT: Cookie wird beim E-Mail-Update nicht rotiert — mit BUG-402-Fix obsolet, weil keine E-Mail-Änderung mehr stattfindet.
+   - `safeCustomerCallback`: Pflicht-Unit-Test wie in §17.8 spezifiziert.
+3. **Build-QA** wird die Implementierung gegen genau die in §17.8 gelisteten Pflicht-Tests prüfen.
+
 

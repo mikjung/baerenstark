@@ -20,6 +20,7 @@ import {
 import type { BookingAdmin, BookingStatus } from '@/lib/schemas';
 import { getServiceLabel } from '@/lib/services';
 import { CounterProposalDialog } from './CounterProposalDialog';
+import { PaymentEditor } from './PaymentEditor';
 
 type StatusFilter = 'ALL' | BookingStatus;
 
@@ -28,6 +29,7 @@ const FILTERS: ReadonlyArray<{ value: StatusFilter; label: string }> = [
   { value: 'PENDING', label: 'Offen' },
   { value: 'COUNTER_PROPOSED', label: 'Vorschlag offen' },
   { value: 'CONFIRMED', label: 'Bestätigt' },
+  { value: 'COMPLETED', label: 'Abgeschlossen' },
   { value: 'REJECTED', label: 'Abgelehnt' },
   { value: 'CANCELLED', label: 'Storniert' },
 ];
@@ -38,6 +40,7 @@ const STATUS_LABEL: Record<BookingStatus, string> = {
   REJECTED: 'Abgelehnt',
   COUNTER_PROPOSED: 'Vorschlag ausstehend',
   CANCELLED: 'Storniert',
+  COMPLETED: 'Abgeschlossen',
 };
 
 type BadgeTone = 'neutral' | 'success' | 'danger' | 'warning' | 'info';
@@ -48,11 +51,12 @@ const STATUS_TONE: Record<BookingStatus, BadgeTone> = {
   REJECTED: 'danger',
   COUNTER_PROPOSED: 'warning',
   CANCELLED: 'neutral',
+  COMPLETED: 'info',
 };
 
 interface PendingAction {
   bookingId: string;
-  next: 'CONFIRMED' | 'REJECTED';
+  next: 'CONFIRMED' | 'REJECTED' | 'COMPLETED';
   customerName: string;
 }
 
@@ -118,7 +122,9 @@ export function BookingTable() {
         message:
           pendingAction.next === 'CONFIRMED'
             ? 'Anfrage wurde bestätigt.'
-            : 'Anfrage wurde abgelehnt.',
+            : pendingAction.next === 'COMPLETED'
+              ? 'Auftrag als abgeschlossen markiert.'
+              : 'Anfrage wurde abgelehnt.',
       });
       void load();
     } catch (err) {
@@ -389,6 +395,16 @@ export function BookingTable() {
                     </p>
                   )}
 
+                  {/* US-28: Zahlbetrag hinterlegen — nur für CONFIRMED/COMPLETED */}
+                  {(b.status === 'CONFIRMED' || b.status === 'COMPLETED') && (
+                    <div className="mt-3">
+                      <PaymentEditor
+                        bookingId={b.id}
+                        initialPayment={b.payment ?? null}
+                      />
+                    </div>
+                  )}
+
                   <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
                     {mailFailed && !isCancelled && (
                       <Button
@@ -419,36 +435,55 @@ export function BookingTable() {
                         Gegenvorschlag senden
                       </Button>
                     )}
-                    {!isCancelled && b.status !== 'CONFIRMED' && (
+                    {!isCancelled &&
+                      b.status !== 'CONFIRMED' &&
+                      b.status !== 'COMPLETED' && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          onClick={() =>
+                            setPendingAction({
+                              bookingId: b.id,
+                              next: 'CONFIRMED',
+                              customerName: b.customerName,
+                            })
+                          }
+                        >
+                          Bestätigen
+                        </Button>
+                      )}
+                    {b.status === 'CONFIRMED' && (
                       <Button
-                        variant="primary"
+                        variant="secondary"
                         size="sm"
                         onClick={() =>
                           setPendingAction({
                             bookingId: b.id,
-                            next: 'CONFIRMED',
+                            next: 'COMPLETED',
                             customerName: b.customerName,
                           })
                         }
                       >
-                        Bestätigen
+                        Als abgeschlossen markieren
                       </Button>
                     )}
-                    {!isCancelled && !isRejected && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          setPendingAction({
-                            bookingId: b.id,
-                            next: 'REJECTED',
-                            customerName: b.customerName,
-                          })
-                        }
-                      >
-                        Ablehnen
-                      </Button>
-                    )}
+                    {!isCancelled &&
+                      !isRejected &&
+                      b.status !== 'COMPLETED' && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setPendingAction({
+                              bookingId: b.id,
+                              next: 'REJECTED',
+                              customerName: b.customerName,
+                            })
+                          }
+                        >
+                          Ablehnen
+                        </Button>
+                      )}
                   </div>
                 </article>
               </li>
@@ -462,17 +497,27 @@ export function BookingTable() {
         title={
           pendingAction?.next === 'CONFIRMED'
             ? 'Anfrage bestätigen?'
-            : 'Anfrage ablehnen?'
+            : pendingAction?.next === 'COMPLETED'
+              ? 'Auftrag abschließen?'
+              : 'Anfrage ablehnen?'
         }
         description={
           pendingAction
             ? `Anfrage von ${pendingAction.customerName} ${
-                pendingAction.next === 'CONFIRMED' ? 'bestätigen' : 'ablehnen'
+                pendingAction.next === 'CONFIRMED'
+                  ? 'bestätigen'
+                  : pendingAction.next === 'COMPLETED'
+                    ? 'als abgeschlossen markieren'
+                    : 'ablehnen'
               }?`
             : ''
         }
         confirmLabel={
-          pendingAction?.next === 'CONFIRMED' ? 'Bestätigen' : 'Ablehnen'
+          pendingAction?.next === 'CONFIRMED'
+            ? 'Bestätigen'
+            : pendingAction?.next === 'COMPLETED'
+              ? 'Abschließen'
+              : 'Ablehnen'
         }
         variant={pendingAction?.next === 'REJECTED' ? 'danger' : 'primary'}
         isLoading={actionInProgress}
