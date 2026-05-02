@@ -158,6 +158,15 @@ function LoginPageInner() {
             <Button type="submit" isLoading={submitting} className="w-full">
               Anmelden
             </Button>
+
+            <p className="text-center text-sm text-baerenstark-bark/60">
+              <Link
+                href="/admin/passwort-vergessen"
+                className="text-baerenstark-wood underline-offset-2 hover:underline"
+              >
+                Passwort vergessen?
+              </Link>
+            </p>
           </form>
         )}
       </div>
