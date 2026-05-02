@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Bärenstark — globale Styles */
+
+:root {
+  --baerenstark-bark: #3d2b1f;
+  --baerenstark-wood: #7b5e3c;
+  --baerenstark-cream: #f5ebdd;
+  --baerenstark-sand: #d9c2a2;
+  --baerenstark-accent: #c8a064;
+  --baerenstark-forest: #4a5d3a;
+}
+
+html,
+body {
+  background-color: var(--baerenstark-cream);
+  color: var(--baerenstark-bark);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  @apply font-sans;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  @apply font-serif;
+  color: var(--baerenstark-bark);
+}
+
+/* Sichtbarer Fokus-Ring (WCAG) */
+*:focus-visible {
+  outline: 3px solid var(--baerenstark-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Skeleton-Animation */
+@keyframes shimmer {
+  0% {
+    background-position: -200px 0;
+  }
+  100% {
+    background-position: calc(200px + 100%) 0;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(217, 194, 162, 0.4) 0px,
+    rgba(217, 194, 162, 0.7) 40px,
+    rgba(217, 194, 162, 0.4) 80px
+  );
+  background-size: 200px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 0.5rem;
+}
+
+/* Spinner */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}

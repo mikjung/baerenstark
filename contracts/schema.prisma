@@ -1,0 +1,205 @@
+// Bärenstark Hausservice — Prisma Schema (MVP, v1.2 — Iteration 2)
+// Single source of truth für das Datenmodell.
+// Live-Schema unter prisma/schema.prisma muss mit dieser Datei synchron bleiben.
+//
+// Änderungen v1.2 (Iteration 2 — US-13 bis US-16, BUG US-04):
+//   - Booking.cancelToken (String, unique, @default(cuid())) — für Kunden-Aktionslinks
+//     in E-Mails (US-13/US-14). Token wird beim Anlegen einmalig gesetzt und ist
+//     für den Lebenszeitraum der Buchung gültig.
+//   - Booking.counterProposalSlotId (String?) — Referenz auf den vom Admin
+//     vorgeschlagenen Alternativ-Slot (US-13). NULL, wenn kein Vorschlag aktiv.
+//   - BookingStatus erweitert um COUNTER_PROPOSED und CANCELLED.
+//   - Neue Relation Booking.counterProposalSlot ↔ Slot via opposite-side
+//     `proposedForBookings` — damit Admin-View "Slots, die als Vorschlag dienen"
+//     anzeigen kann.
+//   - Neues Modell WeeklyAvailability (US-15) — Wochentag-basierte Verfügbarkeit.
+//   - Booking.customerEmail bleibt String? (nullable) im Schema, aber das
+//     CreateBookingSchema im Application-Layer macht es zum Pflichtfeld
+//     (siehe contracts/zod-schemas.ts).
+//
+// Änderungen v1.1 (gegenüber v1.0):
+//   - BUG-001/006: Aktive Buchung pro Slot via Partial Unique Index garantiert
+//     (Raw-SQL-Migration, siehe unten). isBooked-Logik schließt PENDING ein.
+//   - BUG-002: mailSent / mailError im Booking-Modell für Mail-Reliability.
+//   - BUG-003: Soft-Delete für Slot via deletedAt; FK auf Booking bleibt CASCADE
+//     entfällt — das Aufräumen offener PENDINGs übernimmt der Handler.
+//   - BUG-015: Composite-Index [startsAt, endsAt] für Range-Queries.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // SQLite via Turso (libSQL-Adapter) in Produktion.
+  // Lokal: Datei-basiert via "file:./dev.db" in .env.local.
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Admin-Benutzer. Im MVP genau ein Datensatz (Tom).
+/// Wird via Setup-Wizard /admin/setup angelegt (greift nur, wenn keine User
+/// in der DB sind). Tom setzt sein Passwort selbst — kein Insider-Risiko.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+
+  @@map("users")
+}
+
+/// Vom Admin angelegtes Zeitfenster, in dem Bärenstark verfügbar ist.
+///
+/// Belegt-Status (`isBooked`) ist abgeleitet:
+///   isBooked = true  ⇔  es existiert eine Booking mit Status PENDING ODER CONFIRMED ODER COUNTER_PROPOSED
+///   (REJECTED- und CANCELLED-Bookings geben den Slot wieder frei).
+///
+/// Soft-Delete: `deletedAt != NULL` markiert den Slot als gelöscht. GET-Listen
+/// filtern `deletedAt IS NULL`. Beim Setzen von deletedAt werden alle PENDING-
+/// und COUNTER_PROPOSED-Bookings durch den Handler atomar auf CANCELLED gesetzt
+/// (siehe api-routes.md).
+model Slot {
+  id          String    @id @default(cuid())
+  startsAt    DateTime
+  endsAt      DateTime
+  description String?
+  createdAt   DateTime  @default(now())
+  deletedAt   DateTime?
+
+  bookings              Booking[] @relation("BookingPrimarySlot")
+  proposedForBookings   Booking[] @relation("BookingCounterProposalSlot")
+
+  @@index([startsAt])
+  @@index([startsAt, endsAt])
+  @@index([deletedAt])
+  @@map("slots")
+}
+
+/// Buchungsanfrage eines Kunden für genau einen Slot.
+///
+/// Status-Lebenszyklus (Iteration 2 — siehe ARCHITECTURE.md §15):
+///
+///   PENDING            → CONFIRMED         (Admin bestätigt)
+///   PENDING            → REJECTED          (Admin lehnt ab)
+///   PENDING            → COUNTER_PROPOSED  (Admin schlägt Alternativtermin vor)
+///   PENDING            → CANCELLED         (Kunde storniert per Token-Link)
+///   CONFIRMED          → REJECTED          (Admin zieht Bestätigung zurück)
+///   COUNTER_PROPOSED   → CONFIRMED         (Kunde nimmt Vorschlag per Token-Link an)
+///   COUNTER_PROPOSED   → PENDING           (Kunde wählt neuen Slot via Re-Booking-Flow)
+///   COUNTER_PROPOSED   → CANCELLED         (Kunde storniert per Token-Link)
+///
+/// Idempotenz: gleicher Status → 200 OK, kein Update (siehe api-routes.md).
+///
+/// WICHTIG — Race-Condition-Schutz (BUG-006, erweitert v1.2):
+///   Es gibt einen Partial Unique Index, der pro Slot maximal eine Booking mit
+///   Status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED') zulässt. Prisma kann
+///   partielle Indexe nicht deklarativ ausdrücken — die Migration enthält Raw SQL:
+///
+///   -- prisma/migrations/<ts>_active_booking_per_slot_v2/migration.sql
+///   DROP INDEX IF EXISTS uniq_active_booking_per_slot;
+///   CREATE UNIQUE INDEX uniq_active_booking_per_slot
+///     ON bookings(slot_id)
+///     WHERE status IN ('PENDING', 'CONFIRMED', 'COUNTER_PROPOSED');
+///
+///   Verletzungen dieses Constraints werden vom Handler in `POST /api/bookings`
+///   und `PATCH /api/bookings/:id` als HTTP 409 CONFLICT (Code: CONFLICT) übersetzt.
+///
+/// Mail-Reliability (BUG-002):
+///   - mailSent: true, sobald Resend mindestens einmal erfolgreich quittiert hat.
+///   - mailError: letzte Fehlermeldung (truncated 500 Zeichen) bei Fehlversuch.
+///   - Retry-Strategie: 3 Versuche, fire-and-forget nach 201-Response (siehe
+///     BUG_US04_ANALYSIS.md). Admin-Dashboard markiert mailSent=false rot.
+///
+/// Token-Sicherheit (US-13/US-14):
+///   - cancelToken ist UNIQUE und wird beim Booking-Anlegen einmalig generiert
+///     (cuid(), 24+ Zeichen, kollisionsarm).
+///   - Aktionen via /api/bookings/respond?token=xxx&action=accept|cancel
+///     greifen ausschließlich über diesen Token zu — kein Login nötig.
+///   - Re-Use eines Tokens nach finalem Status (CONFIRMED/REJECTED/CANCELLED)
+///     wird vom Handler abgelehnt (HTTP 410 GONE oder vergleichbar — siehe API-Spec).
+model Booking {
+  id            String        @id @default(cuid())
+  slotId        String
+  // onDelete: Restrict bleibt: Slots werden nicht physisch gelöscht (Soft-Delete).
+  // Zusätzliche Sicherheit, falls jemand am Soft-Delete vorbei delete-en wollte.
+  slot          Slot          @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
+
+  customerName  String
+  customerPhone String
+  // **Pflichtfeld ab Iteration 2** (US-13/US-14): wird im Application-Layer
+  // (CreateBookingSchema) erzwungen. DB-seitig bleibt es nullable, um die
+  // Migration der Bestandsdaten ohne ALTER-Constraints durchzuführen.
+  customerEmail String?
+  service       String        // Slug aus SERVICES-Konstante (siehe lib/services.ts)
+  description   String
+
+  status        BookingStatus @default(PENDING)
+
+  // Mail-Status für Admin-Dashboard-Sichtbarkeit (BUG-002).
+  mailSent      Boolean       @default(false)
+  mailError     String?
+
+  // --- Iteration 2 Felder ---
+
+  // Eindeutiger, nicht-rate-limitierender Aktions-Token für Kunden-Links.
+  // Wird einmalig beim Booking-Anlegen erzeugt und bleibt über Status-
+  // Übergänge stabil. Wird in E-Mail-Links verwendet (US-13/US-14).
+  cancelToken   String        @unique @default(cuid())
+
+  // Wenn Admin einen Alternativtermin vorschlägt (US-13 → COUNTER_PROPOSED),
+  // wird hier die ID des vorgeschlagenen Slots gespeichert. NULL sonst.
+  // Kein onDelete-Cascade: Falls der Admin den vorgeschlagenen Slot löscht,
+  // bleibt der Verweis bestehen (404 beim nächsten Klick durch den Kunden,
+  // wird im Handler abgefangen).
+  counterProposalSlotId String?
+  counterProposalSlot   Slot?  @relation("BookingCounterProposalSlot", fields: [counterProposalSlotId], references: [id], onDelete: SetNull)
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([slotId])
+  @@index([status, createdAt])
+  @@index([counterProposalSlotId])
+  // Hinweis: Der Partial Unique Index `uniq_active_booking_per_slot` wird per
+  // Raw-SQL-Migration angelegt (siehe Doc-Block oben), nicht über @@unique.
+  @@map("bookings")
+}
+
+/// Wochentag-basierte Verfügbarkeit (US-15).
+///
+/// Genau **sieben** Datensätze (dayOfWeek 0–6, 0 = Sonntag, 6 = Samstag — analog zu
+/// JavaScripts Date.getDay()). Werden im Setup-Migrations-Schritt seedweise mit
+/// `isActive: false` für alle Tage angelegt; Admin schaltet die gewünschten Tage
+/// einzeln aktiv.
+///
+/// Wirkung in der Kalenderlogik (US-16):
+///   - Ein Tag gilt als grundsätzlich verfügbar ⇔ WeeklyAvailability(day).isActive = true.
+///   - Verfügbarkeit eines konkreten Datums (US-16):
+///       isAvailable = isActive(weekday) AND (kein CONFIRMED-Slot an diesem Tag) AND (Datum > heute)
+///   - "Rot" sonst.
+///
+/// Default-Strategy:
+///   Initial-Insert via Raw-SQL-Migration (alle 7 Tage, isActive=false). Anschließend
+///   PUT /api/availability nutzen, um einzelne Tage zu togglen.
+model WeeklyAvailability {
+  id        String   @id @default(cuid())
+  dayOfWeek Int      @unique // 0 = Sonntag, 1 = Montag, ..., 6 = Samstag
+  isActive  Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+
+  @@index([dayOfWeek])
+  @@map("weekly_availability")
+}
+
+/// SQLite kennt kein natives ENUM — Prisma serialisiert es als TEXT.
+/// Werte werden im API-Layer mit Zod validiert.
+///
+/// Iteration 2: COUNTER_PROPOSED + CANCELLED neu.
+enum BookingStatus {
+  PENDING            // Kunde hat Anfrage gestellt, Admin hat noch nicht reagiert.
+  CONFIRMED          // Admin (oder Kunde via Counter-Proposal-Annahme) hat bestätigt.
+  REJECTED           // Admin hat abgelehnt (oder Bestätigung zurückgezogen).
+  COUNTER_PROPOSED   // Admin hat Alternativtermin vorgeschlagen, Kunde noch nicht reagiert.
+  CANCELLED          // Kunde hat selbst storniert (per Token-Link).
+}

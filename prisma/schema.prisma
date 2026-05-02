@@ -1,0 +1,64 @@
+// Bärenstark Hausservice — Live Prisma Schema (v1.1)
+// Synchron gehalten mit /contracts/schema.prisma.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+
+  @@map("users")
+}
+
+model Slot {
+  id          String    @id @default(cuid())
+  startsAt    DateTime
+  endsAt      DateTime
+  description String?
+  createdAt   DateTime  @default(now())
+  deletedAt   DateTime?
+
+  bookings    Booking[]
+
+  @@index([startsAt])
+  @@index([startsAt, endsAt])
+  @@index([deletedAt])
+  @@map("slots")
+}
+
+/// SQLite kennt kein natives ENUM. Status wird als TEXT abgelegt; gültige Werte
+/// werden im API-Layer durch Zod (BookingStatusSchema) erzwungen.
+/// Werte: 'PENDING' | 'CONFIRMED' | 'REJECTED'.
+model Booking {
+  id            String   @id @default(cuid())
+  slotId        String
+  slot          Slot     @relation(fields: [slotId], references: [id], onDelete: Restrict)
+
+  customerName  String
+  customerPhone String
+  customerEmail String?
+  service       String
+  description   String
+
+  status        String   @default("PENDING")
+
+  mailSent      Boolean  @default(false)
+  mailError     String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([slotId])
+  @@index([status, createdAt])
+  @@map("bookings")
+}
