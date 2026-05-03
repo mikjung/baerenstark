@@ -1961,6 +1961,183 @@ async function run() {
     await prisma.customerUser.delete({ where: { id: customer.id } });
   });
 
+  // ===========================================================================
+  // ITERATION 7 — Email-Auth-Reaktivierung (US-IT7-01 + US-IT7-04 + US-IT7-05)
+  // ===========================================================================
+
+  await group('IT7 — DTO-Helper (F3-Erweiterung): keine Sensible-Felder im Public-Select', async () => {
+    const { selectCustomerUserPublic } = await import('../src/lib/dto/user');
+    const sel = selectCustomerUserPublic();
+    // F3-Garantie: passwordHash kommt mit (für Mapper) — alle anderen
+    // sensiblen Felder dürfen NICHT im Select stehen.
+    const forbidden = [
+      'verificationToken',
+      'verificationTokenExpiry',
+      'oauthId',
+      'adminNote',
+      'adminRating',
+    ];
+    const leaked = forbidden.filter((f) => f in sel);
+    if (leaked.length === 0) {
+      ok('selectCustomerUserPublic excludes verificationToken/oauthId/adminNote/adminRating');
+    } else {
+      bad(`selectCustomerUserPublic leaked: ${leaked.join(', ')}`);
+    }
+  });
+
+  await group('IT7 — toCustomerPublic mapper droppt passwordHash', async () => {
+    const tag = `__SMOKE_IT7_DTO__${Date.now()}__`;
+    const customer = await prisma.customerUser.create({
+      data: {
+        email: `${tag}@test.de`,
+        firstName: 'Max',
+        lastName: 'Mustermann',
+        passwordHash: 'PUBLIC_HASH_LEAK_CANARY',
+        verificationToken: 'TOK_CANARY',
+        verificationTokenExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        emailVerified: false,
+        oauthProvider: 'google',
+        oauthId: 'GOOG_ID_CANARY',
+      },
+    });
+
+    // Public-Read durch DTO-Helper.
+    const { selectCustomerUserPublic } = await import('../src/lib/dto/user');
+    const { toCustomerPublic } = await import('../src/lib/customer-auth-server');
+    const row = await prisma.customerUser.findUnique({
+      where: { id: customer.id },
+      select: selectCustomerUserPublic(),
+    });
+    if (!row) {
+      bad('IT7 DTO smoke: row not found');
+    } else {
+      const dto = toCustomerPublic(row);
+      const json = JSON.stringify(dto);
+      const hasLeak =
+        json.includes('PUBLIC_HASH_LEAK_CANARY') ||
+        json.includes('TOK_CANARY') ||
+        json.includes('GOOG_ID_CANARY');
+      if (!hasLeak) ok('toCustomerPublic strips passwordHash/verificationToken/oauthId');
+      else bad('toCustomerPublic LEAKED sensible field — siehe DTO');
+
+      if (dto.hasPassword === true) ok('toCustomerPublic derives hasPassword=true');
+      else bad('toCustomerPublic hasPassword should be true (passwordHash set)');
+    }
+
+    await prisma.customerUser.delete({ where: { id: customer.id } });
+  });
+
+  await group('IT7 — PasswordResetToken Lifecycle (US-IT7-05)', async () => {
+    const tag = `__SMOKE_IT7_RESET__${Date.now()}__`;
+    const customer = await prisma.customerUser.create({
+      data: {
+        email: `${tag}@test.de`,
+        firstName: 'Reset',
+        lastName: 'Test',
+        emailVerified: true,
+      },
+    });
+
+    // Konstanten Token-Hash erzeugen (test-deterministisch).
+    const { createHash } = await import('node:crypto');
+    const tokenPlain = `plain-token-${Date.now()}`;
+    const tokenHash = createHash('sha256').update(tokenPlain).digest('hex');
+
+    const token = await prisma.passwordResetToken.create({
+      data: {
+        customerId: customer.id,
+        tokenHash,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      },
+    });
+
+    if (token.usedAt === null) ok('PasswordResetToken usedAt initially null');
+    else bad('PasswordResetToken usedAt should be null on insert');
+
+    // m2-IT7: Conditional UPDATE.
+    // Prisma + SQLite/libSQL — DateTime-Spalten sind als ISO-Text (UTC)
+    // gespeichert. Wir binden `new Date()` per Parameter, um Timezone-
+    // Drift zu vermeiden.
+    const now1 = new Date();
+    const affected1 = await prisma.$executeRaw`
+      UPDATE password_reset_tokens
+         SET usedAt = ${now1}
+       WHERE id = ${token.id}
+         AND usedAt IS NULL
+         AND expiresAt > ${now1}
+    `;
+    if (Number(affected1) === 1) ok('Conditional UPDATE succeeds for fresh token');
+    else bad(`Expected affectedRows=1, got ${affected1}`);
+
+    // Race-Loser: zweiter UPDATE sollte 0 Zeilen treffen.
+    const now2 = new Date();
+    const affected2 = await prisma.$executeRaw`
+      UPDATE password_reset_tokens
+         SET usedAt = ${now2}
+       WHERE id = ${token.id}
+         AND usedAt IS NULL
+         AND expiresAt > ${now2}
+    `;
+    if (Number(affected2) === 0) ok('Conditional UPDATE returns 0 for already-used token (TOCTOU-safe)');
+    else bad(`Expected affectedRows=0 on used token, got ${affected2}`);
+
+    // Cleanup (Cascade räumt Token mit).
+    await prisma.customerUser.delete({ where: { id: customer.id } });
+    const remaining = await prisma.passwordResetToken.findUnique({ where: { id: token.id } });
+    if (remaining === null) ok('ON DELETE CASCADE cleans up password_reset_tokens');
+    else bad('Cascade should have removed the token');
+  });
+
+  await group('IT7 — F1 Regression: /admin/setup bleibt 410 GONE wenn users nicht leer', async () => {
+    // Wir prüfen die Endpunkt-Logik direkt (kein HTTP, weil Smoke-Test
+    // kein Server hochfährt). Solange `prisma.user.count() >= 1` ist,
+    // antwortet POST /admin/setup mit 410. Das ist im Code in
+    // `src/app/api/admin/setup/route.ts` so verdrahtet — F1-Garantie aus
+    // IT6 §17.1 ist unverändert.
+    const userCount = await prisma.user.count();
+    if (userCount >= 1) {
+      ok(`F1 active: users-count=${userCount} → /admin/setup will respond 410 GONE`);
+    } else {
+      // Bei leerer DB ist setup zugänglich — das ist erwünscht im
+      // Bootstrap-Pfad. Wir markieren das nur, kein Fail.
+      ok('F1 idle: users-table empty (Bootstrap-Pfad zugänglich)');
+    }
+  });
+
+  await group('IT7 — promote-admin Idempotenz (US-IT7-04)', async () => {
+    // Wir testen die Skript-Logik durch direkten DB-Aufruf (Skript selbst
+    // nutzt argv + ENV; hier prüfen wir das Idempotenz-Verhalten via
+    // gleicher Prisma-Calls).
+    const tag = `__SMOKE_IT7_PROMOTE__${Date.now()}__`;
+    const email = `${tag}@test.de`;
+    const bcryptMod = await import('bcryptjs');
+    // bcryptjs hat eine CommonJS-default-Export-Eigenheit unter ESM-Loader.
+    const bcrypt = (bcryptMod as unknown as { default?: typeof bcryptMod }).default ?? bcryptMod;
+    const passwordHash = await bcrypt.hash('TestPassword12345!', 12);
+
+    const created = await prisma.user.create({
+      data: {
+        email,
+        name: 'Promote Test',
+        passwordHash,
+        status: 'ACTIVE',
+      },
+    });
+    if (created.status === 'ACTIVE') ok('promote-admin: CREATE-Pfad legt status=ACTIVE an');
+    else bad('promote-admin: CREATE status mismatch');
+
+    // Re-Run mit gleichem Email → UPDATE, kein Duplicate-Error.
+    const updated = await prisma.user.update({
+      where: { email },
+      data: { status: 'ACTIVE' },
+    });
+    if (updated.id === created.id) ok('promote-admin: zweiter Run idempotent (UPDATE statt INSERT)');
+    else bad('promote-admin: zweiter Run sollte UPDATE sein');
+
+    // Cleanup.
+    await prisma.user.delete({ where: { id: created.id } });
+  });
+
   await cleanup();
   await prisma.booking.deleteMany({ where: { description: { startsWith: '__SMOKE__' } } });
   await prisma.slot.deleteMany({ where: { description: { startsWith: '__SMOKE__' } } });

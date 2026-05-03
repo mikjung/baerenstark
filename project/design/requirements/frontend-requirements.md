@@ -1,305 +1,281 @@
-# Frontend Requirements — Iteration 4
+# Frontend Requirements — Iteration 7 (Auth-Stabilisierung & Email-Auth-Reversion)
+
+> **Hinweis:** Diese Datei ist die IT7-spezifische Anforderungsspez. Für IT1–IT6
+> ist der Bestand verbindlich (siehe `ARCHITECTURE.md`, `ARCHITECTURE_IT6.md`).
+> Quelle der Wahrheit für IT7: `ARCHITECTURE_IT7.md`. Schemas:
+> `contracts/zod-schemas.ts`. Endpoints: `contracts/api-routes.md` §23.
 
 ## Overview
 
-Iteration 4 erweitert das bestehende Next.js-Frontend (Bestand IT1–IT3) um drei
-zusammenhängende Subsysteme:
+IT7 stellt Customer-Email/Password-Auth wieder her (Reversion von US-IT6-05
+D3-Fix), repariert Google- und Facebook-OAuth durch Diagnose und Härtung,
+gibt Tom ein CLI-Skript zur Admin-Wiederherstellung und implementiert den
+Passwort-Reset-Flow E2E.
 
-1. **Kundenportal** unter `/konto/*` — Registrierung, Login, Auftragsübersicht,
-   Stornierung (US-25, US-26, US-27).
-2. **Stripe-Zahlung** unter `/konto/zahlung/:bookingId` — Kunde bezahlt per
-   Karte / PayPal / Apple Pay / Google Pay über Stripe Checkout (US-28).
-3. **Bewertungen** als echtes Backend-gestütztes Feature — Kunde gibt nach
-   Auftragsabschluss eine Bewertung ab, Tom moderiert in `/admin/reviews`,
-   freigegebene Reviews ersetzen die statische Liste auf der Startseite (US-29).
-
-Das Frontend bleibt mobile-first, deutschsprachig, im bestehenden Braun-/Beige-/
-Holz-Farbschema.
+Frontend-seitig sind 4 Pages neu zu bauen (`/konto/registrieren`,
+`/konto/passwort-vergessen`, `/konto/passwort-zuruecksetzen`,
+`/konto/verifizieren(/erfolg)`), `/konto/login` ist um Credentials-Form +
+verbesserte Fehlermeldungen zu erweitern, und ein Info-Banner für
+nicht-verifizierte Konten kommt ins `/konto/layout.tsx`.
 
 ## Tech Stack
 
-Bestand (unverändert):
+Bestand (unverändert, identisch mit IT4–IT6):
 
 - **Framework:** Next.js 14 (App Router) + TypeScript
-- **State:** React useState + Server-Components wo möglich; kein globaler Store
-  (kleines App-Volumen). Customer-Session wird via Server-Component gelesen
-  (`/konto/layout.tsx` ruft `GET /api/customer/me`) und per Props an Children
-  durchgereicht; Client-Components nutzen einen schmalen Hook
-  (`useCustomerSession()`) mit SWR-ähnlichem Caching.
-- **Styling:** Tailwind CSS mit `baerenstark`-Farbtokens.
-- **Routing:** Next.js App Router (Dateibasiert).
-- **Forms:** React Hook Form + Zod-Resolver (`contracts/zod-schemas.ts`).
-- **Build-Tool:** Next.js eigene Pipeline (Vercel deploy).
-- **HTTP-Client:** Native `fetch()` über `src/lib/api-client.ts` (Wrapper).
+- **State:** React useState + Server-Components + schmaler `useCustomerSession()`-Hook
+- **Styling:** Tailwind CSS mit `baerenstark`-Farbtokens (Braun #6b3e2e, Beige #f4ebd9)
+- **Forms:** React Hook Form + Zod-Resolver (`src/lib/schemas.ts`)
+- **HTTP-Client:** `src/lib/api-client.ts`
+- **Build:** Next.js Pipeline auf Vercel
 
-Neu Iteration 4:
-
-- **Stripe-Integration:** Frontend führt einen Redirect auf eine Stripe-
-  Checkout-Hosted-Page aus. Kein Stripe.js / Stripe Elements im MVP — vollständig
-  serverseitig orchestriert. Frontend bekommt nur die `url` aus
-  `POST /api/payments/create-session` und macht `window.location = url`.
+Keine neuen Frontend-Dependencies in IT7.
 
 ## Pages / Screens
 
-### Kundenportal (US-25, US-26, US-27, US-29)
+### Page: Registrierung (route: `/konto/registrieren`)
 
-#### `/konto/registrieren`
-- **Linked story:** US-25 AC1
-- **Purpose:** Neues Kundenkonto anlegen.
-- **Components:** `<RegisterForm>` (RHF + `CustomerRegisterSchema`), `<CustomerHeaderMenu>`.
-- **Data needed:** `POST /api/customer/register`.
-- **User interactions:** E-Mail, Passwort (mind. 8 Zeichen), Vorname, Nachname,
-  optional Telefon, DSGVO-Checkbox. Submit zeigt Bestätigung "Bitte bestätigen
-  Sie Ihre E-Mail-Adresse" + Spam-Hinweis.
-
-#### `/konto/login`
-- **Linked story:** US-25 AC3, AC4
-- **Purpose:** Eingeloggter Zugang zum Portal.
-- **Components:** `<LoginForm>`, "Passwort vergessen"-Link, "Konto erstellen"-Link.
-- **Data needed:** `POST /api/customer/login`.
-- **User interactions:** E-Mail + Passwort. Bei `EMAIL_NOT_VERIFIED` wird ein
-  "Bestätigungs-E-Mail erneut senden"-Button angezeigt
-  (`POST /api/customer/resend-verification`).
-
-#### `/konto/passwort-vergessen`
-- **Linked story:** US-25 AC5
-- **Purpose:** Reset-Mail anfordern.
-- **Components:** `<ForgotPasswordForm>`.
-- **Data needed:** `POST /api/customer/forgot-password`.
-- **User interactions:** E-Mail-Eingabe → Bestätigung "Falls die E-Mail
-  registriert ist, haben wir Ihnen einen Link gesendet."
-
-#### `/konto/passwort-zuruecksetzen?token=...`
-- **Linked story:** US-25 AC6
-- **Purpose:** Neues Passwort setzen.
-- **Components:** `<ResetPasswordForm>`.
-- **Data needed:** `POST /api/customer/reset-password`.
-- **User interactions:** Neues Passwort + Bestätigung. Bei Token ungültig:
-  Banner "Link nicht mehr gültig" + Link zu `/konto/passwort-vergessen`.
-
-#### `/konto/verifizieren?token=...`
-- **Linked story:** US-25 AC2
-- **Purpose:** E-Mail-Verifikation einlösen.
-- **Components:** Server-Component, ruft `GET /api/customer/verify?token=...`.
-- **Data needed:** `GET /api/customer/verify?token=...` (gibt 302 Redirect zurück).
-- **User interactions:** Keine (Auto-Verarbeitung beim Laden). Bei Erfolg:
-  Auto-Login + Redirect auf `/konto?verified=1`. Bei Fehler: Redirect auf
-  `/konto/login?error=invalid_token`.
-
-#### `/konto` (Auftragsübersicht)
-- **Linked story:** US-26 AC1, AC2, AC5
-- **Purpose:** Liste aller Aufträge des eingeloggten Kunden.
-- **Components:** `<CustomerBookingsList>` mit zwei Sektionen "Bevorstehende
-  Termine" und "Vergangene Aufträge", Status-Badge-Komponente, Empty-State
-  mit CTA-Button.
-- **Data needed:** `GET /api/customer/bookings` (Server-Component fetched).
-- **User interactions:** Klick auf Eintrag → Navigation zu
-  `/konto/auftrag/:id`. Klick auf "Ersten Auftrag buchen" (Empty-State) →
-  `/buchung`.
-
-#### `/konto/auftrag/[id]` (Auftragsdetail)
-- **Linked story:** US-26 AC4, US-27, US-28 AC8, US-29 AC1, AC2, AC4, AC5
-- **Purpose:** Einzelner Auftrag mit allen Details, Aktionen (Stornieren,
-  Bezahlen, Bewerten).
-- **Components:** `<BookingDetailCard>`, `<BookingAttachmentList>` (IT3
-  wiederverwendet), `<CancelBookingButton>`, `<StripeCheckoutButton>`
-  (sichtbar wenn `payment.status === 'PENDING'`), `<ReviewForm>` (sichtbar
-  wenn `canReview`).
-- **Data needed:** `GET /api/customer/bookings/:id`.
-- **User interactions:**
-  - **Stornieren** → Confirm-Dialog → `POST /api/customer/bookings/:id/cancel`.
-    Bei `< 24h` ist Button disabled mit Tooltip "Stornierung nur bis 24h
-    vor Termin möglich. Bitte rufen Sie uns an: 0157-74787512."
-  - **Bezahlen** → `POST /api/payments/create-session` → `window.location = url`.
-  - **Bewerten** (nur wenn Status COMPLETED + keine Review) → Sterne-Picker
-    + Textarea (max 500 Zeichen, Zeichenzähler) → `POST /api/customer/reviews`.
-    Erfolg: Form schreibgeschützt, Bestätigung "Vielen Dank! Sie wird nach
-    Freigabe veröffentlicht."
-
-#### `/konto/profil`
-- **Linked story:** US-25 AC10
-- **Purpose:** Profil-Daten ändern.
-- **Components:** `<ProfileForm>` mit Vorname, Nachname, Telefon, E-Mail.
-- **Data needed:** `GET /api/customer/me` + `PATCH /api/customer/me`.
-- **User interactions:** Felder ändern → Speichern → Toast. Bei E-Mail-
-  Änderung Hinweis "Wir haben Ihnen einen Bestätigungs-Link an die neue
-  Adresse geschickt. Ihre alte Adresse bleibt aktiv, bis Sie bestätigt haben."
-
-### Stripe-Zahlung (US-28)
-
-#### `/konto/zahlung/[bookingId]`
-- **Linked story:** US-28 AC2, AC3, AC4, AC5, AC6, AC7
-- **Purpose:** Kunde löst Stripe-Checkout aus.
-- **Auth-Modi:**
-  - Eingeloggter Kunde (Cookie).
-  - Anonym mit `?token=<cancelToken>` aus E-Mail-Link.
+- **Linked story:** US-IT7-01.
+- **Purpose:** Email-/Passwort-Registrierung mit OAuth-Buttons als
+  Alternative.
+- **War in IT6 D3-Fix:** redirected zu `/konto/login`. Ab IT7: vollwertige
+  Form.
 - **Components:**
-  - `<PaymentSummaryCard>` — Auftragsdetails + Betrag (formatiert in Euro).
-  - `<StripeCheckoutButton>` — einzelner Button "Bezahlen mit
-    Karte / PayPal / Apple Pay / Google Pay" (Stripe rendert die Wallet-Buttons
-    auf der Stripe-Page selbst, deshalb ein einziger Button hier).
-- **Data needed:** `GET /api/customer/bookings/:id` (für Detail-Anzeige) +
-  `POST /api/payments/create-session` (beim Klick).
-- **User interactions:** Klick → `window.location = stripeSessionUrl`.
-  - Wenn `payment.status === 'PAID'`: Banner "Diese Buchung wurde bereits
-    bezahlt am ..." statt Button.
-  - Wenn `payment.status === 'FAILED'`: Banner "Letzter Versuch
-    fehlgeschlagen — bitte erneut" + Button zum Neustart.
+  - `<RegisterForm />` (Client) — RHF + ZodResolver auf
+    `CustomerRegisterSchema` (firstName, lastName, email, password,
+    passwordConfirm, phone optional, privacyAccepted Checkbox).
+  - `<OAuthButtons />` (Client) — Google + Facebook + Hinweistext „oder".
+  - `<ServerErrorBanner />` — bei `EMAIL_ALREADY_REGISTERED`,
+    `RATE_LIMITED`, `VALIDATION_ERROR`.
+  - `<LegalNote />` — Datenschutz- und AGB-Verweis.
+- **Data needed:** `POST /api/customer/register`.
+- **User interactions:**
+  - Submit → `POST /register` → 201 → Redirect zu `/konto` mit
+    Success-Banner „Bitte bestätigen Sie Ihre E-Mail-Adresse" (Banner
+    persistiert via Layout-Banner-Komponente, siehe unten).
+  - 409 `EMAIL_ALREADY_REGISTERED` → Inline-Fehler am Email-Feld + Link
+    „Bereits registriert? Zum Login".
+  - 429 `RATE_LIMITED` → Banner „Zu viele Versuche. Bitte versuchen Sie
+    es in einer Stunde erneut."
+- **Validierung (client-side):** alle Pflichtfelder, Email-Format,
+  Passwort min. 8 Zeichen, `password === passwordConfirm`,
+  `privacyAccepted === true`.
 
-#### `/konto/zahlung/erfolg?session_id=...`
-- **Linked story:** US-28 AC6
-- **Purpose:** Redirect-Ziel von Stripe nach erfolgreicher Zahlung.
-- **Components:** `<PaymentSuccess>` mit Polling.
-- **Data needed:** Polling auf `GET /api/customer/bookings/:bookingId`
-  (bookingId aus Stripe-Session-Metadata oder Server-side aus `session_id`),
-  bis `payment.status === 'PAID'` oder Timeout 10s.
-- **User interactions:** Auto-Redirect nach Erfolg auf
-  `/konto/auftrag/:bookingId`.
+### Page: Login (route: `/konto/login`)
 
-### Admin-Bereich (US-28, US-29)
+- **Linked story:** US-IT7-01, US-IT7-02, US-IT7-03.
+- **Purpose:** Email/Password-Login + Google + Facebook nebeneinander.
+- **War in IT6:** nur OAuth-Buttons. Ab IT7: zusätzlich Credentials-Form.
+- **Components:**
+  - `<LoginForm />` (Client) — RHF + ZodResolver auf
+    `CustomerLoginSchema` (email, password, optional `redirectUrl`
+    aus Query-Param).
+  - `<OAuthButtons />` (Client) — Google + Facebook.
+  - `<ForgotPasswordLink />` — `<Link href="/konto/passwort-vergessen">`.
+  - `<ServerErrorBanner />` — siehe Mapping unten.
+  - `<RegisterPromptLink />` — „Noch kein Konto? Registrieren".
+- **Data needed:** `POST /api/customer/login`. OAuth-Flow geht über
+  NextAuth-Routes (`/api/auth/customer/[...]`).
+- **User interactions:**
+  - Submit Credentials → 200 → `redirectUrl` aus Response (oder `/konto`).
+  - 401 `INVALID_CREDENTIALS` → Banner „E-Mail oder Passwort ungültig"
+    (KEIN Hint, welches Feld falsch ist).
+  - 422 `OAUTH_ONLY_ACCOUNT` → Banner „Dieses Konto wurde mit Google/
+    Facebook erstellt. Bitte verwenden Sie die OAuth-Buttons unten."
+  - 429 `RATE_LIMITED` → Banner siehe oben.
+  - OAuth-Klick → `signIn('google', …)` bzw. `signIn('facebook', …)`.
+- **Error-Query-Params (von OAuth-Flow):**
+  - `?error=oauth_no_email` → Banner „Mit Ihrem Facebook-Konto ist keine
+    E-Mail-Adresse verknüpft. Bitte registrieren Sie sich per E-Mail."
+  - `?error=oauth_unverified_conflict` → Banner „Es existiert bereits
+    ein nicht-verifiziertes Konto mit dieser E-Mail-Adresse. Bitte
+    verifizieren Sie es zuerst."
+  - `?error=ACCOUNT_DISABLED` (Admin-Login an `/admin/login`, nicht hier
+    relevant — dokumentiert für Vollständigkeit).
+- **Validierung:** Email-Format, Passwort nicht leer.
 
-#### `/admin/bookings` (erweitert)
-- **Linked story:** US-28 AC1, US-29 (COMPLETED-Übergang)
-- **Purpose:** Bestehende Booking-Tabelle bekommt neue Aktionen.
-- **Components (erweitert):**
-  - `<PaymentEditor>` — Modal: Betrag in Euro eingeben (Anzeige; intern
-    in Cents umgerechnet via `Math.round(eur * 100)`), optional
-    Beschreibung. → `POST /api/admin/bookings/:id/payment`.
-  - "Termin abschließen"-Button für CONFIRMED-Bookings → `PATCH
-    /api/bookings/:id { status: 'COMPLETED' }`.
-- **Data needed:** Bestehender Endpunkt `GET /api/bookings` liefert
-  jetzt zusätzlich `payment` und `customerId` (siehe
-  `BookingAdminSchema`).
+### Page: Passwort vergessen (route: `/konto/passwort-vergessen`)
 
-#### `/admin/reviews` (NEU)
-- **Linked story:** US-29 AC6, AC7
-- **Purpose:** Bewertungs-Moderation.
-- **Components:** `<ReviewModerationTable>` mit Tabs "Wartend" /
-  "Veröffentlicht" / "Alle". Pro Eintrag: Sterne, Text, Kunde, Service,
-  Datum, "Freigeben"/"Zurückziehen"-Button mit Confirm-Dialog.
-- **Data needed:** `GET /api/admin/reviews` + `PATCH /api/admin/reviews/:id`.
-- **User interactions:** Approve/Reject → Modal → API-Call → Liste neu laden.
+- **Linked story:** US-IT7-05.
+- **Purpose:** Reset-Link anfordern.
+- **Components:**
+  - `<ForgotPasswordForm />` (Client) — RHF + ZodResolver auf
+    `CustomerForgotPasswordSchema` (email).
+  - `<ConfirmationCard />` — wird nach Submit IMMER angezeigt
+    (Email-Enumeration-Schutz).
+- **Data needed:** `POST /api/customer/forgot-password`.
+- **User interactions:**
+  - Submit → 200 → `<ConfirmationCard />` ersetzt Form mit Text:
+    „Falls diese Adresse registriert ist, erhalten Sie eine E-Mail mit
+    weiteren Anweisungen. Der Link ist 1 Stunde gültig."
+  - 429 → Banner.
+- **Validierung:** Email-Format.
 
-### Startseite (umgebaut)
+### Page: Passwort zurücksetzen (route: `/konto/passwort-zuruecksetzen?token=…`)
 
-#### `/` (`<ReviewSection>` umgebaut, US-29 AC8)
-- **Linked story:** US-29 AC8
-- **Purpose:** Echte Bewertungen ersetzen statische Daten, sobald
-  ≥ 4 freigegebene Reviews vorliegen.
-- **Components (geändert):** `<ReviewSection>` — fetched
-  `GET /api/reviews` zur Build-Time / Page-Load. Wenn `total >= 4`,
-  rendert echte Daten; sonst fallback auf `lib/reviews.ts` (IT3-Bestand).
-- **Data needed:** `GET /api/reviews` (Server-Component).
+- **Linked story:** US-IT7-05.
+- **Purpose:** Neues Passwort setzen via Token aus Reset-Mail.
+- **Components:**
+  - `<ResetPasswordForm />` (Client) — RHF + ZodResolver auf
+    `CustomerResetPasswordSchema` (password, passwordConfirm). `token`
+    kommt aus Query-Param und wird automatisch in den Body gesetzt
+    (hidden field).
+  - `<TokenInvalidCard />` — wird angezeigt, wenn der Server 410
+    `INVALID_OR_EXPIRED_TOKEN` antwortet. Enthält Link zu
+    `/konto/passwort-vergessen`.
+- **Data needed:** `POST /api/customer/reset-password`.
+- **User interactions:**
+  - Submit → 200 → Redirect zu `/konto/login?reset=success` mit Success-
+    Banner „Passwort erfolgreich geändert. Bitte melden Sie sich an."
+  - 410 → `<TokenInvalidCard />` ersetzt die Form.
+  - 400 → Inline-Fehler am Feld.
+- **Validierung:** Passwort min. 8 Zeichen, `password === passwordConfirm`.
+- **UX-Hinweis:** Wenn `?token=` fehlt oder leer ist → sofort
+  `<TokenInvalidCard />` zeigen (Frontend prüft das clientseitig, ohne
+  API-Call).
+
+### Page: Email verifizieren (route: `/konto/verifizieren?token=…`)
+
+- **Linked story:** US-IT7-01.
+- **Purpose:** Klick auf Verify-Link aus Registrierungs-Mail.
+- **Components:**
+  - `<VerifyClient />` — Client-Component, ruft beim Mount
+    `GET /api/customer/verify?token=…` auf. Zeigt Spinner, dann Erfolg
+    oder Fehlerkarte.
+  - `<TokenInvalidCard />` (geteilt mit Reset-Page).
+- **Data needed:** `GET /api/customer/verify?token=…`.
+- **User interactions:** Bei 200 → Redirect zu
+  `/konto/verifizieren/erfolg`. Bei 410 → Fehlerkarte.
+
+### Page: Email-Verifizierung erfolgreich (route: `/konto/verifizieren/erfolg`)
+
+- **Linked story:** US-IT7-01.
+- **Purpose:** Statische Erfolgsseite.
+- **Components:**
+  - `<SuccessCard />` mit Bärenstark-Logo, Text „Ihre E-Mail wurde
+    bestätigt. Sie können sich jetzt einloggen.", Button → `/konto/login`.
+
+### Layout-Erweiterung: `/konto/layout.tsx`
+
+- **Linked story:** US-IT7-01.
+- **Purpose:** Info-Banner für Konten ohne `emailVerified`.
+- **Components:**
+  - `<UnverifiedEmailBanner />` (Client) — wird angezeigt, wenn
+    `useCustomerSession().emailVerified === false`. Text: „Bitte bestätigen
+    Sie Ihre E-Mail-Adresse." + Button „Erneut senden" →
+    `POST /api/customer/resend-verification`. Nach Klick: Banner-Text
+    wechselt auf „E-Mail wurde gesendet." (lokal, kein Page-Reload).
+- **Data needed:** Customer-Session aus `GET /api/customer/me`.
 
 ## Shared Components
 
-| Komponente                                 | Props                                        | Verwendung                                              |
-| ------------------------------------------ | -------------------------------------------- | ------------------------------------------------------- |
-| `<CustomerHeaderMenu>`                     | `{ user: CustomerUserPublic \| null }`        | Im `/konto/*`-Layout. Zeigt Login/Logout, Name, Profil. |
-| `<StatusBadge>`                            | `{ status: BookingStatus, paid?: boolean }`   | Mapping auf DE-Labels: "Offen", "Bestätigt", etc. + zusätzlicher "Bezahlt"-Badge. |
-| `<StarRating>`                             | `{ value: 1..5, readonly?: boolean, onChange? }` | Im ReviewForm + ReviewSection.                       |
-| `<CancelBookingButton>`                    | `{ booking: CustomerBooking, onCancelled }`   | Confirm-Dialog + API-Call.                              |
-| `<StripeCheckoutButton>`                   | `{ bookingId, cancelToken? }`                 | `POST create-session` → Redirect.                       |
-| `<ReviewForm>`                             | `{ bookingId, onSubmitted }`                  | Sterne + Textarea + Submit.                             |
-| `<PaymentEditor>` (Admin)                  | `{ booking: BookingAdmin, onSaved }`          | Modal mit Euro-Eingabe.                                  |
-| `<ReviewModerationTable>` (Admin)          | `{ reviews: Review[], onApprove, onReject }`  | Tabelle.                                                 |
+| Komponente                 | Props                                                                | Zweck                                                                                 |
+| -------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `<OAuthButtons />`         | `redirectUrl?: string`                                               | Google + Facebook Buttons. Nur sichtbar, wenn Provider aktiv (Feature-Flag-Check).   |
+| `<ServerErrorBanner />`    | `code: string \| null, message?: string`                            | Mappt Fehler-Codes auf deutsche Texte (siehe Mapping unten).                          |
+| `<TokenInvalidCard />`     | —                                                                    | Geteilte Card für Verify- und Reset-Token-Fehler. CTA → `/konto/passwort-vergessen`. |
+| `<UnverifiedEmailBanner/>` | —                                                                    | Layout-Banner mit Resend-Button.                                                      |
+| `<ConfirmationCard />`     | `title: string, body: string`                                        | Generische „Aktion ausgeführt"-Card.                                                  |
+
+### Fehler-Code → deutsche Meldung (verbindlich)
+
+| Code                          | Meldung                                                                                              |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `INVALID_CREDENTIALS`         | „E-Mail oder Passwort ungültig."                                                                     |
+| `EMAIL_ALREADY_REGISTERED`    | „Diese E-Mail-Adresse ist bereits registriert."                                                      |
+| `OAUTH_ONLY_ACCOUNT`          | „Dieses Konto wurde mit Google/Facebook erstellt. Bitte verwenden Sie die OAuth-Buttons."             |
+| `INVALID_OR_EXPIRED_TOKEN`    | „Dieser Link ist nicht mehr gültig. Bitte fordern Sie einen neuen Link an."                          |
+| `ALREADY_VERIFIED`            | „Ihre E-Mail-Adresse ist bereits bestätigt."                                                         |
+| `RATE_LIMITED`                | „Zu viele Versuche. Bitte versuchen Sie es in einer Stunde erneut."                                  |
+| `oauth_no_email`              | „Mit Ihrem Konto ist keine E-Mail-Adresse verknüpft. Bitte registrieren Sie sich per E-Mail."        |
+| `oauth_unverified_conflict`   | „Es existiert bereits ein nicht-verifiziertes Konto mit dieser E-Mail. Bitte verifizieren Sie es zuerst." |
+| `oauth_error`                 | „Bei der Anmeldung ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut."                       |
+| `VALIDATION_ERROR`            | wird inline am Feld angezeigt (RHF + Zod).                                                            |
 
 ## API Consumption
 
-Alle neuen Endpunkte (siehe `contracts/api-routes.md` §11–§14):
+Alle Pfade werden via `src/lib/api-client.ts` aufgerufen. Antworten
+werden gegen die Schemas aus `contracts/zod-schemas.ts` validiert.
 
-### Kunden-Auth (US-25)
-- `POST /api/customer/register` — Registrierung.
-- `POST /api/customer/login` — Login → Cookie.
-- `POST /api/customer/logout` — Logout.
-- `GET  /api/customer/me` — Profil-Lookup.
-- `PATCH /api/customer/me` — Profil-Update.
-- `GET  /api/customer/verify?token=...` — Verifikation (über Browser-Klick).
-- `POST /api/customer/resend-verification` — Mail neu senden.
-- `POST /api/customer/forgot-password` — Reset-Mail anfordern.
-- `POST /api/customer/reset-password` — neues Passwort setzen.
+| Endpoint                                          | Verwendet von                                  | Anmerkung                                                                |
+| ------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ |
+| `POST /api/customer/register`                     | `<RegisterForm />`                             | Body `CustomerRegisterSchema`. 201 → `CustomerUserPublicSchema`.         |
+| `POST /api/customer/login`                        | `<LoginForm />`                                | Body `CustomerLoginSchema`. 200 → `CustomerLoginResponseSchema`.         |
+| `GET  /api/customer/verify?token=`                | `<VerifyClient />`                             | 200 → `{ ok: true }`. 410 → `<TokenInvalidCard />`.                      |
+| `POST /api/customer/resend-verification`          | `<UnverifiedEmailBanner />` Resend-Button      | Auth: Customer-Session. 200 → `{ ok: true }`.                            |
+| `POST /api/customer/forgot-password`              | `<ForgotPasswordForm />`                       | 200 → `<ConfirmationCard />`.                                            |
+| `POST /api/customer/reset-password`               | `<ResetPasswordForm />`                        | 200 → Redirect Login. 410 → `<TokenInvalidCard />`.                      |
+| `GET  /api/auth/customer/[...]` (NextAuth)        | `<OAuthButtons />` (via `signIn()`)            | unverändert seit IT5/IT6.                                                |
+| `GET  /api/auth/diagnose`                         | `npm run auth:check` (CLI-Tool, nicht UI)      | Dev-only.                                                                |
 
-### Kundenportal-Buchungen (US-26, US-27)
-- `GET  /api/customer/bookings` — `{ upcoming: [], past: [] }`.
-- `GET  /api/customer/bookings/:id` — Detail.
-- `POST /api/customer/bookings/:id/cancel` — Stornierung mit 24h-Frist-Check.
-
-### Zahlung (US-28)
-- `POST /api/admin/bookings/:id/payment` (Admin) — Betrag hinterlegen.
-- `DELETE /api/admin/bookings/:id/payment` (Admin) — PENDING-Payment löschen.
-- `POST /api/payments/create-session` — Stripe-URL holen.
-- (`POST /api/payments/webhook` — kein Frontend-Aufrufer.)
-
-### Reviews (US-29)
-- `POST /api/customer/reviews` — Review abgeben.
-- `GET  /api/reviews` — öffentliche Liste (mit `average` + `total`).
-- `GET  /api/admin/reviews` (Admin) — Moderations-Liste.
-- `PATCH /api/admin/reviews/:id` (Admin) — Approve/Reject.
-
-### Booking-Erweiterung
-- `POST /api/bookings` — Body unverändert, aber wenn `customer-session`
-  Cookie vorhanden ist, wird `customerId` automatisch befüllt (kein
-  Frontend-Aufwand nötig).
-- `PATCH /api/bookings/:id` (Admin) — `status: 'COMPLETED'` neu erlaubt.
+Frontend ruft `/api/auth/diagnose` **nicht direkt** aus dem UI auf — es
+ist ein Self-Service-Endpoint für Tom/Engineer im Browser oder via Curl.
 
 ## State Management
 
-- **Customer-Session:** Server-Component liest beim `/konto/*`-Page-Load
-  via `GET /api/customer/me`. Wird per Props an Children durchgereicht.
-  Client-Components, die die Session brauchen (z.B.
-  `<CustomerHeaderMenu>`), erhalten sie als Prop oder über einen
-  schlanken Context-Provider im Layout.
-- **Bookings-Liste:** Server-Component fetched. Bei Storno-Aktion:
-  Client-Komponente macht den API-Call und triggert ein Re-Validate via
-  `router.refresh()`.
-- **Review-Form:** Lokaler React-State (Stars, Text). Submit-Button
-  während laufendem Request disabled.
-- **Stripe-Checkout:** Stateless im Frontend — `window.location` springt
-  weg, Rückkehr über `/konto/zahlung/erfolg`.
+- Customer-Session: `useCustomerSession()` aus `src/lib/use-customer.ts`
+  (bestehend). `emailVerified`-Bool steuert Layout-Banner.
+- Form-State: lokal in jeder Page via React Hook Form.
+- Kein neuer globaler Store. Kein Redux, kein Zustand.
 
-## Validation Rules
+## Validation Rules (Client-Side, RHF + Zod)
 
-Vollständig in `contracts/zod-schemas.ts` (re-export aus `src/lib/schemas.ts`).
-Wichtige Frontend-Regeln:
-
-- **Registrierung:** E-Mail-Format, Passwort ≥ 8 Zeichen, Vor-/Nachname
-  jeweils ≥ 1 Zeichen, DSGVO-Checkbox erforderlich.
-- **Login:** E-Mail + Passwort nicht leer.
-- **Passwort-Reset:** beide Passwort-Felder müssen identisch sein,
-  ≥ 8 Zeichen.
-- **Profil-Update:** wie Registrierung, alle Felder optional außer
-  bei E-Mail-Änderung (Backend-Validierung).
-- **Review:** stars 1..5 Pflicht. Text optional, max 500 Zeichen
-  (Zeichenzähler sichtbar).
-- **Stornierung (Frontend-Check):** wenn Booking `isCancellable === false`,
-  Button disabled. Bei Klick trotzdem (z.B. via Devtools) gibt das
-  Backend 409 zurück; Frontend zeigt Toast.
-- **Payment-Editor (Admin):** Betrag in Euro Eingabe, Frontend rechnet
-  in Cents um (`Math.round(parseFloat(input) * 100)`). Min 1.00 €,
-  Max 10.000,00 €. Inline-Validierung vor Submit.
+| Feld                | Regel                                                            | Schema                              |
+| ------------------- | ---------------------------------------------------------------- | ----------------------------------- |
+| Email               | `z.string().email().toLowerCase().max(254)`                      | `customerEmailLoginSchema`          |
+| Passwort            | min 8, max 200                                                   | `customerPasswordSchema`            |
+| firstName/lastName  | min 1, max 120, getrimmt                                         | `CustomerRegisterSchema`            |
+| phone (optional)    | `phoneOptionalSchema` (bestehend)                                | `phoneOptionalSchema`               |
+| privacyAccepted     | `z.literal(true)` mit dt. Fehlertext                             | `CustomerRegisterSchema`            |
+| passwordConfirm     | gleich `password`                                                | `.refine()`                         |
+| token (Verify/Reset) | `z.string().min(1)`                                              | `CustomerVerifyTokenQuerySchema`    |
 
 ## Accessibility & Responsiveness
 
-- **WCAG-Target:** AA (Bestand IT1).
-- **Breakpoints:** Mobile-first (Tailwind-Defaults).
-- **Forms:** Alle Inputs haben sichtbare Labels (nicht nur Placeholder).
-  Errors als `<p role="alert">` mit `aria-describedby`.
-- **Star-Rating:** Tastatur-bedienbar (Pfeil-Tasten ändern Sterne; Enter
-  bestätigt). Screenreader-Label "Bewertung 4 von 5 Sternen".
-- **Modal/Dialogs:** Focus-Trap, Escape schließt, Hintergrund-Klick
-  schließt (außer bei Eingabe-Modal — dort nur X-Button).
-- **Stripe-Redirect:** vor `window.location` Toast "Sie werden zur
-  sicheren Bezahlseite weitergeleitet..." anzeigen.
-- **Polling auf `/konto/zahlung/erfolg`:** ARIA-Live-Region "Wir
-  verarbeiten Ihre Zahlung...".
-- **Touch-Targets:** alle Buttons ≥ 44×44px.
+- WCAG 2.1 Level AA — Form-Labels, Focus-Outlines, Touch-Targets ≥ 44px
+  (IT6 §17.8 Floor bleibt aktiv).
+- Mobile-First: Forms 1-spaltig, max-width 28rem, ausreichende Vertical-
+  Spacing.
+- Error-Banner wird per `role="alert"` ausgezeichnet, damit Screenreader
+  ihn vorlesen.
+- Submit-Buttons haben ein `disabled`-State während des Requests +
+  Spinner-Icon (kein Doppel-Submit).
+- Mehrsprachigkeit: Deutsch only (IT7 keine i18n).
 
-## Story Coverage
+## Story Coverage (Frontend)
 
-| Story | Frontend Deliverable                                                                                                                                |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| US-25 | `/konto/registrieren`, `/konto/login`, `/konto/passwort-vergessen`, `/konto/passwort-zuruecksetzen`, `/konto/verifizieren`, `/konto/profil`, `<CustomerHeaderMenu>`, Middleware-Redirect bei `/konto/*`. |
-| US-26 | `/konto`-Page mit `<CustomerBookingsList>` (upcoming/past Split, Status-Badge, Empty-State mit CTA), `/konto/auftrag/:id` mit `<BookingDetailCard>`. |
-| US-27 | `<CancelBookingButton>` (Confirm-Dialog, Disabled-State mit Hinweistext bei < 24h, sichtbar nur wenn `isCancellable === true`).                       |
-| US-28 | `/konto/zahlung/:bookingId` mit `<StripeCheckoutButton>`, `<PaymentSummaryCard>`, `/konto/zahlung/erfolg`-Page mit Polling, "Bezahlt"-Badge in `<BookingDetailCard>` und `<CustomerBookingsList>`. Admin: `<PaymentEditor>`-Modal in `/admin/bookings`. |
-| US-29 | `<ReviewForm>` in `/konto/auftrag/:id` (sichtbar wenn `canReview`), Read-only-Anzeige bei bestehender Review, `<ReviewSection>` umgebaut auf `GET /api/reviews`-Aufruf, `/admin/reviews` mit `<ReviewModerationTable>`. |
+| Story        | Frontend Deliverable                                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| US-IT7-01    | `/konto/registrieren` (neue Page), `/konto/login` (Credentials-Form ergänzt), `/konto/verifizieren(/erfolg)` (neue Pages), `<UnverifiedEmailBanner />` (Layout-Banner) |
+| US-IT7-02    | `/konto/login` Google-Button-Verhalten, deutsche Fehlermeldung bei `?error=` Query-Params                                                              |
+| US-IT7-03    | `/konto/login` Facebook-Button-Verhalten, gleiche Fehlerbanner-Logik                                                                                  |
+| US-IT7-04    | (kein Frontend) — CLI-Skript, dokumentiert in `scripts/README.md`                                                                                      |
+| US-IT7-05    | `/konto/passwort-vergessen` (neue Page), `/konto/passwort-zuruecksetzen` (neue Page), `<TokenInvalidCard />` (geteilt), Success-Banner auf `/konto/login` |
+
+## File Inventory (Frontend)
+
+Neue Dateien:
+
+```
+src/app/konto/registrieren/page.tsx              (NEU — IT6 hatte hier nur Redirect)
+src/app/konto/passwort-vergessen/page.tsx        (NEU)
+src/app/konto/passwort-zuruecksetzen/page.tsx    (NEU)
+src/app/konto/verifizieren/page.tsx              (NEU)
+src/app/konto/verifizieren/erfolg/page.tsx       (NEU)
+src/components/auth/RegisterForm.tsx             (NEU — Client)
+src/components/auth/LoginForm.tsx                (UPDATE — Credentials-Form ergänzt)
+src/components/auth/ForgotPasswordForm.tsx       (NEU — Client)
+src/components/auth/ResetPasswordForm.tsx        (NEU — Client)
+src/components/auth/VerifyClient.tsx             (NEU — Client)
+src/components/auth/UnverifiedEmailBanner.tsx    (NEU — Client)
+src/components/auth/TokenInvalidCard.tsx         (NEU — Server-Component)
+src/components/auth/ServerErrorBanner.tsx        (NEU — Server-Component)
+src/components/auth/OAuthButtons.tsx             (UPDATE — kein Code-Bruch, ggf. nur Refactor)
+```
+
+Updates:
+
+```
+src/app/konto/layout.tsx                         (UPDATE — Banner einbauen)
+src/lib/api-client.ts                            (UPDATE — neue Endpoints typisiert)
+```

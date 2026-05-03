@@ -1,6 +1,27 @@
-// Bärenstark Hausservice — Prisma Schema (MVP, v1.6.1 — Iteration 6, QA-Revision)
+// Bärenstark Hausservice — Prisma Schema (MVP, v1.7 — Iteration 7)
 // Single source of truth für das Datenmodell.
 // Live-Schema unter prisma/schema.prisma muss mit dieser Datei synchron bleiben.
+//
+// Änderungen v1.7 (Iteration 7 — Auth-Stabilisierung,
+// 2026-05-03 — siehe `ARCHITECTURE_IT7.md` §4–§9):
+//   - **US-IT7-01 (Email-Auth-Reversion):** `CustomerUser.emailVerifiedAt
+//     DateTime?` neu — Audit-Timestamp, wann die Verifikation gesetzt
+//     wurde. Bool-Flag `emailVerified` bleibt für schnelle Lookup-
+//     Filter, der Timestamp ergänzt eine Audit-Spur. Verifizierung ist
+//     KEIN harter Login-Block (Vorentscheidung Orchestrator).
+//   - **US-IT7-05 (Passwort-Reset):** Felder `CustomerUser.resetToken`
+//     und `CustomerUser.resetTokenExpiry` werden ENTFERNT. Reset-Logik
+//     wandert in eigene Tabelle `PasswordResetToken` (saubere Trennung,
+//     einfacheres Cleanup, SHA-256-Hash statt Klartext-Token).
+//   - **NEU `PasswordResetToken`:** id, customerId (FK Cascade),
+//     tokenHash (UNIQUE, SHA-256 hex), expiresAt (createdAt+1h),
+//     usedAt (NULL = unverbraucht), createdAt. Index
+//     [customerId, expiresAt] für Cleanup-Job-Lookups.
+//   - **US-IT7-04 (Admin-Bootstrap-Reset):** Kein Schema-Eingriff.
+//     Skript `scripts/promote-admin.ts` arbeitet auf bestehendem
+//     `User`-Modell mit ENV-Guard `ALLOW_ADMIN_PROMOTE=true`.
+//   - **US-IT7-02/03 (OAuth-Reparatur):** Kein Schema-Eingriff,
+//     reine Konfig + Diagnose-Endpoint `/api/auth/diagnose` (Dev-only).
 //
 // Änderungen v1.6.1 (QA-Revision nach `QA_DESIGN_REVIEW_IT6.md`,
 // 2026-05-03 — siehe `ARCHITECTURE_IT6.md` Anhang B §17):
@@ -514,8 +535,16 @@ model CustomerUser {
   phone             String?
   /// false bis E-Mail-Verifikation abgeschlossen ist.
   /// **OAuth-Konten (US-31):** Bei OAuth-Login wird `emailVerified = true`
-  /// gesetzt, weil Google/GitHub die E-Mail bereits verifiziert haben.
+  /// gesetzt, weil Google/Facebook die E-Mail bereits verifiziert haben.
+  /// **IT7 (US-IT7-01):** Verifizierung ist KEIN harter Login-Block —
+  /// Kunden ohne Verify-Klick können sich einloggen, sehen aber im
+  /// Portal einen Banner. Auth-Logik prüft `emailVerified` nicht in
+  /// Credentials-Authorize (siehe ARCHITECTURE_IT7.md §4.4).
   emailVerified     Boolean   @default(false)
+  /// IT7 / US-IT7-01: zusätzlich zum Bool ein Timestamp, wann die
+  /// Verifikation gesetzt wurde. NULL solange `emailVerified=false`.
+  /// Audit-Spur + Datenbasis für künftige Re-Verify-Mechanik.
+  emailVerifiedAt   DateTime?
   /// cuid, gesetzt bei Registrierung. Null nach erfolgreicher Verifikation.
   verificationToken       String?   @unique
   /// Ablauf des `verificationToken` (24h nach Erstellung). Wird bei
@@ -523,11 +552,11 @@ model CustomerUser {
   /// Token aktualisiert (BUG-401-Fix v1.4.1). Null nach erfolgreicher
   /// Verifikation.
   verificationTokenExpiry DateTime?
-  /// cuid, gesetzt durch `/forgot-password`. Null nach erfolgreichem Reset
-  /// oder Ablauf.
-  resetToken              String?   @unique
-  /// Ablauf des `resetToken` (1h nach Anfrage).
-  resetTokenExpiry        DateTime?
+  /// IT7 / US-IT7-05: Reset-Tokens leben jetzt in eigener Tabelle
+  /// `PasswordResetToken` (siehe unten). Die alten Felder
+  /// `resetToken` / `resetTokenExpiry` wurden mit der Migration
+  /// `iteration_7_email_auth` entfernt — saubere Trennung, einfacheres
+  /// Cleanup, SHA-256-Hash statt Klartext.
 
   // --- IT5 / US-31 (OAuth2-Provider-Verknüpfung) -------------------------
   /// 'google' | 'github' | null. Null = reines E-Mail/Passwort-Konto.
@@ -564,13 +593,56 @@ model CustomerUser {
 
   bookings  Booking[]
   reviews   Review[]
+  /// IT7 / US-IT7-05 — Backref auf Reset-Token-Records.
+  passwordResetTokens PasswordResetToken[]
 
   @@index([email])
   /// IT5 — Index für OAuth-Callback-Lookup (`findFirst` per Provider+ID).
   @@index([oauthProvider, oauthId])
   /// IT6 / US-IT6-07 — Sortierung in `/admin/users` (Name).
   @@index([lastName, firstName])
+  /// IT6 / US-IT6-07 — Sort-Whitelist `adminRating_desc`.
+  @@index([adminRating])
   @@map("customer_users")
+}
+
+/// IT7 / US-IT7-05 — Passwort-Reset-Tokens (Kunden).
+///
+/// **Sicherheits-Design:**
+///   - `tokenHash` ist der **SHA-256-Hex-Digest** (64 Zeichen) des
+///     Klartext-Tokens. Klartext wird NIEMALS in der DB gespeichert.
+///     Frontend bekommt den Klartext nur in der Reset-Mail (Resend).
+///   - `expiresAt` = `createdAt + 1h`.
+///   - `usedAt` ist NULL solange ungenutzt; wird auf `now()` gesetzt,
+///     sobald `POST /api/customer/reset-password` erfolgreich
+///     verarbeitet wird (single-use).
+///   - ON DELETE CASCADE auf `customerId` — wenn das Kundenkonto
+///     gelöscht wird (z.B. via US-IT6-06 Wipe-Skript), verschwinden
+///     alle ungenutzten Tokens automatisch.
+///   - Kein Index auf `tokenHash` separat — UNIQUE-Constraint genügt.
+///
+/// **Lifecycle (siehe ARCHITECTURE_IT7.md §5.2):**
+///   1. forgot-password → INSERT (immer, auch wenn User nicht existiert →
+///      bei nicht-existierendem User wird KEIN Row geschrieben, nur Latenz simuliert).
+///   2. reset-password → SELECT WHERE tokenHash=? AND usedAt IS NULL AND expiresAt>now()
+///      → UPDATE customer_users.passwordHash, UPDATE password_reset_tokens.usedAt
+///      (atomic in einer `$transaction`).
+model PasswordResetToken {
+  id          String       @id @default(cuid())
+  customerId  String
+  customer    CustomerUser @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// SHA-256 hex digest, 64 chars. UNIQUE — sollte nie kollidieren.
+  tokenHash   String       @unique
+  /// 1h nach createdAt.
+  expiresAt   DateTime
+  /// NULL = ungenutzt. Sobald gesetzt: Token verbraucht.
+  usedAt      DateTime?
+  createdAt   DateTime     @default(now())
+
+  /// Cleanup-Index — Background-Job kann via `expiresAt < now()` aufräumen
+  /// (Backlog). Lookup im Reset-Flow läuft über UNIQUE(tokenHash).
+  @@index([customerId, expiresAt])
+  @@map("password_reset_tokens")
 }
 
 /// Stripe-Zahlung für eine Buchung (Iteration 4 / US-28).

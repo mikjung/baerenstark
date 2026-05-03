@@ -1063,6 +1063,11 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 | US-IT6-07  | Nutzerverwaltung Admin mit Kommentar + Rating | Must Have    | Iteration 6                          |
 | US-IT6-08  | Finaler Preis pro Buchung (EUR-Betrag)        | Must Have    | Iteration 6                          |
 | US-IT6-09  | Analytics-Seite in Admin-Konsole              | Must Have    | Iteration 6                          |
+| US-IT7-04  | Admin-Bootstrap-Reset (BLOCKER)               | Must Have    | Iteration 7                          |
+| US-IT7-01  | Email/Password-Auth wiederherstellen          | Must Have    | Iteration 7 (Reversion US-IT6-05)   |
+| US-IT7-02  | Google OAuth reparieren                       | Must Have    | Iteration 7                          |
+| US-IT7-03  | Facebook OAuth reparieren                     | Must Have    | Iteration 7                          |
+| US-IT7-05  | Passwort-Reset-Flow E2E (Kunden)              | Must Have    | Iteration 7                          |
 | US-09      | Instagram-Feed einbinden                      | Should Have  | Backlog                              |
 | US-10      | Kundenbewertungen anzeigen                    | Should Have  | Ersetzt durch US-22                  |
 | US-11      | Bestätigungs-E-Mail an Kunden                 | Should Have  | Ersetzt durch US-24                  |
@@ -1462,6 +1467,275 @@ Bärenstark Hausservice verfügt ab Iteration 6 über eine produktionsreife Verw
 **Hinweis:** Diagramme mit `recharts` (bereits weit verbreitet im Next.js-Ökosystem, MIT-Lizenz) oder `chart.js` + `react-chartjs-2`. Umsatz basiert auf `final_price_eur` von Buchungen mit Status `COMPLETED`. Buchungen ohne gesetzten `final_price_eur` werden in Umsatzsummen nicht mitgezählt (NULL = kein Betrag). Datums-Aggregation erfolgt serverseitig im API-Endpunkt.
 
 **Priorität:** Must Have | **Story Points:** 5
+
+---
+
+---
+
+## Iteration 7 — Auth-Stabilisierung & Email-Auth-Wiederherstellung
+
+### Kontext
+
+Tom hat nach Go-Live von Iteration 6 fünf kritische Probleme gemeldet. Iteration 7
+adressiert ausschließlich diese Probleme — keine neuen Features.
+
+**Wichtigster Pivot:** US-IT7-01 ist eine bewusste **Reversion von US-IT6-05**.
+US-IT6-05 hat Email/Password-Auth entfernt und alle zugehörigen Endpoints gelöscht.
+Tom möchte Email-Registrierung zurück. Ab IT7 sind alle drei Methoden verfügbar:
+Email/Password als Standard plus Google OAuth und Facebook OAuth als Convenience.
+
+**Blocker:** US-IT7-04 (Admin-Wiederherstellung) muss vor allen anderen Stories
+bearbeitet werden, da Tom aktuell keinen Admin-Zugang hat.
+
+---
+
+#### US-IT7-01: Email/Password-Registrierung und -Login wiederherstellen
+
+> **Reversion von US-IT6-05.** US-IT6-05 hat Email/Password-Auth und alle
+> zugehörigen Endpoints entfernt (`/api/customer/register`, `/login`,
+> `/verify-email`, `/forgot-password`, `/reset-password`, `/resend-verification`
+> sowie Pages `/konto/registrieren`, `/konto/passwort-vergessen`,
+> `/konto/passwort-zuruecksetzen`). Diese Story stellt alle gelöschten
+> Endpoints und Pages vollständig wieder her. OAuth bleibt erhalten —
+> Email/Password ist additiv, keine Entweder-oder-Entscheidung mehr.
+
+**Als** Kunde
+**möchte ich** mich per Email-Adresse und Passwort bei Bärenstark Hausservice
+registrieren und einloggen können,
+**damit** ich ein Kundenkonto anlegen kann, ohne zwingend ein Google- oder
+Facebook-Konto zu benötigen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/konto/registrieren` auf,
+  **When** die Seite geladen ist,
+  **Then** sehe ich ein Registrierungsformular mit Vorname, Nachname, Email,
+  Passwort und „Passwort bestätigen" — sowie die OAuth-Buttons als Alternative.
+
+- **Given** ich fülle das Formular korrekt aus (Passwort mind. 8 Zeichen),
+  **When** ich auf „Konto erstellen" klicke,
+  **Then** wird mein Account angelegt, ich erhalte eine deutschsprachige
+  Bestätigungs-Email via Resend und sehe den Hinweis „Bitte bestätigen Sie
+  Ihre E-Mail-Adresse".
+
+- **Given** ich lasse ein Pflichtfeld leer oder das Passwort ist zu kurz,
+  **When** ich auf „Konto erstellen" klicke,
+  **Then** erscheint eine Inline-Fehlermeldung am betreffenden Feld ohne
+  Seitenneuladen.
+
+- **Given** ich rufe `/konto/login` auf,
+  **When** die Seite geladen ist,
+  **Then** sehe ich sowohl das Email/Passwort-Formular als auch die OAuth-Buttons.
+
+- **Given** ich gebe korrekte Zugangsdaten ein,
+  **When** ich auf „Einloggen" klicke,
+  **Then** werde ich zu `/konto` weitergeleitet.
+
+- **Given** ich gebe falsche Zugangsdaten ein,
+  **When** ich auf „Einloggen" klicke,
+  **Then** erscheint „E-Mail oder Passwort ungültig" — ohne Hinweis, welches Feld
+  falsch ist.
+
+- **Given** ein Kunde ohne verifizierten Account loggt sich ein,
+  **When** die Authentifizierung erfolgt,
+  **Then** kann er sich einloggen (Verifizierung ist Convenience, kein harter Block)
+  — es erscheint ein Info-Banner „Bitte bestätigen Sie Ihre E-Mail-Adresse".
+
+- **Given** `POST /api/customer/login` aufgerufen wird,
+  **When** die Response zurückkommt,
+  **Then** enthält sie ausschließlich `CustomerUserPublicSchema`-Felder —
+  kein `passwordHash`, kein `adminNote`, kein `adminRating` (F3-Garantie aus
+  IT6 bleibt unverändert aktiv).
+
+**Hinweis:** Passwort-Hashing mit bcrypt (Faktor 12). Rate-Limiting auf Login und
+Register via Upstash. DTO-Leak-CI-Scan muss nach Implementierung grün bleiben.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-IT7-02: Google OAuth funktional reparieren
+
+> **Bug-Reparatur (Folge von US-IT6-05).** Der Google-OAuth-Bug wurde in IT6
+> nur per Runbook dokumentiert. Tom hat das Runbook ohne Erfolg ausgeführt.
+> Diese Story verlangt aktive Diagnose + konkrete Reparatur — kein neues
+> Runbook.
+
+**Als** Kunde
+**möchte ich** mich mit meinem Google-Konto bei `/konto/login` anmelden können,
+**damit** ich kein eigenes Passwort anlegen muss.
+
+**Akzeptanzkriterien:**
+
+- **Given** der Entwickler führt die Diagnose-Checkliste aus (Browser DevTools
+  Network-Tab → OAuth-Redirect-Fehlercode, Server-Log, NEXTAUTH_URL-Check,
+  Google Cloud Console Redirect-URIs, `trustHost`-Check, Consent-Screen-Status),
+  **When** die konkrete Fehlerursache identifiziert ist,
+  **Then** ist sie im PR dokumentiert: `redirect_uri_mismatch`, `invalid_client`,
+  `NEXTAUTH_URL falsch` oder `trustHost fehlt`.
+
+- **Given** die Authorized Redirect URI in der Google Cloud Console fehlt oder
+  ist falsch,
+  **When** sie auf `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google`
+  und `http://localhost:3000/api/auth/customer/callback/google` korrigiert wird,
+  **Then** schlägt der OAuth-Flow nicht mehr mit `redirect_uri_mismatch` fehl.
+
+- **Given** `NEXTAUTH_URL` enthält einen Trailing-Slash oder ist leer,
+  **When** der Wert auf `https://www.baerenstark-hausservice.app` gesetzt wird,
+  **Then** wird er von NextAuth korrekt als Callback-Basis verwendet.
+
+- **Given** `trustHost: true` fehlt in der NextAuth-Konfiguration,
+  **When** es in `customer-oauth.ts` ergänzt wird,
+  **Then** entfällt der „Bad request"-Fehler durch Host-Verifikation in NextAuth v5.
+
+- **Given** alle Korrekturen eingespielt sind,
+  **When** Tom auf „Mit Google anmelden" klickt und den Flow abschließt,
+  **Then** ist er eingeloggt, wird zu `/konto` weitergeleitet — kein Fehler.
+
+**Hinweis:** Benötigte ENV: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+`NEXTAUTH_URL`, `NEXTAUTH_SECRET`. Tom liefert Client-ID/Secret.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT7-03: Facebook OAuth funktional reparieren
+
+> **Bug-Reparatur (Folge von US-IT6-05).** Facebook OAuth wurde in IT6
+> implementiert aber nie vollständig konfiguriert. Diese Story schließt die
+> Konfiguration ab — inklusive der Schritte, die Tom selbst im Meta Developer
+> Portal ausführen muss.
+
+**Als** Kunde
+**möchte ich** mich mit meinem Facebook-Konto bei `/konto/login` anmelden können,
+**damit** ich eine weitere bequeme Anmelde-Option habe.
+
+**Akzeptanzkriterien:**
+
+- **Given** der Entwickler prüft die Facebook-App-Konfiguration,
+  **When** er App-Status, Redirect-URIs und ENV-Vars kontrolliert,
+  **Then** ist dokumentiert, welcher Konfigurationsschritt fehlt.
+
+- **Given** `FACEBOOK_CLIENT_ID` und `FACEBOOK_CLIENT_SECRET` gesetzt sind und
+  die Redirect URI auf
+  `https://www.baerenstark-hausservice.app/api/auth/customer/callback/facebook`
+  zeigt,
+  **When** Tom auf „Mit Facebook anmelden" klickt und den Flow abschließt,
+  **Then** ist er eingeloggt und wird zu `/konto` weitergeleitet.
+
+- **Given** die Facebook-App im „Development"-Mode ist,
+  **When** Tom sie im Meta Developer Portal auf „Live" schaltet,
+  **Then** können sich alle Facebook-Nutzer anmelden (kein App Review nötig bei
+  ausschließlich `email` + `public_profile`).
+
+**Hinweis zu Toms Aufgaben im Meta Developer Portal:**
+1. Facebook Login → Einstellungen → Valid OAuth Redirect URIs setzen.
+2. App-Domain `www.baerenstark-hausservice.app` eintragen.
+3. App-Status auf „Live" setzen.
+4. App-ID + App-Secret an Entwickler übergeben.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT7-04: Admin-Bootstrap-Reset — Tom als Admin wiederherstellen
+
+> **BLOCKER.** Tom kann sich nicht mehr als Admin anmelden. Ursache ist unklar —
+> wahrscheinlich hat der DB-Reset aus US-IT6-06 alle Admin-Accounts gelöscht
+> und der Bootstrap-Pfad (`/api/admin/setup`) ist durch die F1-Bedingung
+> (410 GONE wenn `count(users) >= 1`) gesperrt. Diese Story stellt Toms
+> Admin-Zugang binnen Minuten wieder her.
+
+**Als** Admin (Tom)
+**möchte ich** einen klar dokumentierten CLI-Befehl haben, der mich als
+ACTIVE-Admin in der Datenbank wiederherstellt,
+**damit** ich die Admin-Konsole wieder nutzen kann, ohne auf Entwickler-
+Unterstützung warten zu müssen.
+
+**Akzeptanzkriterien:**
+
+- **Given** der Entwickler führt `npx tsx scripts/promote-admin.ts hausservice-baerenstark@outlook.com` aus,
+  **When** das Skript läuft,
+  **Then** wird entweder (a) ein neuer Admin mit dieser Email und Status ACTIVE
+  angelegt, oder (b) ein bestehender User auf ACTIVE gesetzt — je nachdem, ob
+  der User existiert.
+
+- **Given** das Skript erfolgreich durchgelaufen ist,
+  **When** Tom `/admin/login` aufruft und sein Passwort eingibt,
+  **Then** ist er als ACTIVE-Admin eingeloggt.
+
+- **Given** das Skript mit unbekannter Email und leerer Tabelle aufgerufen wird,
+  **When** es einen neuen User anlegt,
+  **Then** wird ein temporäres Passwort generiert und im Terminal ausgegeben.
+
+- **Given** das Skript aufgerufen wird ohne `ALLOW_ADMIN_PROMOTE=true` gesetzt zu
+  sein,
+  **When** es startet,
+  **Then** bricht es sofort mit einem Hinweis ab — kein unbeabsichtigtes
+  Ausführen möglich.
+
+- **Given** mindestens ein ACTIVE-Admin existiert,
+  **When** `/api/admin/setup` aufgerufen wird,
+  **Then** gibt der Endpoint weiterhin 410 GONE zurück (F1-Sicherheitsgarantie
+  bleibt erhalten).
+
+**Hinweis:** Skript `scripts/promote-admin.ts` — Passwort bcrypt-gehashed.
+Nur als lokales CLI-Tool, nie über HTTP-Route erreichbar. ENV-Guard:
+`ALLOW_ADMIN_PROMOTE=true`.
+
+**Priorität:** Must Have — BLOCKER | **Story Points:** 2
+
+---
+
+#### US-IT7-05: Passwort-Reset-Flow End-to-End funktional (Kunden)
+
+> **Abhängig von US-IT7-01.** `POST /api/customer/forgot-password` und
+> `POST /api/customer/reset-password` wurden in IT6 (D3-Fix) gelöscht. Sie
+> werden mit US-IT7-01 wiederhergestellt und müssen als vollständiger
+> E2E-Flow getestet sein.
+
+**Als** Kunde
+**möchte ich** mein Passwort zurücksetzen können,
+**damit** ich wieder Zugang zu meinem Konto erhalte, ohne ein neues Konto
+anlegen zu müssen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/konto/passwort-vergessen` auf und gebe meine Email ein,
+  **When** ich auf „Link anfordern" klicke,
+  **Then** erhalte ich innerhalb von 2 Minuten eine deutschsprachige Email via
+  Resend mit Reset-Link — unabhängig davon, ob ein Account existiert, erscheint
+  dieselbe neutrale Meldung „Falls diese Adresse registriert ist, erhalten Sie
+  eine E-Mail."
+
+- **Given** ich klicke auf den Reset-Link (gültig max. 1 Stunde, single-use),
+  **When** die Seite `/konto/passwort-zuruecksetzen` geladen wird,
+  **Then** sehe ich zwei Felder: „Neues Passwort" und „Passwort bestätigen".
+
+- **Given** ich gebe ein neues Passwort (mind. 8 Zeichen, übereinstimmend) ein,
+  **When** ich auf „Passwort ändern" klicke,
+  **Then** wird das neue Passwort bcrypt-gehashed gespeichert, der Token
+  invalidiert und ich werde zu `/konto/login` mit Erfolgsmeldung weitergeleitet.
+
+- **Given** ich logge mich nach dem Reset mit neuem Passwort ein,
+  **When** ich Email und neues Passwort eingebe,
+  **Then** werde ich zu `/konto` weitergeleitet.
+
+- **Given** ich rufe einen abgelaufenen oder bereits verwendeten Reset-Link auf,
+  **When** die Seite lädt,
+  **Then** sehe ich „Dieser Link ist nicht mehr gültig. Bitte fordern Sie einen
+  neuen Reset-Link an." mit Link zu `/konto/passwort-vergessen`.
+
+- **Given** `POST /api/customer/forgot-password` wird mehr als 5 Mal in
+  15 Minuten von derselben IP aufgerufen,
+  **When** das Limit überschritten wird,
+  **Then** antwortet der Endpoint mit HTTP 429.
+
+**Hinweis:** Token: `crypto.randomBytes(32)` → Base64url → SHA-256-Hash in DB
+gespeichert. Ablauf: 1 Stunde. Nach Nutzung sofort invalidiert. Email-Template
+auf Deutsch. Rate-Limiting via Upstash.
+
+**Priorität:** Must Have | **Story Points:** 3
 
 ---
 

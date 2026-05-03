@@ -67,10 +67,13 @@ model User {
   @@map("users")
 }
 
-/// Kunden-Account (Iteration 4 / US-25, Iteration 5 / US-31).
+/// Kunden-Account (Iteration 4 / US-25, Iteration 5 / US-31, Iteration 7 / US-IT7-01+05).
 /// Vollständig getrennt vom Admin-`User`-Modell.
 ///
 /// IT5 / US-31: passwordHash nullable; oauthProvider/oauthId/avatarUrl neu.
+/// IT7 / US-IT7-01: emailVerifiedAt neu (Audit-Timestamp).
+/// IT7 / US-IT7-05: resetToken/resetTokenExpiry entfernt — Reset-Logik
+///                  in eigene Tabelle `PasswordResetToken` (siehe unten).
 model CustomerUser {
   id                      String    @id @default(cuid())
   email                   String    @unique
@@ -80,12 +83,17 @@ model CustomerUser {
   lastName                String
   phone                   String?
   /// IT5: OAuth-Konten erhalten direkt `emailVerified = true` (Provider-Trust).
+  /// IT7 / US-IT7-01: emailVerified ist KEIN harter Login-Block —
+  /// Customer-Login funktioniert auch mit `emailVerified=false`,
+  /// Frontend zeigt einen Banner.
   emailVerified           Boolean   @default(false)
+  /// IT7 / US-IT7-01: Audit-Timestamp wann die Verifizierung gesetzt wurde.
+  /// NULL solange `emailVerified=false`. Datenbasis für künftige Re-Verify-
+  /// Mechanik.
+  emailVerifiedAt         DateTime?
   verificationToken       String?   @unique
   /// 24h-Ablauf (BUG-401-Fix v1.4.1) — wird bei Resend mit-aktualisiert.
   verificationTokenExpiry DateTime?
-  resetToken              String?   @unique
-  resetTokenExpiry        DateTime?
 
   /// IT5 / US-31 — OAuth2-Verknüpfung. Null = reines E-Mail/Passwort-Konto.
   oauthProvider String?
@@ -104,8 +112,10 @@ model CustomerUser {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  bookings Booking[]
-  reviews  Review[]
+  bookings            Booking[]
+  reviews             Review[]
+  /// IT7 / US-IT7-05 — Backref auf Reset-Token-Records.
+  passwordResetTokens PasswordResetToken[]
 
   @@index([email])
   @@index([oauthProvider, oauthId])
@@ -114,6 +124,31 @@ model CustomerUser {
   // IT6 / US-IT6-07 — Sort-Whitelist `adminRating_desc`.
   @@index([adminRating])
   @@map("customer_users")
+}
+
+/// IT7 / US-IT7-05 — Passwort-Reset-Tokens (Kunden).
+///
+/// Sicherheits-Design:
+///   - `tokenHash` ist der **SHA-256-Hex-Digest** (64 Zeichen) des
+///     Klartext-Tokens. Klartext wird NIEMALS in der DB gespeichert.
+///   - `expiresAt` = `createdAt + 1h`.
+///   - `usedAt` IS NULL → ungenutzt; gesetzt → verbraucht (single-use).
+///   - ON DELETE CASCADE auf customerId — Wipe (US-IT6-06) räumt automatisch ab.
+///
+/// Atomarer Token-Verbrauch in `/api/customer/reset-password` via
+/// Conditional UPDATE (m2-IT7) — siehe ARCHITECTURE_IT7.md §5.3.
+model PasswordResetToken {
+  id         String       @id @default(cuid())
+  customerId String
+  customer   CustomerUser @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// SHA-256 hex digest, 64 chars.
+  tokenHash  String       @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime     @default(now())
+
+  @@index([customerId, expiresAt])
+  @@map("password_reset_tokens")
 }
 
 model Slot {

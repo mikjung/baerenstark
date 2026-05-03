@@ -2025,3 +2025,56 @@ export type AnalyticsResponse = z.infer<typeof AnalyticsResponseSchema>;
 // Im `contracts/zod-schemas.ts` (dieser Datei) wird das Bestandsschema
 // nicht hart erweitert, um IT5-Live-Code nicht zu brechen — Engineers
 // fügen die Codes lokal in ihrer Branch ein.
+
+// ---------------------------------------------------------------------------
+// IT7 — Auth-Stabilisierung & Email-Auth-Wiederherstellung
+// ---------------------------------------------------------------------------
+//
+// Verbindlich: siehe `ARCHITECTURE_IT7.md`.
+//
+// **Wiederverwendete Schemas (KEINE Änderungen nötig — IT7 reaktiviert
+// Schemas aus IT4/§11):**
+//   - `CustomerRegisterSchema`               (POST /api/customer/register)
+//   - `CustomerLoginSchema`                  (POST /api/customer/login)
+//   - `CustomerLoginResponseSchema`          (Response von /login)
+//   - `CustomerForgotPasswordSchema`         (POST /forgot-password)
+//   - `CustomerResetPasswordSchema`          (POST /reset-password)
+//   - `CustomerVerifyTokenQuerySchema`       (GET /verify?token=...)
+//   - `CustomerUserPublicSchema`.strict()    (Response von /me, /login)
+//
+// **DTO-Garantie (F3-Erweiterung in IT7, siehe ARCHITECTURE_IT7.md §6):**
+//
+// `CustomerUserPublicSchema` ist bereits `.strict()` (seit IT6 §17.3).
+// Die folgenden DB-Felder werden durch den Helper
+// `selectCustomerUserPublic()` (`src/lib/dto/user.ts`) **strukturell**
+// aus jedem Customer-Endpoint-Output ferngehalten:
+//
+//   - 'passwordHash'           — Geheimnis (NEU IT7).
+//   - 'verificationToken'      — Klartext-Token (NEU IT7).
+//   - 'verificationTokenExpiry'— internal (NEU IT7).
+//   - 'oauthId'                — Provider-spezifische ID (NEU IT7).
+//   - 'adminNote'              — IT6 §17.3.
+//   - 'adminRating'            — IT6 §17.3.
+//
+// `scripts/check-dto-leaks.ts` muss diese Liste in `FORBIDDEN_FIELDS`
+// pflegen und CI grün halten.
+//
+// **NEUE Fehlercodes IT7 (Engineering-Hinweis für ApiErrorSchema):**
+//
+//   'INVALID_OR_EXPIRED_TOKEN',     // 410 — Verify- oder Reset-Token
+//                                   //       unbekannt, abgelaufen oder
+//                                   //       bereits verwendet.
+//   'EMAIL_ALREADY_REGISTERED',     // 409 — Customer-Register-Konflikt
+//                                   //       (Email existiert).
+//   'OAUTH_ONLY_ACCOUNT',           // 422 — Customer-Login mit Pwd
+//                                   //       gegen Account ohne
+//                                   //       passwordHash. Frontend leitet
+//                                   //       zu OAuth-Buttons.
+//   'ALREADY_VERIFIED',             // 409 — resend-verification gegen
+//                                   //       Account mit emailVerified=true.
+//   'RATE_LIMITED',                 // 429 — alle Auth-Endpoints.
+//
+// **Erinnerung: IT6 §17.3 + IT7 §6 → bei Customer-Pfaden IMMER**
+//   1. `selectCustomerUserPublic()` als Prisma-`select`,
+//   2. Mapper `toCustomerPublic()` (in `src/lib/customer-auth-server.ts`),
+//   3. `CustomerUserPublicSchema.parse()` als Output-Validierung.

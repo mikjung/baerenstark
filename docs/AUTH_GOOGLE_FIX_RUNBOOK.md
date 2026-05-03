@@ -1,87 +1,105 @@
-# Google-OAuth-„Bad request"-Fix — Runbook (US-IT6-05)
+# Auth-Diagnose & Google/Facebook-OAuth-Fix — Runbook (US-IT7-02 + US-IT7-03)
 
-**Status:** Iteration 6, 2026-05-03
-**Verantwortlich:** Tom Siefert (Eigentümer der Google Cloud Console),
-unterstützt vom Backend-Engineer.
+**Status:** Iteration 7, 2026-05-03
+**Verantwortlich:** Tom Siefert (Eigentümer der Google Cloud Console und der
+Meta-Developer-App), unterstützt vom Backend-Engineer.
 
-## Symptom
+> **Iteration 7 Update:** Es gibt jetzt einen Self-Service-Diagnose-Endpoint
+> `GET /api/auth/diagnose`. Der zeigt dir live, welche ENV-Vars gesetzt sind,
+> welche Provider aktiv sind, und welche Callback-URLs Google/Facebook
+> erwarten. Nutze diesen Endpoint **als Erstes**, bevor du etwas in der
+> Cloud-Console anfasst.
 
-Beim Klick auf „Mit Google anmelden" auf `/konto/login` erscheint die
-Fehlermeldung „Bad request" — kein Login möglich.
+## TOP-5-Checkliste — vor jeder Fehlerdiagnose
 
-## Häufigste Ursachen (nach Wahrscheinlichkeit sortiert)
+Öffne `/api/auth/diagnose` (lokal: `http://localhost:3000/api/auth/diagnose`,
+in Vercel-Preview: `https://<preview-url>/api/auth/diagnose`). In Produktion
+ist der Endpoint per Default 404; um ihn dort temporär zu aktivieren, setze
+`AUTH_DIAGNOSE_ENABLED=true` in den Vercel-ENV-Vars (und entferne den Wert
+nach der Diagnose wieder).
 
-1. **Authorized Redirect URI in Google Cloud Console stimmt nicht mit
-   der `NEXTAUTH_URL`-Env überein.** (Häufigster Fall.)
-2. `NEXTAUTH_URL` enthält Trailing-Slash oder fehlerhaftes Schema.
-3. OAuth-Consent-Screen ist im „Testing"-Mode und Tom hat seine Test-User
-   nicht freigeschaltet.
-4. OAuth-Client-ID gehört zu einer anderen GCP-Projekt-Domain.
+Aus dem JSON-Output prüfe in dieser Reihenfolge:
 
-## Fix-Schritte
+1. **`env.NEXTAUTH_URL`** — exakte Produktions-URL ohne Trailing-Slash.
+   - Lokal: `http://localhost:3000`
+   - Prod:  `https://www.baerenstark-hausservice.app`
+   - **Häufigster Fehler:** Trailing-Slash (`https://...app/`) oder fehlendes
+     `https://`. Beides bricht den OAuth-Callback.
 
-### 1. NEXTAUTH_URL prüfen
+2. **`secret_source`** — welche ENV-Var liefert das NextAuth-Secret?
+   - `"AUTH_SECRET"` → korrekt (Pflicht-Name in NextAuth v5).
+   - `"NEXTAUTH_SECRET (alias)"` → funktioniert (Read-Compat-Alias), aber
+     setze besser `AUTH_SECRET` direkt.
+   - `null` → **DEFEKT.** Kein Secret gesetzt; Login crasht. 32+ Zeichen
+     Pflicht. Generiere via `openssl rand -base64 32`.
 
-Lokale Entwicklung:
+3. **`env.AUTH_TRUST_HOST`** — auf Vercel/Tunnel-Build muss `"true"` stehen.
+   - Ohne diesen Wert wirft NextAuth v5 in Prod „Bad request" durch
+     Host-Verifikation.
 
-```
-NEXTAUTH_URL="http://localhost:3000"
-```
+4. **`expectedCallbacks.googleC`** und **`.facebook`** — kopiere DIESE
+   exakten Strings in die Cloud-Console deiner App:
+   - **Google Cloud Console:** Credentials → OAuth 2.0 Client → Authorized
+     Redirect URIs. Müssen **EXAKT** so eingetragen sein (Komma-separiert,
+     einer pro Zeile).
+   - **Meta Developer Portal:** Facebook Login → Einstellungen → Valid
+     OAuth Redirect URIs. Gleiches Prinzip.
 
-Produktion:
+5. **`providersActive.google` / `.facebook`** — ist der Provider überhaupt
+   aktiv?
+   - Wenn `false`, fehlen `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`
+     bzw. `FACEBOOK_CLIENT_ID`/`FACEBOOK_CLIENT_SECRET` in ENV.
 
-```
-NEXTAUTH_URL="https://www.baerenstark-hausservice.app"
-```
+## Häufige Fehler
 
-**Verbindlich:** Kein Trailing-Slash. Kein `http://` in Produktion.
+| Symptom | Wahrscheinliche Ursache | Fix |
+|---------|------------------------|-----|
+| „Bad request" | NEXTAUTH_URL hat Trailing-Slash | Slash entfernen, redeploy. |
+| `redirect_uri_mismatch` | Cloud-Console Redirect-URI ≠ `expectedCallbacks` aus diagnose | Eintrag in Console exakt anpassen. |
+| `invalid_client` | Falsche Client-ID/Secret oder anderes GCP-Projekt | Aus richtigem Projekt neu kopieren. |
+| Google-Login klappt nur mit Toms Mail | OAuth Consent Screen ist „Testing" und Tom nicht als Test-User eingetragen | Test-User hinzufügen ODER Status auf „In production" setzen. |
+| Facebook-Login funktioniert lokal, in Prod nicht | App im „Development"-Mode | Im Meta Developer Portal auf „Live" schalten. |
+| Facebook-User ohne Email | Privacy-Setting blockiert email-Scope | Frontend zeigt Fehler `?error=oauth_no_email` mit Link auf E-Mail-Registrierung. |
 
-### 2. Authorized Redirect URI in Google Cloud Console
+## Konkrete Schritte für Tom
 
-1. Öffne https://console.cloud.google.com/apis/credentials
-2. Wähle dein OAuth 2.0 Client-ID-Eintrag aus.
-3. Unter **„Authorized redirect URIs"** **EXAKT** folgendes eintragen
-   (Komma-separiert, einer pro Zeile):
+### Google Cloud Console
 
-```
-http://localhost:3000/api/auth/customer/callback/google
-https://www.baerenstark-hausservice.app/api/auth/customer/callback/google
-```
+1. https://console.cloud.google.com/apis/credentials → richtiges Projekt wählen.
+2. OAuth 2.0 Client-ID auswählen.
+3. **Authorized Redirect URIs** — füge **exakt** ein, was `/api/auth/diagnose`
+   unter `expectedCallbacks.googleC` zeigt. Sowohl der Localhost- als auch
+   der Prod-Wert:
 
-> **Hinweis:** Die exakte Pfad-Struktur ist `/api/auth/customer/callback/google`
-> (nicht `/api/auth/callback/google`) — der Customer-NextAuth-Handler
-> liegt unter `/api/auth/customer/[...nextauth]`. Falls du eine andere
-> Schreibweise siehst, ist das ein Tippfehler.
+   ```
+   http://localhost:3000/api/auth/customer/callback/google
+   https://www.baerenstark-hausservice.app/api/auth/customer/callback/google
+   ```
 
-4. „Save" klicken.
+4. **Save** klicken.
+5. **OAuth Consent Screen** prüfen:
+   - https://console.cloud.google.com/apis/credentials/consent
+   - Status: „In production" (oder Tom + Engineering als Test-User
+     eingetragen, falls noch „Testing").
+   - Scopes: `email`, `profile`, `openid`. Kein App Review nötig.
 
-### 3. OAuth Consent Screen
+### Meta Developer Portal (Facebook)
 
-1. https://console.cloud.google.com/apis/credentials/consent
-2. Scopes: `email`, `profile`, `openid`.
-3. Wenn der App-Status „Testing" ist:
-   - Tom + alle Engineering-E-Mails als Test-User hinzufügen.
-   - Ohne diesen Schritt schlägt der Login mit „Bad request" fehl,
-     wenn der User nicht in der Test-Liste steht.
-4. Vor Go-Live: App-Status auf „In production" stellen (Google-Review
-   nicht erforderlich, solange Scopes auf `email/profile/openid` begrenzt
-   bleiben).
+1. https://developers.facebook.com/apps → App auswählen.
+2. **Facebook Login → Einstellungen → Valid OAuth Redirect URIs:**
 
-### 4. Verbindliche Backend-Konfiguration (bereits umgesetzt)
+   ```
+   https://www.baerenstark-hausservice.app/api/auth/customer/callback/facebook
+   ```
 
-In `src/lib/customer-oauth.ts`:
+3. **App-Domain** eintragen: `www.baerenstark-hausservice.app`.
+4. **App-Status:** „Live" (nicht „Development"). App Review ist bei
+   `email` + `public_profile` nicht erforderlich.
+5. **Privacy Policy URL** setzen (Meta-Pflicht für Live-Mode).
+6. App-ID und App-Secret aus „Einstellungen → Allgemeines" an Engineer
+   übergeben für ENV (`FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET`).
 
-```ts
-GoogleProvider({
-  clientId: process.env.GOOGLE_CLIENT_ID,
-  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  authorization: { params: { scope: 'openid email profile' } },
-});
-```
-
-Plus `trustHost: true` (NextAuth v5).
-
-### 5. Verifikations-Test
+## Verifikations-Test
 
 Nach Konfig-Änderung:
 
@@ -94,9 +112,9 @@ Nach Konfig-Änderung:
 Wenn der Fehler weiterhin auftritt, in der Browser-DevTools-Console und
 im Server-Log die genaue Fehlermeldung suchen:
 
-- `redirect_uri_mismatch` → Schritt 2 falsch.
-- `invalid_client` → `GOOGLE_CLIENT_SECRET` falsch oder Client-ID
-  veraltet.
+- `redirect_uri_mismatch` → TOP-5 Schritt 4 falsch.
+- `invalid_client` → `GOOGLE_CLIENT_SECRET` / `FACEBOOK_CLIENT_SECRET`
+  falsch oder Client-ID veraltet.
 - `access_denied` → User hat im Consent-Screen abgelehnt; kein Bug.
 
 ---
@@ -127,21 +145,7 @@ Stripe-Customer-Records manuell archivieren oder löschen.
    - „Delete customer" oder „Archive" klicken.
 4. Wiederholen für jede Session-ID.
 
-> Ein automatischer Stripe-Delete-Hook wäre IT7-Backlog (rechtliche
+> Ein automatischer Stripe-Delete-Hook wäre IT8-Backlog (rechtliche
 > Klarstellung mit Steuerberater nötig: Stripe-Records dürfen für
 > Buchhaltungszwecke aufbewahrt werden — manueller Schritt ist die
 > sichere Default-Option).
-
----
-
-## Facebook-OAuth (US-IT6-05)
-
-Facebook erfordert eine **verifizierte App-Domain**:
-
-- **Localhost-Login funktioniert nur, wenn die App im „Development"-
-  Mode ist.** Für Produktion muss die App auf „Live" geschaltet sein.
-- Authorized Redirect URI: `https://www.baerenstark-hausservice.app/api/auth/customer/callback/facebook`
-- ENV-Vars: `FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET`.
-
-Tom liefert Client-ID/Secret aus dem Meta Developer Portal
-(https://developers.facebook.com/apps).

@@ -2,10 +2,8 @@
  * Setzt das Admin-Passwort zurück.
  * Aufruf: npx tsx scripts/reset-admin-password.ts <neues-passwort>
  */
-import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-
-const db = new PrismaClient();
+import { prisma as db } from '../src/lib/prisma';
 
 async function main() {
   const newPassword = process.argv[2];

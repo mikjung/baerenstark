@@ -1,12 +1,20 @@
 /**
  * NextAuth-Customer-Konfiguration für OAuth2-Login.
  *
- * Iteration 6 (US-IT6-05) — Auth-Bereinigung:
- *   Provider auf **Google + Facebook** reduziert. GitHub-Provider
- *   entfernt. Credentials/Email-Magic-Link existieren nicht mehr für
- *   Kunden — die Endpoints `/api/customer/{login,register,
- *   forgot-password,reset-password,resend-verification,verify}` wurden
- *   in IT6 (D3-Resolution) **entfernt** und liefern jetzt 404.
+ * Iteration 7 (US-IT7-01) — Email-Auth-Reaktivierung:
+ *   Customer-Login funktioniert ab IT7 wieder per Email/Passwort,
+ *   Google ODER Facebook. Die klassischen Customer-Endpoints
+ *   (`/api/customer/{register,login,forgot-password,reset-password,
+ *   verify,resend-verification}`) sind **wiederhergestellt**.
+ *   Der eigentliche Email/Passwort-Login läuft über
+ *   `POST /api/customer/login` (klassisch — setzt das langlebige
+ *   `customer-session`-Cookie direkt). Der zusätzlich registrierte
+ *   `Credentials`-Provider hier ist als alternative NextAuth-Brücke
+ *   gedacht; `POST /api/customer/login` bleibt der primäre Pfad.
+ *
+ * Iteration 6 (US-IT6-05) — Auth-Bereinigung (historisch):
+ *   Provider auf Google + Facebook reduziert. GitHub-Provider entfernt.
+ *   IT7 fügt den Credentials-Provider zurück, parallel zu OAuth.
  *
  * Diese Instanz läuft separat vom Admin-NextAuth (siehe `lib/auth.ts`).
  *
@@ -39,15 +47,23 @@
 import NextAuth from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
 import FacebookProvider from 'next-auth/providers/facebook';
+import Credentials from 'next-auth/providers/credentials';
+import bcrypt from 'bcryptjs';
 import type { NextAuthConfig } from 'next-auth';
 import { prisma } from './prisma';
 import {
   CUSTOMER_OAUTH_PROVIDERS,
+  CustomerLoginSchema,
   OAuthProfileNormalizedSchema,
   type CustomerOAuthProvider,
   type OAuthProfileNormalized,
 } from './schemas';
 import { customerBaseUrl } from './baseUrl';
+
+// Konstanter Bcrypt-Hash für Timing-Side-Channel-Schutz, wenn der User
+// nicht existiert. Der Hash darf nicht matchen — es geht nur um konstante Last.
+const DUMMY_BCRYPT_HASH =
+  '$2a$10$CwTycUXWue0Thq9StjUM0uJ8j.zk8aYPX8Z5OTUyIzKb8C5nrYgtq';
 
 // ---------------------------------------------------------------------------
 // Feature-Flag
@@ -270,6 +286,52 @@ export async function handleCustomerOAuthSignIn(
 
 function buildProviders(): NextAuthConfig['providers'] {
   const providers: NextAuthConfig['providers'] = [];
+
+  // IT7 / US-IT7-01 — Customer-Credentials-Provider zurück (parallel zu OAuth).
+  // Der primäre Customer-Login läuft weiter über den klassischen Endpoint
+  // `POST /api/customer/login` (setzt direkt das langlebige Cookie). Dieser
+  // Credentials-Provider hier ist nur als alternative NextAuth-Brücke
+  // konfiguriert, falls künftig die Finalize-Route auch Credentials-Logins
+  // verarbeiten soll. `POST /api/customer/login` bleibt der Quellort der
+  // Wahrheit und führt sein eigenes Rate-Limiting + Cookie-Handling aus.
+  providers.push(
+    Credentials({
+      name: 'CustomerCredentials',
+      credentials: {
+        email: { label: 'E-Mail', type: 'email' },
+        password: { label: 'Passwort', type: 'password' },
+      },
+      async authorize(creds) {
+        const parsed = CustomerLoginSchema.safeParse(creds);
+        if (!parsed.success) return null;
+        const lc = parsed.data.email.toLowerCase();
+
+        const user = await prisma.customerUser.findUnique({
+          where: { email: lc },
+          select: {
+            id: true,
+            email: true,
+            passwordHash: true,
+          },
+        });
+        if (!user || !user.passwordHash) {
+          // Konstante bcrypt-Last (Timing-Side-Channel-Schutz).
+          await bcrypt.compare(parsed.data.password, DUMMY_BCRYPT_HASH);
+          return null;
+        }
+        const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
+        if (!ok) return null;
+        // F3-Schutz: NUR die nicht-sensiblen Felder ins Auth-Token reichen.
+        // passwordHash, verificationToken etc. werden NIE durchgeschleust.
+        return {
+          id: user.id,
+          email: user.email,
+          customerId: user.id,
+        };
+      },
+    }),
+  );
+
   // Iteration 6 (US-IT6-05): Google + Facebook only. GitHub-Provider raus.
   if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     providers.push(
@@ -307,9 +369,17 @@ const customerOauthConfig: NextAuthConfig = {
   },
   trustHost: true,
   secret: process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
+  // IT7 / US-IT7-02: Debug-Mode in Dev — detaillierte NextAuth-Logs.
+  debug: process.env.NODE_ENV === 'development',
   callbacks: {
     async signIn({ account, profile }) {
-      if (!account || !profile) return false;
+      if (!account) return false;
+      // IT7 / US-IT7-01 — Credentials-Provider signiert via authorize();
+      // signIn ist hier transparent (no-op).
+      if (account.provider === 'credentials') {
+        return true;
+      }
+      if (!profile) return false;
       if (!CUSTOMER_OAUTH_PROVIDERS.includes(account.provider as CustomerOAuthProvider)) {
         return '/konto/login?error=oauth_error';
       }
@@ -333,7 +403,15 @@ const customerOauthConfig: NextAuthConfig = {
       }
       return true;
     },
-    async jwt({ token, account, profile }) {
+    async jwt({ token, account, profile, user }) {
+      // IT7 / US-IT7-01 — Credentials-Pfad: authorize() liefert {id,email,customerId}.
+      if (account?.provider === 'credentials' && user) {
+        token.customerId = (user as { customerId?: string; id: string }).customerId
+          ?? (user as { id: string }).id;
+        token.customerEmail = (user as { email?: string }).email ?? token.email;
+        token.exp = Math.floor(Date.now() / 1000) + 60;
+        return token;
+      }
       if (account && profile) {
         const provider = account.provider as CustomerOAuthProvider;
         const normalized = normalizeProfile(provider, profile, {

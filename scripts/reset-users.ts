@@ -53,9 +53,7 @@
  *     NODE_ENV=production npx tsx scripts/reset-users.ts
  */
 
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prisma } from '../src/lib/prisma';
 
 interface WipeSummary {
   customerUsersDeleted: number;

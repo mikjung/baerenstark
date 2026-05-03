@@ -31,6 +31,11 @@ const DUMMY_BCRYPT_HASH =
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
+  // IT7 / US-IT7-02: detaillierte NextAuth-Logs in Dev für Diagnose.
+  debug: process.env.NODE_ENV === 'development',
+  // IT7 / US-IT7-02: AUTH_SECRET ist Pflicht-Name in NextAuth v5;
+  // NEXTAUTH_SECRET bleibt als Read-Compat-Alias gültig (siehe diagnose).
+  secret: process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
   providers: [
     Credentials({
       name: 'Credentials',

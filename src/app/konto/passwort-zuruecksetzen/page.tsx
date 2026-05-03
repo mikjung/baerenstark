@@ -1,16 +1,40 @@
 /**
- * /konto/passwort-zuruecksetzen — Iteration 6 / US-IT6-05.
+ * /konto/passwort-zuruecksetzen — Iteration 7 / US-IT7-05.
  *
- * E-Mail/Passwort-Anmeldung wurde entfernt. Diese Seite leitet auf
- * `/konto/login` um.
+ * Reaktiviert nach IT6-D3-Reversion. Liest `?token=...` aus der URL und
+ * verarbeitet den Reset über `POST /api/customer/reset-password`.
  */
 
-import { redirect } from 'next/navigation';
+import type { Metadata } from 'next';
+import { Suspense } from 'react';
+import { AuthCardShell } from '@/components/customer/AuthCardShell';
+import { ResetPasswordForm } from '@/components/customer/ResetPasswordForm';
 
-export const metadata = {
+export const metadata: Metadata = {
+  title: 'Neues Passwort setzen',
+  description: 'Wähle ein neues Passwort für dein Bärenstark-Konto.',
   robots: { index: false, follow: false },
 };
 
-export default function ResetRedirect() {
-  redirect('/konto/login');
+export default function ResetPasswordPage() {
+  return (
+    <AuthCardShell
+      title="Neues Passwort setzen"
+      subtitle="Wähle ein sicheres Passwort für dein Konto."
+    >
+      <Suspense
+        fallback={
+          <div
+            role="status"
+            aria-live="polite"
+            className="text-sm text-baerenstark-bark/70"
+          >
+            Lade …
+          </div>
+        }
+      >
+        <ResetPasswordForm />
+      </Suspense>
+    </AuthCardShell>
+  );
 }

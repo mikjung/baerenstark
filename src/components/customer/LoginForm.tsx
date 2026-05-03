@@ -1,95 +1,250 @@
 'use client';
 
 /**
- * LoginForm — Iteration 6 / US-IT6-05.
+ * LoginForm — Iteration 7 / US-IT7-01.
  *
- * Email/Password und GitHub-Provider sind komplett entfernt. Es gibt
- * ausschließlich zwei OAuth-Buttons: Google und Facebook.
+ * Email/Password-Form ist wieder primär (oben), darunter folgen die beiden
+ * OAuth-Buttons (Google, Facebook). OAuth bleibt als Convenience-Methode
+ * parallel verfügbar.
  *
- * Die Komponente liest `?error=`-Parameter aus dem Customer-NextAuth-Flow
- * und zeigt freundliche, deutschsprachige Fehlermeldungen.
+ * Layout:
+ *   1. Email-Form (Standard).
+ *   2. Divider „oder".
+ *   3. Google-Button.
+ *   4. Facebook-Button.
+ *   5. Footer: „Passwort vergessen?" + „Noch kein Konto? Registrieren".
+ *
+ * Fehler-Handling:
+ *   - `?error=…` Query-Param aus dem OAuth-Flow → deutscher Banner oben.
+ *   - `?reset=success` → Erfolgs-Banner nach erfolgreichem Reset.
+ *   - `INVALID_CREDENTIALS` (401) → „E-Mail oder Passwort ungültig" — kein
+ *     Hint, welches Feld falsch ist (Email-Enumeration-Schutz).
+ *   - `OAUTH_ONLY_ACCOUNT` (422) → Hinweis, OAuth zu nutzen.
+ *   - `RATE_LIMITED` (429) → freundliche Meldung.
  */
 
-import { useSearchParams } from 'next/navigation';
+import { zodResolver } from '@hookform/resolvers/zod';
+import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useState } from 'react';
+import { useForm } from 'react-hook-form';
 import { Banner } from '@/components/ui/Banner';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import {
+  ApiClientError,
+  loginCustomer,
+} from '@/lib/api-client';
+import {
+  CustomerLoginSchema,
+  type CustomerLoginInput,
+} from '@/lib/schemas';
 
 type Provider = 'google' | 'facebook';
 
 const CUSTOMER_AUTH_BASE_PATH = '/api/auth/customer';
 
-function mapErrorMessage(code: string | null): string | null {
+function mapOAuthErrorMessage(code: string | null): string | null {
   if (!code) return null;
   switch (code) {
     case 'oauth_no_email':
-      return 'Dein Anbieter hat keine E-Mail-Adresse übermittelt. Bitte erlaube den E-Mail-Zugriff bei Google oder Facebook und versuche es erneut.';
+      return 'Mit deinem Konto ist keine E-Mail-Adresse verknüpft. Bitte registriere dich per E-Mail und Passwort.';
     case 'oauth_unverified_conflict':
-      return 'Es existiert bereits ein Konto mit dieser E-Mail-Adresse. Bitte melde dich mit dem ursprünglichen Anbieter an.';
+      return 'Es existiert bereits ein Konto mit dieser E-Mail-Adresse. Bitte melde dich mit dem ursprünglichen Anbieter an oder setze dein Passwort über „Passwort vergessen?" zurück.';
     case 'oauth_unverified':
       return 'Dein Anbieter-Konto hat keine bestätigte E-Mail-Adresse.';
     case 'oauth_finalize_failed':
       return 'Die Anmeldung konnte nicht abgeschlossen werden. Bitte versuche es erneut.';
     case 'oauth_error':
       return 'Die Anmeldung wurde abgebrochen oder ist fehlgeschlagen. Bitte erneut versuchen.';
-    case 'legacy_credentials':
-      return 'Die E-Mail/Passwort-Anmeldung ist nicht mehr verfügbar. Bitte melde dich mit Google oder Facebook unter derselben E-Mail-Adresse an.';
+    case 'session_expired':
+      return 'Deine Sitzung ist abgelaufen. Bitte erneut anmelden.';
     default:
       return null;
   }
 }
 
-export function LoginForm() {
-  const searchParams = useSearchParams();
-  const errorQuery = searchParams.get('error');
-  const errorMessage = mapErrorMessage(errorQuery);
-  const [pending, setPending] = useState<Provider | null>(null);
+function mapApiErrorMessage(err: ApiClientError): string {
+  switch (err.code) {
+    case 'INVALID_CREDENTIALS':
+    case 'UNAUTHORIZED':
+      return 'E-Mail oder Passwort ungültig.';
+    case 'OAUTH_ONLY_ACCOUNT':
+      return 'Dieses Konto wurde mit Google oder Facebook angelegt. Bitte melde dich über einen der OAuth-Buttons unten an oder setze dein Passwort über „Passwort vergessen?".';
+    case 'RATE_LIMITED':
+      return 'Zu viele Anmelde-Versuche. Bitte später erneut versuchen.';
+    case 'VALIDATION_ERROR':
+      return err.message || 'Bitte E-Mail-Adresse und Passwort prüfen.';
+    case 'NETWORK_ERROR':
+      return 'Verbindung zum Server fehlgeschlagen. Bitte Internetverbindung prüfen.';
+    default:
+      return 'Anmeldung fehlgeschlagen. Bitte später erneut versuchen.';
+  }
+}
 
-  const handleClick = (provider: Provider) => {
-    setPending(provider);
+export function LoginForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const oauthErrorMessage = mapOAuthErrorMessage(searchParams.get('error'));
+  const resetSuccess = searchParams.get('reset') === 'success';
+  const verifySuccess = searchParams.get('verified') === '1';
+
+  const callbackUrlRaw = searchParams.get('callbackUrl') ?? '/konto';
+  // Defensiv: nur same-origin (relative Pfade) zulassen, kein offenes Redirect.
+  const callbackUrl = callbackUrlRaw.startsWith('/') ? callbackUrlRaw : '/konto';
+
+  const [pendingProvider, setPendingProvider] = useState<Provider | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<CustomerLoginInput>({
+    resolver: zodResolver(CustomerLoginSchema),
+    mode: 'onBlur',
+  });
+
+  const onSubmit = handleSubmit(async (values) => {
+    setServerError(null);
+    setSubmitting(true);
+    try {
+      const result = await loginCustomer({
+        email: values.email,
+        password: values.password,
+        redirectUrl: callbackUrl,
+      });
+      // Backend hat das Session-Cookie gesetzt → weiter zum Ziel.
+      const target =
+        result.redirectUrl && result.redirectUrl.startsWith('/')
+          ? result.redirectUrl
+          : '/konto';
+      router.replace(target);
+      router.refresh();
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        setServerError(mapApiErrorMessage(err));
+      } else {
+        setServerError('Anmeldung fehlgeschlagen. Bitte erneut versuchen.');
+      }
+      setSubmitting(false);
+    }
+  });
+
+  const handleOAuthClick = (provider: Provider) => {
+    setPendingProvider(provider);
     window.location.href = `${CUSTOMER_AUTH_BASE_PATH}/${provider}`;
   };
 
   return (
     <div className="space-y-5">
-      {errorMessage && (
+      {oauthErrorMessage && (
         <Banner tone="error" title="Anmeldung fehlgeschlagen" role="alert">
-          {errorMessage}
+          {oauthErrorMessage}
         </Banner>
       )}
+
+      {resetSuccess && (
+        <Banner tone="success" role="status">
+          Passwort erfolgreich geändert. Bitte melde dich mit dem neuen Passwort an.
+        </Banner>
+      )}
+
+      {verifySuccess && (
+        <Banner tone="success" role="status">
+          E-Mail bestätigt. Du kannst dich jetzt einloggen.
+        </Banner>
+      )}
+
+      <form onSubmit={onSubmit} noValidate className="space-y-4">
+        <Input
+          label="E-Mail"
+          type="email"
+          autoComplete="email"
+          required
+          error={errors.email?.message}
+          {...register('email')}
+        />
+        <Input
+          label="Passwort"
+          type="password"
+          autoComplete="current-password"
+          required
+          error={errors.password?.message}
+          {...register('password')}
+        />
+
+        {serverError && (
+          <Banner tone="error" role="alert">
+            {serverError}
+          </Banner>
+        )}
+
+        <Button type="submit" isLoading={submitting} className="w-full">
+          Einloggen
+        </Button>
+
+        <p className="text-center text-sm">
+          <Link
+            href="/konto/passwort-vergessen"
+            className="text-baerenstark-wood underline-offset-2 hover:underline"
+          >
+            Passwort vergessen?
+          </Link>
+        </p>
+      </form>
+
+      <div className="relative my-2" aria-hidden="true">
+        <div className="absolute inset-0 flex items-center">
+          <div className="w-full border-t border-baerenstark-sand" />
+        </div>
+        <div className="relative flex justify-center text-xs">
+          <span className="bg-white px-2 text-baerenstark-bark/60">oder</span>
+        </div>
+      </div>
 
       <div className="space-y-3">
         <button
           type="button"
-          onClick={() => handleClick('google')}
-          disabled={pending !== null}
-          aria-label="Mit Google fortfahren"
+          onClick={() => handleOAuthClick('google')}
+          disabled={pendingProvider !== null || submitting}
+          aria-label="Mit Google anmelden"
           className="flex w-full items-center justify-center gap-3 rounded-lg border border-baerenstark-sand bg-white px-4 py-3 text-sm font-medium text-baerenstark-bark hover:bg-baerenstark-cream/50 transition disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent"
         >
           <GoogleIcon />
           <span>
-            {pending === 'google' ? 'Wird umgeleitet …' : 'Mit Google fortfahren'}
+            {pendingProvider === 'google'
+              ? 'Wird umgeleitet …'
+              : 'Mit Google anmelden'}
           </span>
         </button>
 
         <button
           type="button"
-          onClick={() => handleClick('facebook')}
-          disabled={pending !== null}
-          aria-label="Mit Facebook fortfahren"
+          onClick={() => handleOAuthClick('facebook')}
+          disabled={pendingProvider !== null || submitting}
+          aria-label="Mit Facebook anmelden"
           className="flex w-full items-center justify-center gap-3 rounded-lg border border-transparent bg-[#1877F2] px-4 py-3 text-sm font-medium text-white hover:bg-[#155EBF] transition disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent"
         >
           <FacebookIcon />
           <span>
-            {pending === 'facebook' ? 'Wird umgeleitet …' : 'Mit Facebook fortfahren'}
+            {pendingProvider === 'facebook'
+              ? 'Wird umgeleitet …'
+              : 'Mit Facebook anmelden'}
           </span>
         </button>
       </div>
 
-      <p className="rounded-md border border-baerenstark-sand bg-baerenstark-cream/50 p-3 text-xs leading-relaxed text-baerenstark-bark/80">
-        Eine Anmeldung mit E-Mail und Passwort ist nicht mehr möglich. Falls
-        du früher einen Account hattest, melde dich bitte mit Google oder
-        Facebook unter derselben E-Mail-Adresse an — bestehende Buchungen
-        werden automatisch verknüpft.
+      <p className="text-center text-sm text-baerenstark-bark/80">
+        Noch kein Konto?{' '}
+        <Link
+          href="/konto/registrieren"
+          className="font-medium text-baerenstark-wood underline-offset-2 hover:underline"
+        >
+          Jetzt registrieren
+        </Link>
       </p>
     </div>
   );

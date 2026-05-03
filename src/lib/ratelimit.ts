@@ -96,6 +96,32 @@ export const customerResetLimiter = makeLimiter(60 * 60, 5, 'rl:cust-reset');
 // 5 Reviews / 60 min / Customer (per customerId).
 export const customerReviewLimiter = makeLimiter(60 * 60, 5, 'rl:cust-review');
 
+// ---------------------------------------------------------------------------
+// Iteration 7 — Email-Auth-Reaktivierung (US-IT7-01, US-IT7-05)
+// Siehe ARCHITECTURE_IT7.md §8 + api-routes.md §23.5.
+// ---------------------------------------------------------------------------
+
+// 3 Registrierungen / 60 min / Email (per LC-Email).
+export const customerRegisterEmailLimiter = makeLimiter(60 * 60, 3, 'rl:cust-reg-email');
+
+// 5 Login-Versuche / 60 min / Email (Credential-Stuffing-Schutz).
+export const customerLoginEmailLimiter = makeLimiter(60 * 60, 5, 'rl:cust-login-email');
+
+// 3 Forgot-Password / 15 min / IP.
+export const forgotPasswordIpLimiter = makeLimiter(15 * 60, 3, 'rl:forgot-ip');
+
+// 3 Forgot-Password / 60 min / Email.
+export const forgotPasswordEmailLimiter = makeLimiter(60 * 60, 3, 'rl:forgot-email');
+
+// 5 Reset-Password / 60 min / IP.
+export const resetPasswordIpLimiter = makeLimiter(60 * 60, 5, 'rl:reset-ip');
+
+// 30 Verify-Token-Aufrufe / 60 min / IP (Token-Brute-Force-Schutz).
+export const verifyTokenLimiter = makeLimiter(60 * 60, 30, 'rl:verify-token');
+
+// 3 Resend-Verification / 60 min / Email.
+export const verifyResendLimiter = makeLimiter(60 * 60, 3, 'rl:verify-resend');
+
 // 20 Stripe-Session-Erstellungen / 60 min / IP.
 export const paymentSessionLimiter = makeLimiter(60 * 60, 20, 'rl:pay-session');
 

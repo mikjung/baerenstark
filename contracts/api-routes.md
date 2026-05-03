@@ -3398,3 +3398,228 @@ Review aus `GET /api/reviews` (siehe §22.3-Filter).
 | `GET /api/admin/analytics`            | 30 / Minute / Admin-Session.                                            |
 | `POST /api/customer/reviews`          | 5 / Stunde / Customer-Session (Spam-Schutz).                            |
 
+---
+
+## 23. Iteration 7 — Auth-Stabilisierung & Email-Auth-Reversion (US-IT7-01 bis US-IT7-05)
+
+> **Quelle der Wahrheit:** `ARCHITECTURE_IT7.md`. Dieses Kapitel listet die
+> verbindlichen HTTP-Verträge. F1/F2/F3 aus IT6 §17 bleiben unangetastet —
+> `/api/admin/setup` antwortet weiter mit 410 GONE, sobald `count(users) >= 1`.
+>
+> **Reversion:** Die in IT6 (D3-Fix) gelöschten Customer-Auth-Endpoints
+> werden vollständig wieder implementiert (kein 404, kein 410 mehr).
+> NextAuth v5 bekommt zusätzlich zum Google- und Facebook-Provider einen
+> `Credentials`-Provider für Customer-Email/Password-Login.
+
+### 23.1 Diagnose-Endpoint (Dev-only, US-IT7-02 + US-IT7-03)
+
+#### `GET /api/auth/diagnose`
+
+- **Story:** US-IT7-02, US-IT7-03 (Self-Service-Diagnose).
+- **Auth:** keine. Antwortet **nur**, wenn `NODE_ENV !== 'production'`.
+  In Prod liefert er 404 (Next.js `notFound()`).
+- **Response 200 (Dev):**
+  ```json
+  {
+    "env": {
+      "NODE_ENV": "development",
+      "NEXTAUTH_URL": "http://localhost:3000",
+      "AUTH_SECRET_set": true,
+      "NEXTAUTH_SECRET_set": true,
+      "AUTH_TRUST_HOST": "true",
+      "GOOGLE_CLIENT_ID_set": true,
+      "GOOGLE_CLIENT_SECRET_set": true,
+      "FACEBOOK_CLIENT_ID_set": false,
+      "FACEBOOK_CLIENT_SECRET_set": false,
+      "FEATURE_OAUTH_LOGIN": null,
+      "RESEND_API_KEY_set": true
+    },
+    "providersActive": {
+      "google": true,
+      "facebook": false,
+      "credentialsCustomer": true,
+      "credentialsAdmin": true
+    },
+    "expectedCallbacks": {
+      "admin":    "http://localhost:3000/api/auth/callback/credentials",
+      "googleC":  "http://localhost:3000/api/auth/customer/callback/google",
+      "facebook": "http://localhost:3000/api/auth/customer/callback/facebook"
+    },
+    "notes": ["…"]
+  }
+  ```
+- **Sicherheit:** Endpoint gibt **niemals** Secrets im Klartext zurück —
+  ausschließlich Bool-Flags (Var ist gesetzt / nicht gesetzt). In Prod
+  ist er nicht erreichbar (404).
+- **Story-Verknüpfung:** liefert Tom Self-Service-Sicht, ohne dass er
+  in den Code schauen muss.
+
+### 23.2 Customer-Email-Auth (US-IT7-01)
+
+Alle nachfolgenden Endpoints sind **Reaktivierungen** der in IT6 D3
+gelöschten Routes. Schemas existieren bereits in `contracts/zod-schemas.ts`
+(IT4/§11) und werden **unverändert** wiederverwendet.
+
+#### `POST /api/customer/register`
+
+- **Story:** US-IT7-01.
+- **Body:** `CustomerRegisterSchema` — `{ email, password, firstName, lastName, phone?, privacyAccepted: true }`.
+- **Auth:** keine.
+- **Response 201:** `{ data: CustomerUserPublicSchema }` (kein `passwordHash`,
+  kein `verificationToken`, kein `adminNote`/`adminRating` — DTO-Helper
+  `selectCustomerUserPublic()` strukturell garantiert).
+- **Errors:**
+  - 400 `VALIDATION_ERROR` — Zod-Fehler.
+  - 409 `EMAIL_ALREADY_REGISTERED` — case-insensitive Email-Dupe.
+  - 429 `RATE_LIMITED`.
+- **Side-effects:**
+  - bcrypt-Hash (cost 12) auf `passwordHash`.
+  - `verificationToken` als 32-Byte-`crypto.randomBytes` Base64url.
+  - `verificationTokenExpiry = now + 24h`.
+  - Resend-Mail an `email` mit Verify-Link
+    `${NEXTAUTH_URL}/konto/verifizieren?token=…`.
+  - Mail-Versand-Fehler → 201 trotzdem, aber `mailError` im Server-Log
+    (User kann später `resend-verification` aufrufen).
+- **Rate-Limit:** 5 / Stunde / IP, 3 / Stunde / Email.
+
+#### `POST /api/customer/login`
+
+- **Story:** US-IT7-01.
+- **Body:** `CustomerLoginSchema` — `{ email, password, redirectUrl? }`.
+- **Auth:** keine.
+- **Response 200:** `{ data: CustomerLoginResponseSchema }` (= `CustomerUserPublicSchema` + `redirectUrl`).
+  Cookie `customer-session` wird gesetzt.
+- **Errors:**
+  - 400 `VALIDATION_ERROR`.
+  - 401 `INVALID_CREDENTIALS` — Meldung „E-Mail oder Passwort ungültig"
+    (kein Hint, welches Feld falsch ist; auch bei nicht-existierender
+    Email — Email-Enumeration-Schutz).
+  - 422 `OAUTH_ONLY_ACCOUNT` — wenn `passwordHash IS NULL` (User hat
+    sich bisher nur per Google/Facebook angemeldet). Frontend zeigt
+    Hinweis „Bitte melden Sie sich mit Google/Facebook an".
+  - 429 `RATE_LIMITED`.
+- **Verifizierung:** Login funktioniert auch mit `emailVerified=false`
+  (Vorentscheidung Orchestrator). Frontend zeigt Banner; Backend wirft
+  KEINE 422.
+- **Implementierungs-Hinweis (Architekt):** Engineer wählt zwischen
+  (a) NextAuth-Credentials-Provider + Finalize-Brücke (siehe
+  `customer-oauth.ts` Pattern), oder (b) klassischer eigener
+  POST-Endpoint mit direktem Cookie-Setter (wie vor IT6). Beide Wege
+  produzieren dieselbe Response-Form. Engineer dokumentiert die Wahl
+  im PR.
+- **Rate-Limit:** 10 / Stunde / IP, 5 / Stunde / Email.
+
+#### `GET /api/customer/verify?token=…`
+
+- **Story:** US-IT7-01.
+- **Query:** `CustomerVerifyTokenQuerySchema` — `{ token: string }`.
+- **Auth:** keine.
+- **Response 200:** `{ ok: true }`. Setzt `emailVerified=true`,
+  `emailVerifiedAt=now()`, `verificationToken=null`,
+  `verificationTokenExpiry=null`.
+- **Errors:**
+  - 410 `INVALID_OR_EXPIRED_TOKEN` — Token unbekannt, abgelaufen oder
+    bereits verbraucht.
+  - 429 `RATE_LIMITED`.
+- **Frontend-Flow:** `/konto/verifizieren?token=…` ruft den GET auf.
+  Bei 200 → Redirect auf `/konto/verifizieren/erfolg`.
+
+#### `POST /api/customer/resend-verification`
+
+- **Story:** US-IT7-01.
+- **Body:** keiner.
+- **Auth:** Customer-Session (Cookie).
+- **Response 200:** `{ ok: true }`.
+- **Errors:**
+  - 401 `UNAUTHORIZED` — keine Customer-Session.
+  - 409 `ALREADY_VERIFIED` — `emailVerified === true`.
+  - 429 `RATE_LIMITED`.
+- **Side-effect:** generiert neuen `verificationToken`,
+  `verificationTokenExpiry=now+24h`, sendet Resend-Mail.
+- **Rate-Limit:** 3 / Stunde / Email.
+
+### 23.3 Customer-Passwort-Reset (US-IT7-05)
+
+Beide Endpoints arbeiten auf der neuen Tabelle `password_reset_tokens`
+(siehe `contracts/schema.prisma` und `ARCHITECTURE_IT7.md` §5).
+
+#### `POST /api/customer/forgot-password`
+
+- **Story:** US-IT7-05.
+- **Body:** `CustomerForgotPasswordSchema` — `{ email }`.
+- **Auth:** keine.
+- **Response 200:** `{ ok: true }` — **immer**, egal ob User existiert.
+- **Errors:**
+  - 400 `VALIDATION_ERROR`.
+  - 429 `RATE_LIMITED`.
+- **Side-effects (nur wenn User existiert):**
+  - 32-Byte-`crypto.randomBytes` Base64url-Klartext-Token.
+  - SHA-256-Hex-Digest in `password_reset_tokens.tokenHash`.
+  - `expiresAt = now + 1h`.
+  - Resend-Mail mit Reset-Link
+    `${NEXTAUTH_URL}/konto/passwort-zuruecksetzen?token=<klartext>`.
+- **Sicherheit (Email-Enumeration-Schutz):** Bei nicht-existierendem
+  User wird **kein** DB-INSERT und **kein** Mail-Versand getriggert,
+  aber die Latenz wird simuliert (`bcrypt.compare`-Dummy oder
+  `await sleep(~200ms)`), damit Side-Channel-Timing-Angriffe scheitern.
+- **Rate-Limit:** 3 / 15 Minuten / IP, 3 / Stunde / Email.
+
+#### `POST /api/customer/reset-password`
+
+- **Story:** US-IT7-05.
+- **Body:** `CustomerResetPasswordSchema` — `{ token, password, passwordConfirm }`.
+- **Auth:** keine (Token = Authority).
+- **Response 200:** `{ ok: true }` — **niemals** `customerUser`-DTO,
+  **niemals** `passwordHash`. Cookie wird **nicht** gesetzt; Kunde muss
+  neu einloggen (= explizite Re-Authentication).
+- **Errors:**
+  - 400 `VALIDATION_ERROR` (z.B. Pwd zu kurz oder `passwordConfirm` mismatch).
+  - 410 `INVALID_OR_EXPIRED_TOKEN` — Token unbekannt, abgelaufen oder
+    bereits verbraucht.
+  - 429 `RATE_LIMITED`.
+- **Side-effects (atomar in `prisma.$transaction`):**
+  - bcrypt-Hash (cost 12) → `customer_users.passwordHash`.
+  - `password_reset_tokens.usedAt = now()` (single-use).
+- **Frontend-Flow:** `/konto/passwort-zuruecksetzen?token=…` zeigt
+  Form. POST → 200 → Redirect zu `/konto/login` mit Erfolgsmeldung.
+- **Rate-Limit:** 5 / Stunde / IP.
+
+### 23.4 ENV-Variablen (Iteration 7 ergänzt)
+
+| Variable                | Pflicht                              | Beschreibung                                                                          |
+| ----------------------- | ------------------------------------ | ------------------------------------------------------------------------------------- |
+| `ALLOW_ADMIN_PROMOTE`   | nur für `scripts/promote-admin.ts`   | `true`, sonst lehnt das CLI-Skript ab. Analog `ALLOW_USER_WIPE`.                      |
+| `AUTH_SECRET`           | **ja in Prod**                       | NextAuth v5 — 32+ Zeichen. Pflicht. `NEXTAUTH_SECRET` bleibt als Alias gleich gültig. |
+| `AUTH_TRUST_HOST`       | **ja auf Vercel/Tunnel/Production**  | `"true"` — sonst NextAuth v5 wirft „Bad request" durch Host-Verifikation.            |
+| `RESEND_API_KEY`        | **ja in Prod**                       | Verify- und Reset-Mails (Customer-Auth). Ohne Key schlagen Mails still fehl.          |
+| `MAIL_FROM`             | **ja**                               | Bärenstark-Absender (Resend muss Domain verifiziert haben).                           |
+
+### 23.5 Rate-Limits (Iteration 7 ergänzt)
+
+| Endpoint                                  | Rate-Limit                                              |
+| ----------------------------------------- | ------------------------------------------------------- |
+| `POST /api/customer/register`             | 5 / Stunde / IP, 3 / Stunde / Email.                    |
+| `POST /api/customer/login`                | 10 / Stunde / IP, 5 / Stunde / Email.                   |
+| `GET /api/customer/verify`                | 30 / Stunde / IP (Token-Brute-Force-Schutz).            |
+| `POST /api/customer/resend-verification`  | 3 / Stunde / Email.                                     |
+| `POST /api/customer/forgot-password`      | 3 / 15min / IP, 3 / Stunde / Email.                     |
+| `POST /api/customer/reset-password`       | 5 / Stunde / IP.                                        |
+| `GET /api/auth/diagnose`                  | unlimitiert in Dev, 404 in Prod.                        |
+
+### 23.6 Story-zu-Endpoint-Matrix (Iteration 7)
+
+| Story        | Endpoints / Pages                                                                         | Pages / UI                                                                                              |
+| ------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| US-IT7-01    | `POST /register`, `POST /login`, `GET /verify`, `POST /resend-verification`               | `/konto/registrieren`, `/konto/login`, `/konto/verifizieren`, `/konto/verifizieren/erfolg`              |
+| US-IT7-02    | `GET /api/auth/diagnose`, `customer-oauth.ts` Härtung (`debug:true`, `trustHost:true`)    | unverändert; `/konto/login` zeigt Google-Button                                                         |
+| US-IT7-03    | `GET /api/auth/diagnose`, `customer-oauth.ts` Facebook-Provider                          | unverändert; `/konto/login` zeigt Facebook-Button + dt. Fehlerbanner bei `?error=oauth_no_email`        |
+| US-IT7-04    | (kein HTTP-Endpoint) `scripts/promote-admin.ts`                                           | (kein Page) `scripts/README.md`                                                                          |
+| US-IT7-05    | `POST /forgot-password`, `POST /reset-password`                                           | `/konto/passwort-vergessen`, `/konto/passwort-zuruecksetzen`                                            |
+
+### 23.7 Aufhebung der IT6-Spec
+
+Die in IT6 §22 Zeile 14 verzeichnete Aussage „Folgende Endpunkte werden
+**gelöscht** (404 nach IT6): …" wird mit IT7 **aufgehoben**. Alle
+sechs Customer-Auth-Endpoints sind ab IT7 wieder vollständige
+Implementierungen mit den oben spezifizierten Verträgen.
+

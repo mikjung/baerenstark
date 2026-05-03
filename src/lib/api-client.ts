@@ -22,7 +22,12 @@ import type {
   CreatePaymentSessionResponse,
   CreateReviewInput,
   CustomerBookingsResponse,
+  CustomerForgotPasswordInput,
+  CustomerLoginInput,
+  CustomerLoginResponse,
   CustomerProfileUpdateInput,
+  CustomerRegisterInput,
+  CustomerResetPasswordInput,
   CustomerUserPublic,
   DayOverride,
   Payment,
@@ -55,7 +60,13 @@ export type ApiErrorCode =
   | 'MAIL_FAILED'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
-  | 'BLOB_NOT_CONFIGURED';
+  | 'BLOB_NOT_CONFIGURED'
+  // Iteration 7 — Customer-Email-Auth (US-IT7-01, US-IT7-05)
+  | 'INVALID_CREDENTIALS'
+  | 'EMAIL_ALREADY_REGISTERED'
+  | 'OAUTH_ONLY_ACCOUNT'
+  | 'ALREADY_VERIFIED'
+  | 'INVALID_OR_EXPIRED_TOKEN';
 
 export class ApiClientError extends Error {
   status: number;
@@ -600,13 +611,73 @@ export async function uploadFile(file: File): Promise<UploadResponse> {
 // Iteration 4 — Kunden-Auth (US-25)
 // ---------------------------------------------------------------------------
 //
-// Iteration 6 / US-IT6-05 (D3 / QA-IT6):
-//   Die alten Email/Pwd-Endpoints (/api/customer/{login,register,
-//   forgot-password,reset-password,resend-verification,verify}) sind
-//   gelöscht — Kunden-Auth läuft ausschließlich per Google/Facebook-OAuth.
-//   Die zugehörigen Client-Helper (`registerCustomer`, `loginCustomer`,
-//   `forgotPassword`, `resetPassword`, `resendVerification`) wurden
-//   entfernt; nur Profile-/Logout-Helper bleiben übrig.
+// Iteration 7 / US-IT7-01 + US-IT7-05:
+//   Email/Password-Auth wieder aktiviert. Die Helper waren in IT6 D3 gelöscht
+//   und kehren zurück. OAuth (Google + Facebook) bleibt parallel verfügbar.
+//   Vertrag: contracts/api-routes.md §23.2 / §23.3.
+
+/** POST /api/customer/register — US-IT7-01. */
+export async function registerCustomer(
+  payload: CustomerRegisterInput,
+): Promise<CustomerUserPublic> {
+  const res = await request<DataEnvelope<CustomerUserPublic>>(
+    '/api/customer/register',
+    { method: 'POST', body: payload },
+  );
+  return res.data;
+}
+
+/** POST /api/customer/login — US-IT7-01. */
+export async function loginCustomer(
+  payload: CustomerLoginInput,
+): Promise<CustomerLoginResponse> {
+  const res = await request<DataEnvelope<CustomerLoginResponse>>(
+    '/api/customer/login',
+    { method: 'POST', body: payload },
+  );
+  return res.data;
+}
+
+/**
+ * POST /api/customer/forgot-password — US-IT7-05.
+ *
+ * Backend antwortet **immer** 200 (Email-Enumeration-Schutz). Dieser Helper
+ * wirft trotzdem bei 4xx/5xx, damit Validation-Fehler oder Rate-Limits
+ * im Frontend erkennbar bleiben.
+ */
+export async function forgotPassword(
+  payload: CustomerForgotPasswordInput,
+): Promise<void> {
+  await request<{ ok: true }>('/api/customer/forgot-password', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+/** POST /api/customer/reset-password — US-IT7-05. */
+export async function resetPassword(
+  payload: CustomerResetPasswordInput,
+): Promise<void> {
+  await request<{ ok: true }>('/api/customer/reset-password', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+/** GET /api/customer/verify?token=... — US-IT7-01. */
+export async function verifyEmail(token: string): Promise<void> {
+  await request<{ ok: true }>(
+    `/api/customer/verify?token=${encodeURIComponent(token)}`,
+    { method: 'GET' },
+  );
+}
+
+/** POST /api/customer/resend-verification — US-IT7-01. */
+export async function resendVerification(): Promise<void> {
+  await request<{ ok: true }>('/api/customer/resend-verification', {
+    method: 'POST',
+  });
+}
 
 export async function logoutCustomer(): Promise<void> {
   await request<DataEnvelope<{ loggedOut: boolean }>>('/api/customer/logout', {

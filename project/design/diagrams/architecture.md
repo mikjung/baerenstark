@@ -1,356 +1,347 @@
-# System Architecture — Iteration 4
+# System Architecture — Iteration 7 (Auth-Stabilisierung & Email-Auth-Reversion)
 
-Erweiterung der Bestand-Architektur (IT1–IT3) um **Kundenportal**,
-**Stripe-Zahlungen** und **Bewertungs-Backend**. Alles bleibt im
-Vercel-deployten Next.js-Monolith — keine Microservices.
+> Quelle der Wahrheit: `ARCHITECTURE_IT7.md`. Dieses Dokument zeigt
+> Komponenten und kritische Flows für IT7. Alle vorherigen
+> IT1–IT6-Architektur-Entscheidungen bleiben aktiv.
 
 ## Component Diagram
 
 ```mermaid
 graph TB
-    subgraph Browser["Browser (Public + Customer + Admin)"]
-        Visitor[Besucher]
-        Customer[Kunde<br/>eingeloggt]
-        Admin[Tom<br/>Admin]
+    User["Kunde / Browser"]
+    Tom["Tom (Admin) / Engineer"]
+
+    subgraph Frontend["Next.js Frontend (Vercel)"]
+      LoginPage["/konto/login<br/>Credentials + OAuth"]
+      RegPage["/konto/registrieren"]
+      VerifyPage["/konto/verifizieren"]
+      ForgotPage["/konto/passwort-vergessen"]
+      ResetPage["/konto/passwort-zuruecksetzen"]
+      KontoLayout["/konto/layout<br/>UnverifiedEmailBanner"]
+      AdminPages["/admin/*"]
     end
 
-    subgraph Vercel["Vercel — Next.js 14 App"]
-        subgraph Pages["App Router Pages"]
-            HomePage["/<br/>Startseite + Reviews"]
-            BookingPage["/buchung<br/>Buchungsformular"]
-            KontoPages["/konto/*<br/>Kundenportal (NEU IT4)"]
-            AdminPages["/admin/*<br/>Admin-UI (erweitert)"]
-        end
-
-        subgraph API["API Route Handlers"]
-            CustomerAuth["/api/customer/*<br/>Register/Login/Reset (NEU IT4)"]
-            CustomerData["/api/customer/bookings<br/>/api/customer/reviews (NEU IT4)"]
-            Payments["/api/payments/*<br/>create-session + webhook (NEU IT4)"]
-            AdminReviews["/api/admin/reviews<br/>(NEU IT4)"]
-            AdminPayment["/api/admin/bookings/:id/payment<br/>(NEU IT4)"]
-            ExistingAPI["Bestand: /api/bookings, /api/upload,<br/>/api/admin/availability-template, ..."]
-        end
-
-        subgraph Lib["src/lib"]
-            CustomerAuthLib[customer-auth.ts<br/>JWT helpers]
-            StripeLib[stripe.ts<br/>SDK singleton]
-            MailLib[mail.ts<br/>Resend templates]
-            PrismaLib[prisma.ts]
-        end
-
-        Middleware[middleware.ts<br/>schützt /admin + /konto]
+    subgraph BackendAPI["Next.js Route Handlers (Node, /api)"]
+      direction TB
+      RegEP["POST /customer/register"]
+      LoginEP["POST /customer/login"]
+      VerifyEP["GET  /customer/verify"]
+      ResendEP["POST /customer/resend-verification"]
+      ForgotEP["POST /customer/forgot-password"]
+      ResetEP["POST /customer/reset-password"]
+      DiagEP["GET  /api/auth/diagnose<br/>(Dev-only, 404 in Prod)"]
+      OAuthC["NextAuth Customer<br/>/api/auth/customer/[...]"]
+      OAuthA["NextAuth Admin<br/>/api/auth/[...]"]
     end
 
-    subgraph External["External Services"]
-        Turso[(Turso<br/>SQLite + libSQL)]
-        VercelBlob[(Vercel Blob<br/>uploads)]
-        Resend[Resend<br/>Mail-Provider]
-        Stripe[Stripe<br/>Checkout + Webhooks]
-        Upstash[Upstash Redis<br/>Rate-Limit]
+    subgraph Lib["Backend-Bibliotheken"]
+      AuthCfg["lib/auth.ts<br/>(Admin Credentials)"]
+      OAuthCfg["lib/customer-oauth.ts<br/>(Credentials + Google + Facebook)"]
+      Mail["lib/mail.ts<br/>sendVerificationMail<br/>sendPasswordResetMail"]
+      Rate["lib/ratelimit.ts<br/>(Upstash, optional)"]
+      DTO["lib/dto/user.ts<br/>selectCustomerUserPublic()"]
+      Tokens["crypto<br/>randomBytes + sha256Hex"]
+      Bcrypt["bcryptjs<br/>cost 12"]
     end
 
-    Visitor --> HomePage
-    Visitor --> BookingPage
-    Customer --> KontoPages
-    Admin --> AdminPages
+    subgraph CLI["CLI-Skripte (lokal, Pair mit Tom)"]
+      Promote["scripts/promote-admin.ts<br/>ENV: ALLOW_ADMIN_PROMOTE=true"]
+      Wipe["scripts/reset-users.ts<br/>(IT6, ALLOW_USER_WIPE=true)"]
+      DTOLint["scripts/check-dto-leaks.ts<br/>(CI)"]
+    end
 
-    HomePage -.GET /api/reviews.-> CustomerData
-    BookingPage -.POST /api/bookings.-> ExistingAPI
-    KontoPages --> CustomerAuth
-    KontoPages --> CustomerData
-    KontoPages --> Payments
-    AdminPages --> AdminReviews
-    AdminPages --> AdminPayment
-    AdminPages --> ExistingAPI
+    subgraph DB["libSQL / Turso (SQLite)"]
+      Users["users<br/>(Admin)"]
+      CustUsers["customer_users<br/>+ emailVerifiedAt (NEU)"]
+      ResetTokens["password_reset_tokens<br/>(NEU IT7)"]
+      Bookings["bookings"]
+      Reviews["reviews"]
+      Payments["payments"]
+    end
 
-    Middleware -.cookie-check.-> KontoPages
-    Middleware -.cookie-check.-> AdminPages
+    subgraph External["Externe Provider"]
+      Google["Google OAuth"]
+      Facebook["Facebook OAuth"]
+      Resend["Resend Mail API"]
+      Upstash["Upstash Redis"]
+      Stripe["Stripe API"]
+    end
 
-    CustomerAuth --> CustomerAuthLib
-    CustomerAuth --> MailLib
-    CustomerAuth --> PrismaLib
-    CustomerData --> CustomerAuthLib
-    CustomerData --> PrismaLib
-    Payments --> StripeLib
-    Payments --> MailLib
-    Payments --> PrismaLib
-    AdminReviews --> PrismaLib
-    AdminPayment --> StripeLib
-    AdminPayment --> MailLib
+    User --> LoginPage
+    User --> RegPage
+    User --> ForgotPage
+    User --> ResetPage
+    User --> VerifyPage
+    User --> KontoLayout
+    Tom --> AdminPages
+    Tom --> Promote
+    Tom --> DiagEP
+    Tom --> Wipe
 
-    PrismaLib --> Turso
-    StripeLib --> Stripe
-    MailLib --> Resend
-    ExistingAPI --> VercelBlob
-    CustomerAuth -.rate-limit.-> Upstash
-    Payments -.rate-limit.-> Upstash
+    LoginPage --> LoginEP
+    LoginPage --> OAuthC
+    RegPage --> RegEP
+    VerifyPage --> VerifyEP
+    ForgotPage --> ForgotEP
+    ResetPage --> ResetEP
+    KontoLayout --> ResendEP
+    AdminPages --> OAuthA
 
-    Stripe -.webhook POST.-> Payments
+    RegEP --> Bcrypt
+    RegEP --> Tokens
+    RegEP --> Mail
+    RegEP --> Rate
+    RegEP --> CustUsers
+
+    LoginEP --> Bcrypt
+    LoginEP --> Rate
+    LoginEP --> CustUsers
+    LoginEP --> DTO
+
+    VerifyEP --> CustUsers
+    VerifyEP --> Rate
+
+    ResendEP --> Mail
+    ResendEP --> Tokens
+    ResendEP --> Rate
+    ResendEP --> CustUsers
+
+    ForgotEP --> Tokens
+    ForgotEP --> Mail
+    ForgotEP --> Rate
+    ForgotEP --> CustUsers
+    ForgotEP --> ResetTokens
+
+    ResetEP --> Bcrypt
+    ResetEP --> Tokens
+    ResetEP --> Rate
+    ResetEP --> CustUsers
+    ResetEP --> ResetTokens
+
+    OAuthC --> OAuthCfg
+    OAuthCfg --> Google
+    OAuthCfg --> Facebook
+    OAuthCfg --> CustUsers
+
+    OAuthA --> AuthCfg
+    AuthCfg --> Users
+
+    Mail --> Resend
+    Rate --> Upstash
+
+    Promote --> Bcrypt
+    Promote --> Users
+
+    DTOLint --> DTO
+
+    Stripe -.- Payments
 ```
 
-## Sequence Diagram — Kunden-Zahlung (US-28)
-
-Der wichtigste neue Flow in IT4: ein Kunde bezahlt einen vom Admin
-hinterlegten Betrag.
+## Sequence Diagram — Customer-Registrierung + Email-Verifikation (US-IT7-01)
 
 ```mermaid
 sequenceDiagram
-    actor Tom as Tom (Admin)
-    actor Customer as Kunde
-    participant FE as Frontend (Next.js)
-    participant BE as Backend (API)
-    participant DB as Turso DB
-    participant Stripe as Stripe
-    participant Mail as Resend
+    autonumber
+    actor User as Kunde
+    participant FE as Frontend (/konto/registrieren)
+    participant API as POST /api/customer/register
+    participant DB as customer_users
+    participant Resend as Resend
+    participant Verify as GET /api/customer/verify
 
-    Note over Tom,FE: Tom hinterlegt Betrag im Admin-UI
-    Tom->>FE: PaymentEditor öffnen,<br/>Betrag (€) eingeben
-    FE->>BE: POST /api/admin/bookings/:id/payment<br/>{ amount, description }
-    BE->>DB: INSERT payments (status: PENDING)
-    BE->>Mail: paymentRequestToCustomer<br/>(Link → /konto/zahlung/:id?token=...)
-    Mail-->>Customer: E-Mail mit Zahlungslink
-    BE-->>FE: 201 Payment
+    User->>FE: Form ausfüllen + Submit
+    FE->>API: { email, password, firstName, lastName, … }
+    API->>API: Rate-Limit (IP+Email)
+    API->>API: Zod-Parse CustomerRegisterSchema
+    API->>DB: findUnique({ email })
+    DB-->>API: null (nicht existent)
+    API->>API: bcrypt.hash(password, 12)
+    API->>API: token = randomBytes(32).base64url
+    API->>DB: create({ passwordHash, verificationToken, expiry })
+    DB-->>API: created
+    API->>Resend: sendVerificationMail(email, firstName, token)
+    Resend-->>User: Mail mit Verify-Link
+    API-->>FE: 201 { data: CustomerUserPublic }
+    FE-->>User: Redirect /konto + Banner "Bitte bestätigen"
 
-    Note over Customer,FE: Kunde öffnet Zahlungsseite
-    Customer->>FE: GET /konto/zahlung/:bookingId<br/>(eingeloggt ODER ?token=cancelToken)
-    FE->>BE: GET /api/customer/bookings/:id
-    BE->>DB: SELECT booking + payment
-    BE-->>FE: { booking, payment: { status: PENDING, amount } }
-    FE-->>Customer: Zeigt Betrag + Bezahlen-Button
+    Note over User,Verify: Später — Klick auf Link in Mail
 
-    Customer->>FE: Klick "Bezahlen"
-    FE->>BE: POST /api/payments/create-session<br/>{ bookingId, cancelToken? }
-    BE->>BE: Auth-Check (Cookie ODER Token)
-    BE->>DB: SELECT payment WHERE bookingId
-    BE->>Stripe: stripe.checkout.sessions.create({<br/>amount, success_url, cancel_url,<br/>payment_method_types: [card, paypal],<br/>metadata: { bookingId, paymentId } })
-    Stripe-->>BE: { id, url }
-    BE->>DB: UPDATE payments SET stripeSessionId
-    BE-->>FE: { url: "https://checkout.stripe.com/..." }
-    FE->>Customer: window.location = url
-
-    Note over Customer,Stripe: Kunde bezahlt auf Stripe-Hosted-Page
-    Customer->>Stripe: Karte/PayPal/Apple Pay/Google Pay
-    Stripe-->>Customer: Erfolg → Redirect success_url
-
-    Note over Stripe,BE: Asynchrone Webhook-Verarbeitung
-    Stripe->>BE: POST /api/payments/webhook<br/>event: checkout.session.completed<br/>+ stripe-signature header
-    BE->>BE: stripe.webhooks.constructEvent<br/>(rawBody, sig, WEBHOOK_SECRET)
-    BE->>DB: UPDATE payments<br/>SET status=PAID, paidAt=now<br/>(idempotent: skip wenn schon PAID)
-    BE->>Mail: paymentReceivedToCustomer
-    BE->>Mail: paymentReceivedToAdmin
-    Mail-->>Customer: "Vielen Dank, Zahlung eingegangen"
-    Mail-->>Tom: "Zahlung von ... eingegangen"
-    BE-->>Stripe: 200 { received: true }
-
-    Note over Customer,FE: Kunde wird auf Erfolgsseite weitergeleitet
-    Customer->>FE: GET /konto/zahlung/erfolg?session_id=...
-    FE->>BE: GET /api/customer/bookings/:bookingId<br/>(Polling, max 10s)
-    BE->>DB: SELECT booking + payment
-    BE-->>FE: { payment: { status: PAID } }
-    FE-->>Customer: "Zahlung erfolgreich" + Link auf Auftragsdetails
+    User->>Verify: GET /verify?token=…
+    Verify->>DB: findFirst({ verificationToken, expiry > now })
+    DB-->>Verify: row
+    Verify->>DB: update emailVerified=true, emailVerifiedAt=now, token=null
+    Verify-->>User: 200 → Redirect /konto/verifizieren/erfolg
 ```
 
-## Sequence Diagram — Kunden-Registrierung & Verifikation (US-25)
+## Sequence Diagram — Passwort-Reset E2E (US-IT7-05)
 
 ```mermaid
 sequenceDiagram
-    actor Customer as Kunde
-    participant FE as Frontend
-    participant BE as Backend (API)
-    participant DB as Turso DB
-    participant Mail as Resend
+    autonumber
+    actor User as Kunde
+    participant FE as Frontend (/konto/passwort-vergessen)
+    participant Forgot as POST /forgot-password
+    participant DB as DB
+    participant Resend as Resend
+    participant ResetFE as Frontend (/konto/passwort-zuruecksetzen?token=...)
+    participant Reset as POST /reset-password
 
-    Customer->>FE: GET /konto/registrieren
-    Customer->>FE: Form ausfüllen + Submit
-    FE->>BE: POST /api/customer/register<br/>{ email, password, firstName, lastName, ... }
-    BE->>BE: bcrypt.hash(password, 10)
-    BE->>BE: cuid() → verificationToken
-    BE->>DB: INSERT customer_users<br/>(emailVerified: false, verificationToken)
-    BE->>Mail: customerVerificationMail<br/>(Link mit Token)
-    Mail-->>Customer: E-Mail mit Verifikations-Link
-    BE-->>FE: 201 { id, email, emailVerified: false }
-    FE-->>Customer: "Bitte bestätigen Sie Ihre E-Mail"
-
-    Note over Customer: Kunde klickt Link
-    Customer->>FE: GET /konto/verifizieren?token=...
-    FE->>BE: GET /api/customer/verify?token=...
-    BE->>DB: SELECT WHERE verificationToken
-    alt Token gültig (< 24h alt)
-        BE->>DB: UPDATE emailVerified=true,<br/>verificationToken=null
-        BE->>BE: createCustomerSession({ id, email })<br/>→ JWT
-        BE-->>FE: 302 Redirect /konto?verified=1<br/>+ Set-Cookie: customer-session
-    else Token ungültig/abgelaufen
-        BE-->>FE: 302 Redirect /konto/login?error=invalid_token
+    User->>FE: Email eingeben + Submit
+    FE->>Forgot: { email }
+    Forgot->>Forgot: Rate-Limit (IP+Email)
+    Forgot->>DB: findUnique customer_users(email)
+    alt User existiert
+      DB-->>Forgot: user
+      Forgot->>Forgot: tokenPlain = randomBytes(32).base64url
+      Forgot->>Forgot: tokenHash = sha256(tokenPlain)
+      Forgot->>DB: insert password_reset_tokens(tokenHash, expiresAt=now+1h)
+      Forgot->>Resend: sendPasswordResetMail(email, firstName, tokenPlain)
+    else User existiert nicht
+      Forgot->>Forgot: simulate constant latency
     end
-    FE-->>Customer: Eingeloggt → Auftragsübersicht
+    Forgot-->>FE: 200 { ok: true }  (immer, kein Enumeration-Hint)
+    FE-->>User: ConfirmationCard "Falls registriert, erhalten Sie eine E-Mail"
+
+    Resend-->>User: Mail mit Reset-Link
+
+    User->>ResetFE: Klick Link → Page mit token im Query
+    ResetFE->>User: Form: neues Passwort + Bestätigung
+    User->>ResetFE: Submit
+    ResetFE->>Reset: { token, password, passwordConfirm }
+    Reset->>Reset: Rate-Limit (IP)
+    Reset->>Reset: tokenHash = sha256(token)
+    Reset->>DB: $transaction begin
+    Reset->>DB: findUnique password_reset_tokens(tokenHash)
+    alt Token gültig (existiert, !usedAt, expiresAt>now)
+      Reset->>DB: update customer_users.passwordHash = bcrypt(newPwd, 12)
+      Reset->>DB: update password_reset_tokens.usedAt = now
+      Reset->>DB: $transaction commit
+      Reset-->>ResetFE: 200 { ok: true }
+      ResetFE-->>User: Redirect /konto/login?reset=success
+    else Token ungültig / abgelaufen / verbraucht
+      Reset->>DB: $transaction rollback
+      Reset-->>ResetFE: 410 INVALID_OR_EXPIRED_TOKEN
+      ResetFE-->>User: TokenInvalidCard + Link /konto/passwort-vergessen
+    end
 ```
 
-## Sequence Diagram — Stornierung mit 24h-Check (US-27)
+## Sequence Diagram — Admin-Lock-out-Recovery via Promote-Skript (US-IT7-04)
 
 ```mermaid
 sequenceDiagram
-    actor Customer as Kunde
-    participant FE as Frontend
-    participant BE as Backend
-    participant DB as Turso
-    participant Mail as Resend
-    actor Tom
+    autonumber
+    actor Tom as Tom (Terminal)
+    participant CLI as scripts/promote-admin.ts
+    participant DB as users (Admin-Tabelle)
+    participant LoginUI as /admin/login
 
-    Customer->>FE: /konto/auftrag/:id<br/>(sieht "Stornieren"-Button)
-    Customer->>FE: Klick "Stornieren"<br/>→ Confirm-Dialog
-    Customer->>FE: "Ja, stornieren"
-    FE->>BE: POST /api/customer/bookings/:id/cancel
-    BE->>BE: readCustomerSession() → me
-    BE->>DB: SELECT booking WHERE id, customerId=me
-    alt Booking nicht gefunden / fremd
-        BE-->>FE: 404 NOT_FOUND
-    else Status nicht in {PENDING, CONFIRMED, COUNTER_PROPOSED}
-        BE-->>FE: 409 CONFLICT<br/>"Diese Buchung kann nicht mehr storniert werden."
-    else CONFIRMED + < 24h vor Termin
-        BE-->>FE: 409 CONFLICT<br/>"Stornierung nur bis 24h vorher. Bitte anrufen."
-    else OK
-        BE->>DB: UPDATE booking SET status=CANCELLED
-        BE->>Mail: cancellationToAdmin (fire-and-forget)
-        Mail-->>Tom: "Kunde hat storniert"
-        BE-->>FE: 200 { id, status: CANCELLED }
-        FE-->>Customer: Status-Badge wechselt + Toast
+    Tom->>CLI: ALLOW_ADMIN_PROMOTE=true npx tsx promote-admin.ts \\<br/>hausservice-baerenstark@outlook.com --password=Temp1234!Change
+    CLI->>CLI: ENV-Guard check
+    CLI->>DB: findUnique users(email)
+    alt User existiert
+      DB-->>CLI: existing
+      CLI->>DB: update status='ACTIVE', passwordHash=bcrypt(pwd,12)
+      DB-->>CLI: result
+      CLI-->>Tom: "UPDATE — status=ACTIVE"
+    else User existiert nicht
+      DB-->>CLI: null
+      CLI->>DB: create user(email, passwordHash, status='ACTIVE')
+      DB-->>CLI: result
+      CLI-->>Tom: "CREATE — neuer Admin angelegt"
     end
+    CLI-->>Tom: print result + Hinweis "Bitte sofort Passwort ändern"
+
+    Note over DB,LoginUI: count(users) >= 1 → /api/admin/setup<br/>antwortet weiter mit 410 GONE (F1-Garantie)
+
+    Tom->>LoginUI: Login mit Email + Temp-Password
+    LoginUI-->>Tom: Eingeloggt → /admin
+    Tom->>LoginUI: /admin/forgot-password<br/>(Pwd dauerhaft ändern)
 ```
 
 ## Data Flow Notes
 
-### `customer-session`-Cookie
+### Customer-Login (Email/Password) — Variante A (empfohlen)
 
-- Vom Backend ausgestellt bei `POST /api/customer/login` und nach
-  erfolgreicher `GET /api/customer/verify`.
-- Vom Frontend nur indirekt sichtbar (httpOnly = nicht via JS lesbar).
-- Bei jedem Request zu `/konto/*` und `/api/customer/*` automatisch
-  mitgesendet (Browser-Default).
-- Inhalt: signiertes JWT mit `{ customerId, email, iat, exp }`.
+1. Frontend `<LoginForm />` → `POST /api/customer/login` mit
+   `CustomerLoginSchema`-Body.
+2. Backend prüft Rate-Limit, validiert Body, findet User (oder
+   simuliert bcrypt-Latenz für nicht-existenten User).
+3. `bcrypt.compare()` — bei Mismatch oder `passwordHash=NULL` ↦ 401/422.
+4. Bei Erfolg: `safeCustomerCallback()` validiert `redirectUrl` →
+   `customer-session`-Cookie wird vom Login-Endpoint direkt gesetzt
+   (kein Finalize-Roundtrip).
+5. Response `CustomerLoginResponseSchema` enthält Public-DTO + sicheren
+   `redirectUrl`. Frontend macht `router.push(redirectUrl)`.
 
-### Booking-Customer-Zuordnung
+### Customer-Login OAuth (Google / Facebook)
 
-- Beim `POST /api/bookings`: Backend liest `customer-session`-Cookie
-  via `readCustomerSession()` und befüllt `customerId` automatisch.
-  Frontend sendet **kein** zusätzliches Feld.
-- Bei eingeloggter Buchung: `bookings.customerId !== null`.
-- Bei Gastbuchung: `bookings.customerId === null` (sichtbar nur im
-  Admin-UI, nicht im Kundenportal).
+1. Frontend → `signIn('google', …)` → NextAuth-Customer-Handler.
+2. NextAuth redirect zu Provider, Provider redirect zurück nach
+   `/api/auth/customer/callback/<provider>`.
+3. NextAuth `signIn`-Callback ruft `handleCustomerOAuthSignIn()` auf,
+   das den User findet/anlegt (mit `emailVerified=true` für OAuth).
+4. NextAuth `redirect`-Callback leitet zu
+   `/api/customer/oauth-finalize` (Open-Redirect-Schutz).
+5. Finalize-Route liest die kurze NextAuth-Session, schreibt das
+   langlebige `customer-session`-Cookie, redirect zu `/konto`.
 
-### Stripe-Webhook-Idempotenz
+### Email-Enumeration-Schutz
 
-- Stripe-Webhooks können **mehrfach** ankommen (bei Timeout, Retry).
-- Backend prüft vor jedem Status-Update, ob der Status schon gesetzt ist.
-- `paymentReceivedToCustomer` + `paymentReceivedToAdmin` werden nur
-  beim **ersten** PENDING → PAID-Übergang gesendet.
+`POST /api/customer/forgot-password` antwortet **immer** 200 mit
+`{ ok: true }`. Bei nicht-existentem User wird **kein** DB-Insert und
+**kein** Mail-Versand getriggert, aber Latenz wird simuliert (z.B.
+`bcrypt.compare` Dummy oder `await sleep(150)`). Damit kann ein
+Angreifer weder über HTTP-Status, Body-Größe noch Latenz erkennen, ob
+ein Email-Konto existiert.
 
-### Review-Sichtbarkeit
+### Token-Storage
 
-- `POST /api/customer/reviews` legt mit `approved: false` an.
-- Tom sieht in `/admin/reviews` (Tab "Wartend") alle pending Reviews.
-- Nach `PATCH /api/admin/reviews/:id { approved: true }` wird die
-  Review von `GET /api/reviews` ausgeliefert.
-- `<ReviewSection>` auf der Startseite ersetzt die statischen IT3-Daten,
-  sobald `total >= 4` echte (approved) Reviews vorliegen.
+Reset-Tokens werden niemals im Klartext persistiert. Frontend bekommt
+den Klartext nur in der Reset-Mail. Datenbank speichert ausschließlich
+den SHA-256-Hex-Digest. Bei Lookup hashes der Server den eingehenden
+Klartext ebenfalls und vergleicht via UNIQUE-Lookup auf `tokenHash`.
 
 ## Integration Contract
 
-Verbindlich für FE und BE. Mehrteilige Konventionen für IT4-spezifische
-Aspekte ergänzen den Bestand-Vertrag aus IT1–IT3.
+- **Transport:** REST/JSON über HTTPS.
+- **Auth:**
+  - Customer: Cookie `customer-session` (langlebig, JWT, signiert).
+  - Customer-OAuth-Brücke: Cookie `__customer-next-auth.session-token` (60s, NextAuth-intern).
+  - Admin: Cookie `next-auth.session-token` (NextAuth-managed).
+- **Content-Type:** `application/json; charset=utf-8`.
+- **Error format (verbindlich):**
+  ```json
+  { "error": { "code": "INVALID_OR_EXPIRED_TOKEN", "message": "Dieser Link ist nicht mehr gültig." } }
+  ```
+  Codes-Liste IT7-Erweiterung: `INVALID_OR_EXPIRED_TOKEN` (410),
+  `EMAIL_ALREADY_REGISTERED` (409), `OAUTH_ONLY_ACCOUNT` (422),
+  `ALREADY_VERIFIED` (409), `RATE_LIMITED` (429),
+  `INVALID_CREDENTIALS` (401). IT6-Codes (`ACCOUNT_DISABLED`,
+  `LAST_ADMIN_LOCK`, `SELF_MUTATION_FORBIDDEN`,
+  `BOOTSTRAP_NOT_ALLOWED`, `SETUP_NOT_CONFIGURED`,
+  `BOOKING_NOT_COMPLETED`, `REVIEW_EXISTS`) bleiben aktiv.
+- **Pagination:** `?page=N&limit=N` → `{ data, total, page }` (IT4-Pattern, unverändert).
+- **Timestamps:** ISO 8601 mit Offset (`2026-05-03T12:34:56+02:00`).
+- **IDs:** `cuid()` (Default für Prisma-Modelle); `tokenHash` ist
+  SHA-256 hex (64 chars) für `password_reset_tokens`.
+- **Email:** lowercase, getrimmt, max 254 chars.
+- **Passwort:** min 8 (Customer), min 12 (Admin via Promote-Skript),
+  max 200. Bcrypt cost 12.
+- **DTO-Garantie (F3 + IT7-Erweiterung):** Customer-Endpoints
+  durchlaufen IMMER `selectCustomerUserPublic()` + `toCustomerPublic()`
+  + `CustomerUserPublicSchema.strict()`. Felder `passwordHash`,
+  `verificationToken`, `verificationTokenExpiry`, `oauthId`,
+  `adminNote`, `adminRating` werden NIEMALS ausgespielt.
+- **Rate-Limits:** verbindlich in `contracts/api-routes.md` §23.5.
+- **Diagnose-Endpoint:** `GET /api/auth/diagnose` antwortet **nur** in
+  Dev-Mode mit Bool-Flags zu ENVs/Provider-Aktivität. In Prod 404.
 
-### Transport
-- HTTPS in Production. JSON für Bodies (außer `/api/upload`:
-  multipart/form-data; `/api/payments/webhook`: rohes JSON ohne
-  unser Pre-Parse — Stripe-Signatur).
+## File Inventory (gesamt IT7)
 
-### Auth-Header / Cookie
-- **Admin (Bestand):** `next-auth.session-token` Cookie (NextAuth).
-- **Kunde (NEU IT4):** `customer-session` Cookie (eigenes JWT).
-- **Token-Auth (Bestand IT2):** `?token=cancelToken` Query.
-- **Stripe-Webhook (NEU IT4):** `stripe-signature` Header
-  (Validierung gegen `STRIPE_WEBHOOK_SECRET`).
+Verbindlich, siehe `frontend-requirements.md` und `backend-requirements.md`
+für vollständige Listen. Zusammenfassung:
 
-### Error-Format
-
-Unverändert seit IT2:
-
-```json
-{ "error": { "code": "VALIDATION_ERROR", "message": "...", "field": "email" } }
-```
-
-Neue Codes IT4: `EMAIL_NOT_VERIFIED` (422), `STRIPE_ERROR` (502).
-Vollständige Liste siehe `contracts/zod-schemas.ts.ApiErrorSchema`.
-
-### Pagination
-
-Im MVP nicht erzwungen. `GET /api/reviews` akzeptiert optional
-`?limit=N` (1–100, Default 20). Andere Listen ohne Pagination
-(erwartete Mengen < 100).
-
-### Timestamps
-- Alle DateTime-Werte im API-Response: ISO 8601 mit Offset (Z-Suffix).
-- Customer-side Datums-Strings für Termine: `"YYYY-MM-DD"` (Berlin-TZ),
-  `"HH:MM"` (Bestand IT3).
-
-### IDs
-- Alle IDs: `cuid` (Strings).
-- Stripe-Session-IDs: `cs_test_...` / `cs_live_...` — werden separat in
-  `payments.stripeSessionId` persistiert.
-- Cancel-/Reset-/Verification-Tokens: `cuid()` erzeugt.
-
-### Beträge
-- **Im API-Wire-Format:** Cents als Integer (`amount: 14000` = 140,00 €).
-- **In der UI:** Euro mit `Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' })`.
-- Frontend rechnet Euro → Cents via `Math.round(parseFloat(eurInput) * 100)`.
-
-### Stripe-Checkout-Session-Konvention
-- `mode: 'payment'` (one-time, kein Subscription).
-- `payment_method_types: ['card', 'paypal']` — Apple Pay / Google Pay
-  laufen automatisch über `card`, sofern im Stripe-Dashboard aktiviert.
-- `success_url`: `${BASE_URL}/konto/zahlung/erfolg?session_id={CHECKOUT_SESSION_ID}`.
-- `cancel_url`: `${BASE_URL}/konto/zahlung/${bookingId}`.
-- `metadata`: `{ bookingId, paymentId }` — Webhook-Handler nutzt das
-  zum Lookup.
-- `customer_email`: vorab aus Booking gefüllt (Kunde muss nicht erneut
-  eingeben).
-- `locale: 'de'`.
-
-### Customer-Session-JWT
-
-```
-Algorithm: HS256
-Secret:    AUTH_SECRET (32+ Zeichen Random)
-Payload:   { customerId: string, email: string, iat: number, exp: number }
-Lifetime:  7 Tage (604800 s)
-```
-
-Der Token wird **nicht serverseitig persistiert** (kein Token-Store). Bei
-Logout wird das Cookie nur clientseitig gelöscht — bestehende JWTs
-bleiben bis zum exp gültig (akzeptabler MVP-Trade-off).
-
-### Webhook-Endpoint-Anforderungen
-
-- Path: `/api/payments/webhook`.
-- Methode: POST.
-- Authentication: ausschließlich Stripe-Signatur (`stripe-signature`
-  Header).
-- Body-Parsing: **rohes** Text-Reading (`await req.text()`) vor
-  Signatur-Check. Kein Next.js-JSON-Auto-Parse zulassen.
-- Antwort: 200 `{ received: true }` bei Erfolg; 400 bei Signatur-Fehler.
-- Idempotenz: Status-Check vor Update; doppelte Events liefern 200, kein
-  zweiter Mail-Versand.
-
-### `/konto/*`-Routing-Vertrag
-
-Public-Whitelist (kein Login nötig):
-
-- `/konto/login`
-- `/konto/registrieren`
-- `/konto/passwort-vergessen`
-- `/konto/passwort-zuruecksetzen?token=...`
-- `/konto/verifizieren?token=...`
-- `/konto/zahlung/:bookingId?token=...` (mit Token: öffentlich;
-  ohne: Login-Pflicht)
-
-Alle anderen `/konto/*`-Pfade → Middleware-Redirect auf
-`/konto/login?callbackUrl=<original-path>`.
+- **Neu:** 7 API-Routes (6 Customer-Auth + Diagnose), 1 CLI-Skript,
+  4 Frontend-Pages, 7 Frontend-Components, 1 Migration, 1 Tabelle.
+- **Update:** 4 Lib-Dateien, 1 Layout, 1 Login-Form, 3 Contract-Dokumente,
+  1 Runbook, 1 ENV-Example.

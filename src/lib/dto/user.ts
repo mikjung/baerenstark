@@ -1,9 +1,17 @@
 /**
- * Iteration 6 / US-IT6-07 — DTO-Helper für `CustomerUser`-Selects.
+ * DTO-Helper für `CustomerUser`-Selects.
  *
  * **F3-Resolution (siehe `ARCHITECTURE_IT6.md` Anhang B §17.3):**
  * Engineering-Convention „setze `select` per Hand" ist nicht durchsetzbar.
  * Diese Datei ist die **zentrale Wahrheit** für CustomerUser-Selects.
+ *
+ * **F3-Erweiterung IT7 (siehe `ARCHITECTURE_IT7.md` §6):**
+ * Public-Helper darf NIEMALS die folgenden Felder ausliefern:
+ *   - `passwordHash`             (Geheimnis — Hash, nie API-facing)
+ *   - `verificationToken`        (Single-use Klartext-Token)
+ *   - `verificationTokenExpiry`  (Hint auf User-Existenz)
+ *   - `oauthId`                  (Provider-spezifische ID)
+ *   - `adminNote` / `adminRating` (interne Admin-Felder, IT6)
  *
  * Regel:
  *   - Jeder Code-Pfad in `src/app/api/customer/*` und in
@@ -12,9 +20,10 @@
  *   - Direkter `findUnique({ where })` ohne `select` ist **verboten**.
  *   - Der CI-Test `tests/architecture/no-raw-customer-user-find.test.ts`
  *     (siehe §17.3.4) blockt PRs, die das umgehen.
+ *   - `scripts/check-dto-leaks.ts` scannt zusätzlich auf forbidden field
+ *     names im Source und ist Pflicht-Gate vor Merge.
  *
- * `selectCustomerUserPublic()`  → keine internen Felder (`adminNote`,
- *                                  `adminRating`).
+ * `selectCustomerUserPublic()`  → keine internen / sensiblen Felder.
  * `selectCustomerUserAdmin()`   → öffentliche Felder + interne Felder.
  *                                  Nur `/api/admin/users*` darf das nutzen.
  */
@@ -24,14 +33,19 @@ import type { Prisma } from '@prisma/client';
 /**
  * Public-/Customer-Select.
  *
- * Enthält **niemals** `adminNote` oder `adminRating`. Strukturell garantiert,
- * dass keine internen Felder rausgehen — selbst wenn das Schema später
- * erweitert wird (per `satisfies Prisma.CustomerUserSelect` typt
- * TypeScript jeden Feldzugriff).
+ * Enthält **niemals**:
+ *   - `adminNote` / `adminRating`     — interne Admin-Felder (IT6).
+ *   - `verificationToken`             — Single-use Klartext-Token.
+ *   - `verificationTokenExpiry`       — Existenz-Hint, intern.
+ *   - `oauthId`                       — Provider-User-ID.
  *
- * Auch `passwordHash`, `verificationToken`, `resetToken`, `resetTokenExpiry`,
- * `verificationTokenExpiry`, `oauthId` werden NICHT gewählt. Wir leiten
- * `hasPassword` im Mapper aus `passwordHash !== null` ab.
+ * Strukturell garantiert via `satisfies Prisma.CustomerUserSelect` — selbst
+ * wenn das Schema später um sensible Felder ergänzt wird, fällt jeder
+ * Vergessene Eintrag bei Code-Review auf.
+ *
+ * `passwordHash` wird ausnahmsweise mitgezogen, damit der Mapper
+ * `toCustomerPublic()` daraus `hasPassword` ableiten kann — wird aber
+ * NIE in der Response durchgereicht.
  */
 export const selectCustomerUserPublic = () =>
   ({
@@ -47,6 +61,13 @@ export const selectCustomerUserPublic = () =>
     // kann — aber NICHT in der Response. Mapper muss explizit raus-mappen.
     passwordHash: true,
     createdAt: true,
+    // BEWUSST AUSGESCHLOSSEN (F3-Erweiterung IT7):
+    //   passwordHash:           im Select, NIE in Response (Mapper raus).
+    //   verificationToken:      false (Geheimnis).
+    //   verificationTokenExpiry false (Existenz-Hint).
+    //   emailVerifiedAt:        intern, wird nicht im Public-Schema geführt.
+    //   oauthId:                false (Provider-spezifisch).
+    //   adminNote / adminRating false (Admin-only, IT6 §17.3).
   }) satisfies Prisma.CustomerUserSelect;
 
 /**
@@ -61,6 +82,7 @@ export const selectCustomerUserAdmin = () =>
     lastName: true,
     phone: true,
     emailVerified: true,
+    emailVerifiedAt: true,
     oauthProvider: true,
     avatarUrl: true,
     // IT6 / US-IT6-07 — interne Felder, NUR Admin:
