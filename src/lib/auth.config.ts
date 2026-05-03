@@ -50,7 +50,12 @@ export const authConfig = {
     },
     authorized({ auth, request }) {
       const { pathname } = request.nextUrl;
-      const PUBLIC_ADMIN_PATHS = ['/admin/login', '/admin/setup'];
+      const PUBLIC_ADMIN_PATHS = [
+        '/admin/login',
+        '/admin/setup',
+        '/admin/passwort-vergessen',
+        '/admin/passwort-reset',
+      ];
       const isPublicAdmin = PUBLIC_ADMIN_PATHS.some(
         (p) => pathname === p || pathname.startsWith(`${p}/`),
       );

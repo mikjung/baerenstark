@@ -6,4 +6,5 @@
  * `/api/customer/verify` (siehe contracts/api-routes.md §11).
  */
 
+export const dynamic = 'force-dynamic';
 export { GET } from '../verify/route';
