@@ -12,7 +12,9 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "postinstall": "prisma generate",
-    "test": "tsx --env-file=.env.local tests/smoke.ts 2>/dev/null || tsx tests/smoke.ts"
+    "test": "tsx --env-file=.env.local tests/smoke.ts 2>/dev/null || tsx tests/smoke.ts",
+    "test:diagnose": "tsx tests/diagnose-verdict.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@fullcalendar/core": "^6.1.20",

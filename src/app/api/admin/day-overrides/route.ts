@@ -12,6 +12,8 @@ import { prisma } from '@/lib/prisma';
 import {
   CreateDayOverrideSchema,
   DayOverrideMonthQuerySchema,
+  DayOverrideListAllQuerySchema,
+  DAY_OVERRIDE_LIST_ALL_MAX,
   ACTIVE_BOOKING_STATUSES,
 } from '@/lib/schemas';
 import {
@@ -55,6 +57,42 @@ export async function GET(req: NextRequest): Promise<Response> {
     }
 
     const url = new URL(req.url);
+    const scopeRaw = url.searchParams.get('scope');
+
+    // IT8 / US-IT8-04: optionaler `?scope=all`-Modus liefert alle
+    // DayOverrides chronologisch aufsteigend, gecappt auf
+    // DAY_OVERRIDE_LIST_ALL_MAX Einträge (DOS-Schutz). Bestehender
+    // `?month=`-Pfad bleibt unverändert (Kalender-Hintergrund-Layer).
+    if (scopeRaw !== null) {
+      const parsedScope = DayOverrideListAllQuerySchema.safeParse({
+        scope: scopeRaw,
+      });
+      if (!parsedScope.success) {
+        return apiError({
+          code: 'VALIDATION_ERROR',
+          message: 'Parameter `scope` muss `all` sein',
+          field: 'scope',
+        });
+      }
+
+      // +1 fetch um zu erkennen, ob mehr als der Cap existiert.
+      const overrides = await prisma.dayOverride.findMany({
+        orderBy: { date: 'asc' },
+        take: DAY_OVERRIDE_LIST_ALL_MAX + 1,
+      });
+      const truncated = overrides.length > DAY_OVERRIDE_LIST_ALL_MAX;
+      const slice = truncated
+        ? overrides.slice(0, DAY_OVERRIDE_LIST_ALL_MAX)
+        : overrides;
+
+      return apiSuccess({
+        scope: 'all' as const,
+        overrides: slice.map(serializeOverride),
+        truncated,
+        cap: DAY_OVERRIDE_LIST_ALL_MAX,
+      });
+    }
+
     const monthRaw = url.searchParams.get('month');
     const parsed = DayOverrideMonthQuerySchema.safeParse({ month: monthRaw });
     if (!parsed.success) {

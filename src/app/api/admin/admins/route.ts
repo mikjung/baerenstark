@@ -65,10 +65,12 @@ export async function GET(): Promise<Response> {
       },
     });
 
-    return apiSuccess({
-      data: admins.map(toListItem),
-      total: admins.length,
-    });
+    // IT8 / US-IT8-01: Response-Shape flach halten — `apiSuccess` umhüllt
+    // bereits mit `{ data }`. Vorher kam dadurch `{ data: { data: [...], total } }`
+    // heraus, was den FE-Crash auf /admin/admins ausgelöst hat (siehe
+    // ARCHITECTURE_IT8.md §1). `total` lässt sich aus `data.length` ableiten;
+    // Konsumenten dürfen das selbst tun.
+    return apiSuccess(admins.map(toListItem));
   } catch (err) {
     return internalError(err);
   }

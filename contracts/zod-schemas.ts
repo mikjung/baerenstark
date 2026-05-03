@@ -808,6 +808,24 @@ export const DayOverrideMonthQuerySchema = z.object({
 });
 export type DayOverrideMonthQuery = z.infer<typeof DayOverrideMonthQuerySchema>;
 
+/**
+ * IT8 / US-IT8-04: Globaler "alle DayOverrides"-Modus.
+ *
+ *   GET /api/admin/day-overrides?scope=all
+ *
+ * Liefert alle Einträge sortiert nach `date` aufsteigend. Hard-Cap:
+ * 365 Einträge (DOS-Schutz, da ein Tag-Override max ~1 pro Kalendertag
+ * sinnvoll ist; siehe ARCHITECTURE_IT8.md §4.2 + QA Minor BUG-IT8-04-B).
+ * Wenn der Cap greift, ist `truncated: true` im Response-Payload.
+ */
+export const DayOverrideListAllQuerySchema = z.object({
+  scope: z.literal('all'),
+});
+export type DayOverrideListAllQuery = z.infer<typeof DayOverrideListAllQuerySchema>;
+
+/** Hard-Cap für `?scope=all` — siehe DayOverrideListAllQuerySchema. */
+export const DAY_OVERRIDE_LIST_ALL_MAX = 365;
+
 // ---------------------------------------------------------------------------
 // Iteration 3 — Verfügbare Zeitslots pro Tag (unverändert)
 // ---------------------------------------------------------------------------

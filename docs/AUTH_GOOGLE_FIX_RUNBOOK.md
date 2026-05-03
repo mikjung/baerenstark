@@ -9,6 +9,47 @@ Meta-Developer-App), unterstützt vom Backend-Engineer.
 > welche Provider aktiv sind, und welche Callback-URLs Google/Facebook
 > erwarten. Nutze diesen Endpoint **als Erstes**, bevor du etwas in der
 > Cloud-Console anfasst.
+>
+> **Iteration 8 Update (US-IT8-05):** Der Endpoint liefert jetzt ein neues
+> Top-Level-Feld `verdict` direkt am Anfang der Antwort. Damit muss Tom
+> nicht mehr manuell durch das JSON scrollen — `verdict.actionRequired`
+> sagt unmissverständlich, ob *du selbst* (Tom) etwas tun musst oder ob
+> der *Engineer* einen Code-Fix deployen muss.
+
+## TOP-0: Lies zuerst `verdict` (IT8)
+
+Wenn du `/api/auth/diagnose` aufrufst, steht ganz oben im JSON:
+
+```jsonc
+{
+  "verdict": {
+    "actionRequired": "code" | "config" | "none",
+    "summary":        "Deutsch, 1–2 Sätze, was zu tun ist.",
+    "codeFailures":   ["check.id1", "..."],
+    "configActions":  ["[check.id] Was Tom tun muss …"]
+  },
+  "checks": [ /* einzelne Check-Ergebnisse */ ],
+  // … (env, providersActive, expectedCallbacks, notes — wie bisher)
+}
+```
+
+So entscheidest du:
+
+- **`actionRequired: "none"`** → Alle Checks grün. Falls Login trotzdem
+  hakt: Cookies löschen, Inkognito-Tab probieren.
+- **`actionRequired: "config"`** → Code ist OK. **Du** musst in Vercel
+  oder in der Cloud-Console etwas tun. `configActions` enthält die
+  konkrete Schritt-Liste; arbeite sie ab und rufe danach den Endpoint
+  erneut auf.
+- **`actionRequired: "code"`** → **Engineer** muss zuerst einen Fix
+  deployen. `codeFailures` listet die betroffenen Check-IDs.
+  Stop hier, wende dich an den Backend-Engineer.
+
+> Hinweis: `auth_secret_length` ist *immer* `warn` mit
+> `actionRequired: "config"`, weil der Endpoint das Secret nie lesen darf.
+> Im Best-Case ist das einzige verbleibende Verdikt deshalb `"config"` —
+> verifiziere manuell, dass dein AUTH_SECRET ≥ 32 Zeichen hat (z.B. aus
+> `openssl rand -base64 32`), dann ist alles in Ordnung.
 
 ## TOP-5-Checkliste — vor jeder Fehlerdiagnose
 

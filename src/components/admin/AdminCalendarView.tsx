@@ -14,7 +14,7 @@
  */
 
 import dynamic from 'next/dynamic';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { SkeletonCard } from '@/components/ui/Skeleton';
@@ -32,7 +32,34 @@ const AppCalendar = dynamic(
   },
 );
 
-type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
+// IT8 / US-IT8-02: Der frühere `'idle'`-Zustand wurde entfernt — die
+// Komponente startet sofort in `'loading'` und triggert den initialen
+// Fetch im `useEffect`. Damit ist der alte Deadlock-Pfad ausgeschlossen.
+type LoadStatus = 'loading' | 'ready' | 'error';
+
+/**
+ * Berechnet den initialen Range, der vor dem Mount von `<AppCalendar>`
+ * geladen wird (US-IT8-02). Default-View des Admin-Kalenders ist
+ * `timeGridWeek` auf Desktop und `timeGridDay` auf Mobile — wir laden eine
+ * komfortable 14-Tage-Spanne (heute − 1, +13 Tage), die beide Ansichten
+ * sicher abdeckt. Sobald FullCalendar gemountet ist, feuert sein
+ * `datesSet`-Hook und wir laden den exakten View-Range nach (de-dupliziert
+ * via `lastRangeRef`, siehe `loadEvents`).
+ */
+function computeInitialRangeBerlin(): { from: string; to: string } {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Berlin',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const today = new Date();
+  const fromDate = new Date(today);
+  fromDate.setDate(fromDate.getDate() - 1);
+  const toDate = new Date(today);
+  toDate.setDate(toDate.getDate() + 13);
+  return { from: fmt.format(fromDate), to: fmt.format(toDate) };
+}
 
 const STATUS_LABEL: Record<BookingStatus, string> = {
   PENDING: 'Offen',
@@ -54,20 +81,64 @@ interface CreatedDraft {
 }
 
 export function AdminCalendarView() {
-  const [status, setStatus] = useState<LoadStatus>('idle');
+  // IT8 / US-IT8-02:
+  // Zuvor: `status: 'idle'` blockierte den Mount von `<AppCalendar>` (Skeleton-
+  // Ersatz). Da `<AppCalendar>` aber die einzige Quelle für `onRangeChange`
+  // war, wurde `loadEvents` nie aufgerufen → `status` blieb für immer `idle`
+  // → Deadlock, kein Kalender sichtbar.
+  // Jetzt: Kalender mountet immer; Skeleton ist Overlay während des
+  // initialen/laufenden Loads. Der initiale Range wird vor dem Mount per
+  // `useEffect` einmal manuell geladen.
+  const [status, setStatus] = useState<LoadStatus>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [popover, setPopover] = useState<PopoverState | null>(null);
   const [draft, setDraft] = useState<CreatedDraft | null>(null);
 
+  /**
+   * De-Duplizierungs-Strategie (QA-Major BUG-IT8-02-A):
+   * - `lastRangeRef`: hält den zuletzt angeforderten `{from,to}` und macht
+   *   `loadEvents` zum No-Op, wenn der Range identisch ist.
+   * - `abortRef`: bricht laufende Fetches ab, sobald ein neuer startet —
+   *   verhindert Race-Conditions, bei denen ein alter Response einen
+   *   neueren `setEvents`-State überschreibt.
+   * - `mountedRef`: gibt frei, ob die Komponente noch montiert ist; verhindert
+   *   `setState` nach Unmount (React-Warning).
+   */
+  const lastRangeRef = useRef<{ from: string; to: string } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+    };
+  }, []);
+
   const loadEvents = useCallback(async (from: string, to: string) => {
+    // De-Dup: Range unverändert → kein erneuter Fetch.
+    const last = lastRangeRef.current;
+    if (last && last.from === from && last.to === to) return;
+    lastRangeRef.current = { from, to };
+
+    // In-Flight-Fetch abbrechen, falls vorhanden.
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
     setStatus('loading');
     setErrorMessage(null);
     try {
-      const data = await fetchAdminCalendarEvents(from, to);
+      const data = await fetchAdminCalendarEvents(from, to, ctrl.signal);
+      if (ctrl.signal.aborted || !mountedRef.current) return;
       setEvents(data);
       setStatus('ready');
     } catch (err) {
+      if (ctrl.signal.aborted || !mountedRef.current) return;
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      // Auch bei Fehlern: Kalender bleibt sichtbar, Banner zeigt Fehler.
       setStatus('error');
       if (err instanceof ApiClientError) {
         if (err.status === 404) {
@@ -84,6 +155,15 @@ export function AdminCalendarView() {
       }
     }
   }, []);
+
+  // Initialer Range-Fetch vor dem Mount von `<AppCalendar>` — löst den
+  // IT7-Deadlock auf (US-IT8-02). `datesSet` aus FullCalendar feuert dann
+  // ggf. mit dem exakten View-Range; `loadEvents` filtert das via
+  // `lastRangeRef` als No-Op heraus, wenn der Range identisch ist.
+  useEffect(() => {
+    const { from, to } = computeInitialRangeBerlin();
+    void loadEvents(from, to);
+  }, [loadEvents]);
 
   const handleRangeChange = useCallback(
     (from: string, to: string) => {
@@ -211,17 +291,30 @@ export function AdminCalendarView() {
         </Banner>
       )}
 
-      <div className="rounded-lg border border-baerenstark-sand bg-white p-2 sm:p-4">
-        {status === 'idle' || status === 'loading' ? (
-          <SkeletonCard />
-        ) : (
-          <AppCalendar
-            mode="admin"
-            events={events}
-            onRangeChange={handleRangeChange}
-            onEventClick={handleEventClick}
-            onSelectRange={handleSelectRange}
-          />
+      {/*
+        IT8 / US-IT8-02: `<AppCalendar>` immer mounten, damit der Mount nicht
+        vom Load-Status abhängt (alter Bug: Skeleton-Ersatz blockierte den
+        einzigen Range-Change-Trigger). Skeleton liegt jetzt als Overlay über
+        dem Kalender, solange der initiale/laufende Fetch nicht abgeschlossen
+        ist.
+      */}
+      <div className="relative rounded-lg border border-baerenstark-sand bg-white p-2 sm:p-4">
+        <AppCalendar
+          mode="admin"
+          events={events}
+          onRangeChange={handleRangeChange}
+          onEventClick={handleEventClick}
+          onSelectRange={handleSelectRange}
+        />
+        {status === 'loading' && (
+          <div
+            className="pointer-events-none absolute inset-0 flex items-start justify-center rounded-lg bg-white/60 p-4"
+            aria-hidden="true"
+          >
+            <div className="w-full max-w-md">
+              <SkeletonCard />
+            </div>
+          </div>
         )}
       </div>
 

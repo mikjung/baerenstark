@@ -58,6 +58,20 @@ export function AdminUserTable({ currentAdminId }: Props) {
     setErrorMessage(null);
     try {
       const res = await fetchAdmins();
+      // IT8 / US-IT8-01: Defensive Guard zusätzlich zum Guard in
+      // `fetchAdmins()` selbst — schützt gegen jeden zukünftigen
+      // Vertrags-Drift, bei dem der Client unverändert bleibt, der Server
+      // aber wieder das ursprüngliche `{data: {data, total}}`-Format
+      // zurückliefert. Verhindert, dass `admins.filter is not a function`
+      // jemals wieder die weiße Seite verursacht.
+      if (!Array.isArray(res?.data)) {
+        setStatus('error');
+        setErrorMessage(
+          'Admin-Liste hat ein unerwartetes Format. Bitte Seite neu laden.',
+        );
+        setAdmins([]);
+        return;
+      }
       setAdmins(res.data);
       setStatus('ready');
     } catch (err) {

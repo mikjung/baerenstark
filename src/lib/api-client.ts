@@ -515,6 +515,28 @@ export async function fetchDayOverrides(
   return res.data;
 }
 
+/**
+ * IT8 / US-IT8-04: Lädt **alle** Day-Overrides (kein Monatsfilter), sortiert
+ * chronologisch aufsteigend nach Datum. Backend cappt auf
+ * `DAY_OVERRIDE_LIST_ALL_MAX = 365` Einträge — wenn der Cap greift, ist
+ * `truncated: true` im Response-Payload (UI zeigt einen Hinweis).
+ */
+export interface DayOverrideListAllResponse {
+  scope: 'all';
+  overrides: DayOverride[];
+  truncated?: boolean;
+}
+
+export async function fetchAllDayOverrides(
+  signal?: AbortSignal,
+): Promise<DayOverrideListAllResponse> {
+  const res = await request<DataEnvelope<DayOverrideListAllResponse>>(
+    '/api/admin/day-overrides?scope=all',
+    { signal },
+  );
+  return res.data;
+}
+
 export interface CreateDayOverrideResult {
   override: DayOverride;
   warning: {

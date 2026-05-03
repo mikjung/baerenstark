@@ -11,6 +11,7 @@ import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { CreateSlotSchema } from '@/lib/schemas';
 import { apiError, apiSuccess, internalError, zodErrorResponse } from '@/lib/api';
+import { berlinDateStartUtc, formatDateInBerlin } from '@/lib/calendar';
 import { revalidateTag } from 'next/cache';
 
 export const dynamic = 'force-dynamic';
@@ -19,10 +20,34 @@ export const runtime = 'nodejs';
 const DEFAULT_LOOKAHEAD_DAYS = 90;
 
 /**
+ * Liefert „heute 00:00 Europe/Berlin" als UTC-`Date`. Wird vom Admin-Default
+ * für `GET /api/slots` benutzt, damit am selben Kalendertag in Berlin
+ * bereits angelegte (aber zeitlich verstrichene) Slots nicht ausgefiltert
+ * werden — siehe US-IT8-03.
+ */
+function startOfTodayBerlinUtc(): Date {
+  const today = formatDateInBerlin(new Date()); // "YYYY-MM-DD" in Berlin-Zeit
+  const [yyyy, mm, dd] = today.split('-').map(Number);
+  return berlinDateStartUtc(yyyy ?? 1970, mm ?? 1, dd ?? 1);
+}
+
+/**
  * GET /api/slots
- *   Filter: deletedAt IS NULL, startsAt zwischen `from` (default now) und `to`
- *   (default now + 90 Tage). Sortiert nach startsAt asc.
+ *   Filter: deletedAt IS NULL, startsAt zwischen `from` (default abhängig
+ *   von Auth-Status) und `to` (default now + 90 Tage). Sortiert nach
+ *   startsAt asc.
  *   isBooked = true ⇔ es existiert ein Booking mit Status PENDING ODER CONFIRMED.
+ *
+ *   IT8 / US-IT8-03: Default-`from` ist auth-abhängig:
+ *     - Admin-Session vorhanden → „heute 00:00 Europe/Berlin" (damit
+ *       heutige Slots, die nachträglich gepflegt wurden, in der Liste
+ *       sichtbar sind).
+ *     - Sonst (öffentliche Buchungs-View) → `now()` wie zuvor (verstrichene
+ *       Slots des heutigen Vormittags bleiben für Kunden ausgeblendet —
+ *       keine Public-View-Regression, siehe QA_DESIGN_REVIEW_IT8.md
+ *       BUG-IT8-03-A Option 1).
+ *   Explizite `?from=`/`?to=` Query-Parameter überschreiben den Default
+ *   in beiden Fällen.
  */
 export async function GET(req: NextRequest): Promise<Response> {
   try {
@@ -31,7 +56,11 @@ export async function GET(req: NextRequest): Promise<Response> {
     const toParam = url.searchParams.get('to');
 
     const now = new Date();
-    const from = fromParam ? new Date(fromParam) : now;
+    const session = await auth();
+    const isAdminCaller = !!session?.user;
+    const defaultFrom = isAdminCaller ? startOfTodayBerlinUtc() : now;
+
+    const from = fromParam ? new Date(fromParam) : defaultFrom;
     const to =
       toParam
         ? new Date(toParam)

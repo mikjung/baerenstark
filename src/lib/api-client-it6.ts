@@ -116,8 +116,28 @@ export interface AdminListResponse {
   total: number;
 }
 
+/**
+ * IT8 / US-IT8-01: Backend liefert nun den flachen Vertrag
+ *   `{ data: AdminListItem[] }`
+ * (symmetrisch zu `createAdmin`/`updateAdmin`). Der frühere geschachtelte
+ * `{ data: { data: [...], total: N } }`-Vertrag hatte die Admin-Liste
+ * mit einem TypeError abrauchen lassen (`admins.filter is not a function`),
+ * weil der FE-Client das Outer-`data`-Objekt direkt an `setAdmins` reichte.
+ *
+ * Defensive-Read: Wir prüfen explizit, dass `res.data` ein Array ist, und
+ * werfen sonst einen klar lesbaren `ApiClientError`. Damit ist ein
+ * zukünftiger Schema-Drift sofort sichtbar und erzeugt keine weiße Seite.
+ */
 export async function fetchAdmins(signal?: AbortSignal): Promise<AdminListResponse> {
-  return request<AdminListResponse>('/api/admin/admins', { signal });
+  const res = await request<DataEnvelope<AdminListItem[]>>('/api/admin/admins', { signal });
+  if (!Array.isArray(res?.data)) {
+    throw new ApiClientError(
+      500,
+      'INTERNAL_ERROR',
+      'Unerwartetes Antwortformat der Admin-Liste. Bitte Seite neu laden oder den Support kontaktieren.',
+    );
+  }
+  return { data: res.data, total: res.data.length };
 }
 
 export async function createAdmin(input: CreateAdminInput): Promise<AdminListItem> {

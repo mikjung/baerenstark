@@ -1766,3 +1766,284 @@ auf Deutsch. Rate-Limiting via Upstash.
 - IT6 — Finaler Preis (US-IT6-08): `final_price_eur` ist vom Stripe-Betrag (US-28) getrennt — deckt auch Barzahlung und manuelle Korrekturen ab. Dezimaltrenner in der UI: Komma (DE-Format).
 - IT6 — Analytics (US-IT6-09): Nur Buchungen mit Status `COMPLETED` und gesetztem `final_price_eur` fließen in Umsatzsummen ein. Empfohlene Charting-Bibliothek: `recharts`.
 - IT6 — SEO (US-IT6-04): `openingHours` im Structured Data (LocalBusiness) muss Tom bestätigen. Platzhalter: Mo–Fr 07:00–18:00. Lighthouse-Score 80+ auf Desktop ist Richtwert.
+
+---
+
+## Iteration 8 — Bugfix-Sweep & DayOverride-Sichtbarkeit
+
+### Kontext
+
+Nach dem Go-Live von Iteration 7 hat Tom fünf Produktionsprobleme gemeldet.
+Drei davon sind kritische Bugs, die Admin-Arbeit blockieren (weiße Seiten,
+fehlender Kalender, nicht aktualisierte Zeitfenster-Liste). Eine Story
+adressiert fehlende UI-Sichtbarkeit für DayOverrides. Eine Story untersucht
+den weiterhin fehlschlagenden Google-OAuth-Flow und klärt verbindlich, ob
+es sich um einen Code-Bug oder eine ausstehende Cloud-Console-Konfiguration
+handelt.
+
+Iteration 8 enthält ausschließlich die gemeldeten Probleme — keine neuen
+Features.
+
+---
+
+#### US-IT8-01: Admin-Verwaltungsseite `/admin/admins` — Client-Side-Crash beheben
+
+> **Kritischer Bug.** `/admin/admins` wirft einen unbehandelten Client-Side-
+> Fehler und zeigt nur eine weiße Seite. Tom kann die Admin-Verwaltung nicht
+> nutzen. Ursache ist unbekannt — wahrscheinlich ein fehlender Error-Boundary,
+> ein ungültiger Datenzugriff auf `undefined` oder eine fehlende Null-Prüfung
+> in der Komponente.
+
+**Als** Admin (Tom)
+**möchte ich** die Seite `/admin/admins` fehlerfrei aufrufen können,
+**damit** ich Admins einsehen und verwalten kann, ohne auf eine weiße Fehlerseite
+zu treffen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/admin/admins` auf,
+  **When** die Seite lädt,
+  **Then** sehe ich entweder die Admin-Liste oder — falls noch keine Admins
+  vorhanden sind — einen leeren Zustand mit erklärendem Text, aber niemals
+  eine weiße Seite oder „Application error".
+
+- **Given** der API-Call zum Laden der Admin-Liste schlägt fehl (z. B. Netzwerk
+  oder Datenbankfehler),
+  **When** die Komponente den Fehler empfängt,
+  **Then** zeigt sie eine lesbare Fehlermeldung (kein leerer Screen, kein
+  unbehandelter Crash).
+
+- **Given** der Entwickler öffnet die Browser-Konsole auf `/admin/admins`,
+  **When** die Seite vollständig geladen ist,
+  **Then** erscheinen keine unbehandelten JavaScript-Exceptions.
+
+- **Given** der Crash wurde behoben,
+  **When** der CI-Build läuft,
+  **Then** ist `next build` ohne Typ- oder Laufzeitfehler in der betreffenden
+  Komponente erfolgreich.
+
+**Hinweis:** Entwickler prüft zuerst die Browser-Konsole auf den genauen
+Stack-Trace, um die fehlerhafte Zeile zu identifizieren, bevor Code geändert
+wird. Error-Boundary auf Seiten-Ebene im Admin-Bereich empfohlen.
+
+**Priorität:** Must Have | **Story Points:** 2
+
+---
+
+#### US-IT8-02: Admin-Kalender `/admin/calendar` — Kalender-Komponente rendert nicht
+
+> **Kritischer Bug.** Die Seite `/admin/calendar` lädt ohne Fehler, zeigt
+> aber keinen Kalender. Die Kalender-Komponente (wahrscheinlich
+> `react-big-calendar` oder `@fullcalendar/react` aus IT6-Annahme) wird
+> nicht gerendert. Ursache ist unklar — mögliche Kandidaten: fehlende CSS-
+> Imports, SSR-/Hydrations-Problem, leeres Datenfetch-Ergebnis ohne
+> Fallback-Rendering, oder fehlerhafte Prop-Übergabe.
+
+**Als** Admin (Tom)
+**möchte ich** auf `/admin/calendar` einen Kalender sehen, der meine
+bestätigten Buchungen anzeigt,
+**damit** ich meinen Terminüberblick nutzen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/admin/calendar` auf,
+  **When** die Seite geladen ist,
+  **Then** ist die Kalender-Komponente sichtbar (Tages-/Wochen-/Monatsraster
+  erkennbar) — auch wenn noch keine Buchungen vorhanden sind.
+
+- **Given** es existieren bestätigte Buchungen in der Datenbank,
+  **When** ich den Kalender aufrufe,
+  **Then** erscheinen die Buchungen als Einträge im Kalender.
+
+- **Given** es existieren keine Buchungen,
+  **When** der Kalender lädt,
+  **Then** wird das leere Kalender-Raster trotzdem korrekt dargestellt
+  (kein leerer weißer Bereich ohne Raster).
+
+- **Given** der Fix ist eingespielt,
+  **When** ich die Seite im Browser-DevTools-Tab „Network" beobachte,
+  **Then** werden die erforderlichen CSS-Assets der Kalender-Bibliothek
+  erfolgreich geladen (HTTP 200).
+
+**Hinweis:** Typische Ursachen bei `react-big-calendar`: fehlendes
+`import 'react-big-calendar/lib/css/react-big-calendar.css'`. Bei
+`@fullcalendar/react`: fehlendes CSS-Plugin oder `dynamic()` ohne
+`{ ssr: false }`. Entwickler prüft beide Kandidaten.
+
+**Priorität:** Must Have | **Story Points:** 2
+
+---
+
+#### US-IT8-03: Zeitfenster-Liste `/admin/slots` — Liste nach Speichern nicht aktualisiert
+
+> **Kritischer Bug.** Nach dem Absenden des Zeitfenster-Formulars auf
+> `/admin/slots` erscheint das neu gespeicherte Zeitfenster nicht in der
+> Liste. Der Form-Submit selbst scheint zu funktionieren (kein sichtbarer
+> Fehler). Ursache ist wahrscheinlich: (a) der GET-Request nach dem POST
+> wird nicht neu ausgelöst (fehlende Revalidation), (b) der POST-Endpoint
+> gibt keinen Fehler zurück, aber das Slot-Objekt wird nicht korrekt in der
+> DB persistiert, oder (c) der GET-Endpoint filtert falsch und gibt ein
+> leeres Array zurück.
+
+**Als** Admin (Tom)
+**möchte ich**, dass ein neu gespeichertes Zeitfenster sofort in der
+Zeitfenster-Liste erscheint,
+**damit** ich den Erfolg meiner Eingabe direkt bestätigt sehe und weiterarbeiten
+kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich fülle das Zeitfenster-Formular korrekt aus und klicke
+  „Speichern",
+  **When** der POST erfolgreich abgeschlossen ist,
+  **Then** erscheint das neue Zeitfenster ohne Seitenneuladen in der Liste
+  darunter.
+
+- **Given** ich speichere ein Zeitfenster,
+  **When** ich anschließend die Seite manuell neu lade (F5),
+  **Then** ist das Zeitfenster weiterhin in der Liste sichtbar — es ist
+  persistent in der Datenbank gespeichert.
+
+- **Given** der Entwickler prüft den GET-Endpoint (`GET /api/admin/slots`
+  o. Ä.),
+  **When** er die Datenbank direkt abfragt (Prisma Studio oder SQL),
+  **Then** ist dokumentiert, ob das Slot-Objekt nach dem POST in der DB
+  vorhanden ist (Persistenz-Check vor UI-Fix).
+
+- **Given** der POST-Endpoint antwortet mit HTTP 200/201,
+  **When** die UI den Response erhält,
+  **Then** löst sie exakt einen GET-Request aus, um die Liste zu
+  aktualisieren — kein vollständiges Page-Reload erforderlich.
+
+**Hinweis:** Entwickler prüft in dieser Reihenfolge: (1) Ist das Slot-Objekt
+nach dem POST in der DB? (2) Gibt der GET den Slot zurück? (3) Aktualisiert
+die UI-State den List nach dem POST korrekt? Erst dann ist klar, auf welcher
+Schicht der Bug sitzt.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT8-04: DayOverride-Liste in `DayOverrideManager.tsx` sichtbar machen
+
+> **Fehlende UI-Funktion.** Tom hat DayOverrides (tagesspezifische
+> Öffnungszeiten-Überschreibungen) eingetragen, kann sie aber nirgends
+> einsehen oder bearbeiten. Die Komponente `DayOverrideManager.tsx` enthält
+> wahrscheinlich nur ein Formular zum Anlegen, aber keine Liste der
+> vorhandenen Einträge. Diese Story ergänzt die Listenansicht.
+
+**Als** Admin (Tom)
+**möchte ich** alle eingetragenen DayOverrides in einer übersichtlichen Liste
+sehen können,
+**damit** ich überblicken kann, welche Tages-Überschreibungen aktiv sind, und
+einzelne Einträge bei Bedarf löschen oder anpassen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne die Seite, die `DayOverrideManager.tsx` enthält,
+  **When** die Komponente lädt,
+  **Then** sehe ich eine Liste aller gespeicherten DayOverrides mit mindestens:
+  Datum, überschriebenen Öffnungszeiten (oder „Geschlossen"), und einem
+  Löschen-Button pro Eintrag.
+
+- **Given** es sind keine DayOverrides vorhanden,
+  **When** die Liste lädt,
+  **Then** erscheint ein leerer Zustand mit dem Text „Keine Überschreibungen
+  eingetragen."
+
+- **Given** ich klicke auf „Löschen" für einen DayOverride-Eintrag,
+  **When** ich die Aktion bestätige,
+  **Then** wird der Eintrag aus der Datenbank entfernt und verschwindet sofort
+  aus der Liste ohne Seitenneuladen.
+
+- **Given** ich lege einen neuen DayOverride über das bestehende Formular an,
+  **When** das Speichern erfolgreich war,
+  **Then** erscheint der neue Eintrag sofort in der Liste (analog zu
+  US-IT8-03-Verhalten).
+
+- **Given** ein DayOverride-Datum liegt in der Vergangenheit,
+  **When** die Liste geladen wird,
+  **Then** ist der Eintrag visuell als „vergangen" markiert (z. B. ausgegraut)
+  — er bleibt sichtbar, wird aber optisch unterschieden.
+
+**Hinweis:** GET-Endpoint für alle DayOverrides muss geprüft oder angelegt
+werden, falls noch nicht vorhanden. Sortierung: chronologisch aufsteigend
+nach Datum. Vergangene Einträge können automatisch ausgeblendet werden —
+Tom bestätigen, was er bevorzugt (Annahme: sichtbar aber ausgegraut).
+
+**Priorität:** Should Have | **Story Points:** 3
+
+---
+
+#### US-IT8-05: Google-OAuth-Diagnose verbindlich abschließen — Code-Bug vs. Config-Aufgabe
+
+> **Abhängig von US-IT7-02 + Runbook `docs/AUTH_GOOGLE_FIX_RUNBOOK.md`.**
+> Google OAuth schlägt in Produktion weiterhin fehl (`redirect_uri_mismatch`
+> oder ähnlich), obwohl IT7 einen Diagnose-Endpoint (`/api/auth/diagnose`)
+> geliefert hat. Das Runbook wurde nicht erfolgreich ausgeführt. Diese Story
+> hat ein eng gefasstes Akzeptanzkriterium: Nicht „Tom kann sich einloggen"
+> (das hängt von Toms Cloud-Console-Konfiguration ab), sondern: Der
+> Diagnose-Endpoint zeigt eindeutig grün/rot pro Check, sodass klar ist,
+> ob auf Code-Seite noch etwas fehlt oder ob Tom selbst einen Konfigurationsschritt
+> in der Google Cloud Console ausführen muss.
+
+**Als** Admin (Tom)
+**möchte ich** durch einen einzigen Aufruf von `/api/auth/diagnose`
+unmissverständlich sehen, ob Google OAuth auf Code-Seite korrekt konfiguriert
+ist — und falls nicht, welcher konkrete Schritt fehlt,
+**damit** ich ohne Entwickler-Unterstützung entscheiden kann, ob ich selbst
+in der Google Cloud Console etwas ändern muss oder ob zuerst ein Code-Fix
+deployt werden muss.
+
+**Akzeptanzkriterien:**
+
+- **Given** `AUTH_DIAGNOSE_ENABLED=true` ist in den Vercel-ENV-Vars gesetzt,
+  **When** ich `GET /api/auth/diagnose` in Produktion aufrufe,
+  **Then** liefert der Endpoint ein JSON-Objekt mit einem `checks`-Array,
+  in dem jeder Check ein `status`-Feld (`"ok"` | `"error"` | `"warning"`)
+  und ein `message`-Feld auf Deutsch enthält.
+
+- **Given** `NEXTAUTH_URL` fehlt oder enthält einen Trailing-Slash,
+  **When** der Diagnose-Endpoint ausgeführt wird,
+  **Then** erscheint dieser Check mit `status: "error"` und einer Meldung,
+  die den genauen Ist-Wert und den erwarteten Soll-Wert nennt.
+
+- **Given** `AUTH_SECRET` (oder `NEXTAUTH_SECRET`) ist nicht gesetzt,
+  **When** der Diagnose-Endpoint ausgeführt wird,
+  **Then** erscheint dieser Check mit `status: "error"` — der Geheimwert
+  selbst wird nie ausgegeben, nur ob er gesetzt ist.
+
+- **Given** `GOOGLE_CLIENT_ID` oder `GOOGLE_CLIENT_SECRET` fehlen,
+  **When** der Diagnose-Endpoint ausgeführt wird,
+  **Then** zeigt `providersActive.google: false` mit `status: "error"` und
+  dem Hinweis „ENV-Var GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET fehlt."
+
+- **Given** alle Code-seitigen Checks sind `"ok"`,
+  **When** der Diagnose-Endpoint ausgeführt wird,
+  **Then** enthält das JSON einen Abschnitt `"actionRequired": "config"` mit
+  der Anweisung, welche exakten Redirect-URIs (`expectedCallbacks.google`)
+  Tom in der Google Cloud Console eintragen muss — damit ist für Tom
+  eindeutig: „Code ist korrekt, ich muss selbst in der Console etwas tun."
+
+- **Given** mindestens ein Code-seitiger Check ist `"error"`,
+  **When** der Diagnose-Endpoint ausgeführt wird,
+  **Then** enthält das JSON `"actionRequired": "code"` mit einer Auflistung
+  der fehlgeschlagenen Checks — damit ist für den Entwickler eindeutig,
+  welcher Code-Fix vor Toms Cloud-Console-Aktion deployt werden muss.
+
+- **Given** alle Checks sind `"ok"` und Tom hat die Redirect-URIs laut
+  `expectedCallbacks.google` korrekt in der Google Cloud Console eingetragen,
+  **When** Tom auf „Mit Google anmelden" klickt,
+  **Then** schlägt der OAuth-Flow nicht mehr mit `redirect_uri_mismatch`
+  fehl (dieser Schritt ist Tom-seitige Config-Verifikation, kein
+  automatisierter Test).
+
+**Hinweis:** Akzeptanzkriterium für „Erfolg" dieser Story ist ausdrücklich
+der grün/rot-Diagnose-Output — nicht der funktionierende Login (der hängt
+von Toms Cloud-Console-Konfiguration ab und liegt außerhalb des Code-Repos).
+Falls der Diagnose-Endpoint einen Code-Bug aufdeckt, ist der Fix Teil dieser
+Story. Falls alle Checks grün sind, liefert der Entwickler Tom einen
+Screenshot des Diagnose-Outputs mit den einzutragenden Redirect-URIs als
+einzige verbleibende Aufgabe.
+
+**Priorität:** Must Have | **Story Points:** 3
