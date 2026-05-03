@@ -1,16 +1,17 @@
 'use client';
 
 /**
- * US-17 — Zeitslot-Picker.
+ * US-17 — Zeitslot-Picker (Iteration 5: Dauer-aware, US-33).
  *
- * Lädt nach Tag-Auswahl `GET /api/slots/available?date=YYYY-MM-DD` und
- * zeigt die zurückgegebenen Blöcke als klickbare Kacheln.
+ * Lädt nach Tag- + Dauer-Auswahl `GET /api/slots/available?date=...&duration=...`
+ * und zeigt die zurückgegebenen Blöcke als klickbare Kacheln.
  *
  * Zustände:
- *   - loading  → Skeleton-Grid
- *   - ready    → Kacheln (verfügbar / belegt / ausgewählt)
- *   - empty    → "Tag nicht verfügbar" + Telefonnummer
- *   - error    → Fehler-Banner mit Retry
+ *   - idle      → keine Tag/Dauer-Auswahl, nichts gerendert
+ *   - loading   → Skeleton-Grid
+ *   - ready     → Kacheln (verfügbar / belegt / ausgewählt)
+ *   - empty     → "Tag nicht verfügbar" + Telefonnummer
+ *   - error     → Fehler-Banner mit Retry
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -25,11 +26,15 @@ export interface SelectedTimeSlot {
   date: string;
   startTime: string;
   endTime: string;
+  /** Iteration 5: tatsächlich gewählte Dauer (Minuten). */
+  durationMinutes: number;
 }
 
 interface TimeSlotPickerProps {
   /** "YYYY-MM-DD" — wenn null, rendert die Komponente nichts. */
   date: string | null;
+  /** Iteration 5 (US-33): vom Kunden gewählte Dauer (Minuten). */
+  duration: number | null;
   /** Aktuell ausgewählter Slot (oder null). */
   selectedSlot: SelectedTimeSlot | null;
   onSelect: (slot: SelectedTimeSlot) => void;
@@ -46,8 +51,13 @@ function isSameSlot(
   return a.date === date && a.startTime === s.startTime && a.endTime === s.endTime;
 }
 
+function formatRange(startTime: string, endTime: string): string {
+  return `${startTime} – ${endTime} Uhr`;
+}
+
 export function TimeSlotPicker({
   date,
+  duration,
   selectedSlot,
   onSelect,
 }: TimeSlotPickerProps) {
@@ -57,11 +67,11 @@ export function TimeSlotPicker({
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
-      if (!date) return;
+      if (!date || duration == null) return;
       setStatus('loading');
       setErrorMessage(null);
       try {
-        const result = await fetchAvailableSlots(date, signal);
+        const result = await fetchAvailableSlots(date, duration, signal);
         setData(result);
         setStatus('ready');
       } catch (err) {
@@ -74,11 +84,11 @@ export function TimeSlotPicker({
         );
       }
     },
-    [date],
+    [date, duration],
   );
 
   useEffect(() => {
-    if (!date) {
+    if (!date || duration == null) {
       setData(null);
       setStatus('idle');
       return;
@@ -86,10 +96,21 @@ export function TimeSlotPicker({
     const ctrl = new AbortController();
     void load(ctrl.signal);
     return () => ctrl.abort();
-  }, [date, load]);
+  }, [date, duration, load]);
 
   if (!date) {
     return null;
+  }
+
+  if (duration == null) {
+    return (
+      <Banner tone="info">
+        <p>
+          Bitte wähle zuerst die gewünschte Auftragsdauer — dann zeigen wir dir
+          die passenden freien Zeitfenster.
+        </p>
+      </Banner>
+    );
   }
 
   if (status === 'loading') {
@@ -129,7 +150,7 @@ export function TimeSlotPicker({
         <p className="mb-3">
           {data.overrideReason
             ? `Hinweis: ${data.overrideReason}`
-            : 'An diesem Tag bietet Tom keine Termine an.'}{' '}
+            : 'An diesem Tag bietet Tom keine Termine an oder die gewählte Dauer passt nicht in das verfügbare Zeitfenster.'}{' '}
           Falls es dringend ist, ruf uns gerne direkt an:
         </p>
         <a
@@ -149,15 +170,15 @@ export function TimeSlotPicker({
     <div className="space-y-3">
       <div
         role="radiogroup"
-        aria-label="Verfügbare Zeitslots"
+        aria-label={`Verfügbare Zeitslots (${duration} Minuten)`}
         className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4"
       >
         {data.slots.map((s) => {
           const selected = isSameSlot(selectedSlot, data.date, s);
           const disabled = !s.available;
-          const label = `${s.startTime} – ${s.endTime} Uhr`;
+          const label = formatRange(s.startTime, s.endTime);
           const ariaLabel = disabled
-            ? `${label} (bereits gebucht)`
+            ? `${label} (nicht verfügbar)`
             : selected
               ? `${label} (ausgewählt)`
               : `${label}`;
@@ -175,6 +196,7 @@ export function TimeSlotPicker({
                   date: data.date,
                   startTime: s.startTime,
                   endTime: s.endTime,
+                  durationMinutes: duration,
                 });
               }}
               className={[
@@ -196,8 +218,10 @@ export function TimeSlotPicker({
       {!anyAvailable && (
         <Banner tone="warning" title="Alle Termine an diesem Tag sind belegt">
           <p>
-            Bitte wähle einen anderen Tag aus dem Kalender oder ruf uns direkt
-            an: <strong>{CONTACT.phoneDisplay}</strong>.
+            Für die gewählte Dauer ({duration} Minuten) ist an diesem Tag kein
+            freies Zeitfenster verfügbar. Bitte wähle eine andere Dauer oder
+            einen anderen Tag im Kalender — oder ruf uns direkt an:{' '}
+            <strong>{CONTACT.phoneDisplay}</strong>.
           </p>
         </Banner>
       )}

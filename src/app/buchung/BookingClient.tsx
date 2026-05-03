@@ -1,19 +1,18 @@
 'use client';
 
 /**
- * Iteration 3 — Buchungs-Client.
+ * Iteration 5 — Buchungs-Client (US-32 Adresse, US-33 Dauer).
  *
  * Flow:
  *   1. Kunde wählt Tag im Kalender (US-16, vorhandener Calendar bleibt).
- *   2. Nach Tag-Auswahl lädt der TimeSlotPicker die verfügbaren Blöcke
- *      via GET /api/slots/available?date=... (US-17).
- *   3. Kunde wählt einen Block → BookingForm öffnet sich.
- *   4. Kunde füllt Formular aus, optional Datei-Upload (US-18), Submit
- *      schickt POST /api/bookings mit { date, startTime, endTime, ... }.
+ *   2. Kunde wählt Auftragsdauer (DurationPicker, IT5 / US-33).
+ *   3. TimeSlotPicker lädt verfügbare Blöcke der gewählten Dauer
+ *      (`/api/slots/available?date=...&duration=...`).
+ *   4. Kunde wählt einen Block → BookingForm (Adresse + Daten).
+ *   5. POST /api/bookings sendet
+ *      `{ date, startTime, endTime, durationMinutes, addressStreet, ... }`.
  *
- * Re-Booking-Modus (rebookToken in URL): Der alte Slot-basierte Flow wird
- * weiterhin unterstützt — der Calendar zeigt verfügbare Slots, BookingForm
- * geht in den Rebook-Modus.
+ * Re-Booking-Modus (rebookToken in URL): Slot-basierte IT2-Logik bleibt.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -21,7 +20,11 @@ import { useSearchParams } from 'next/navigation';
 import { BookingForm } from '@/components/booking/BookingForm';
 import { Calendar } from '@/components/booking/Calendar';
 import { SlotList } from '@/components/booking/SlotList';
-import { TimeSlotPicker, type SelectedTimeSlot } from '@/components/booking/TimeSlotPicker';
+import {
+  TimeSlotPicker,
+  type SelectedTimeSlot,
+} from '@/components/booking/TimeSlotPicker';
+import { DurationPicker } from '@/components/booking/DurationPicker';
 import { Banner } from '@/components/ui/Banner';
 import {
   ApiClientError,
@@ -30,8 +33,12 @@ import {
   type RebookInfoResponse,
 } from '@/lib/api-client';
 import type { SlotPublic } from '@/lib/schemas';
+import { SERVICE_LIST, type Service } from '@/lib/services';
 
 type LoadStatus = 'loading' | 'ready' | 'error';
+
+/** Default-Dauer wenn der Kunde noch nichts gewählt hat. */
+const DEFAULT_DURATION_MINUTES = 120;
 
 /**
  * Liefert YYYY-MM-DD eines Slot-Starts in Europe/Berlin (Re-Booking-Filter).
@@ -47,6 +54,11 @@ function slotDateInBerlin(iso: string): string {
   }).format(d);
 }
 
+function isService(slug: string | null): slug is Service {
+  if (!slug) return false;
+  return SERVICE_LIST.some((s) => s.slug === slug);
+}
+
 export function BookingClient() {
   const params = useSearchParams();
   const rebookToken = params.get('rebookToken');
@@ -57,6 +69,13 @@ export function BookingClient() {
   // === IT3-Modus: Datum + Zeit ===
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<SelectedTimeSlot | null>(null);
+
+  // === IT5: Dauer-Auswahl ===
+  const [durationMinutes, setDurationMinutes] = useState<number | null>(null);
+
+  // === IT5: Service (für Preis-Schätzung im DurationPicker) ===
+  const initialService: Service | null = isService(defaultService) ? defaultService : null;
+  const [pickedService, setPickedService] = useState<Service | null>(initialService);
 
   // === Bestand: Slot-basiert (für Re-Booking) ===
   const [legacyStatus, setLegacyStatus] = useState<LoadStatus>('ready');
@@ -152,7 +171,19 @@ export function BookingClient() {
     if (selectedTimeSlot && selectedTimeSlot.date !== date) {
       setSelectedTimeSlot(null);
     }
-    // Sanft zur Slot-Liste scrollen
+    // Sanft zur Dauer-Sektion scrollen
+    setTimeout(() => {
+      document
+        .getElementById('duration-section')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+  }
+
+  function handleDurationSelect(minutes: number) {
+    setDurationMinutes(minutes);
+    // Wenn der Kunde die Dauer wechselt, den bisher gewählten Zeitslot fallen lassen
+    // (der gehört zur alten Dauer und ist nicht mehr gültig).
+    setSelectedTimeSlot(null);
     setTimeout(() => {
       document
         .getElementById('slot-list-section')
@@ -168,6 +199,18 @@ export function BookingClient() {
         ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 50);
   }
+
+  // Im Re-Booking-Modus brauchen wir keine Dauer-Auswahl (Slot enthält die Zeit).
+  const showDurationPicker = !isRebookMode;
+  const showTimeSlotPicker = !isRebookMode;
+
+  // Der Default für die Dauer wird gesetzt, sobald ein Tag gewählt ist —
+  // das vermeidet eine "leere" Dauer im Picker.
+  useEffect(() => {
+    if (!isRebookMode && selectedDate && durationMinutes == null) {
+      setDurationMinutes(DEFAULT_DURATION_MINUTES);
+    }
+  }, [selectedDate, durationMinutes, isRebookMode]);
 
   return (
     <div className="space-y-10">
@@ -210,13 +253,43 @@ export function BookingClient() {
         <Calendar selectedDate={selectedDate} onSelectDay={handleDaySelect} />
       </section>
 
+      {showDurationPicker && (
+        <section
+          aria-labelledby="duration-heading"
+          id="duration-section"
+        >
+          <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+            <h2
+              id="duration-heading"
+              className="font-serif text-2xl font-semibold text-baerenstark-bark"
+            >
+              2. Wähle die Auftragsdauer
+            </h2>
+          </div>
+          {!selectedDate ? (
+            <Banner tone="info">
+              <p>
+                Bitte wähle zuerst einen Tag im Kalender, bevor du die
+                Auftragsdauer festlegst.
+              </p>
+            </Banner>
+          ) : (
+            <DurationPicker
+              value={durationMinutes}
+              onSelect={handleDurationSelect}
+              service={pickedService}
+            />
+          )}
+        </section>
+      )}
+
       <section aria-labelledby="slots-heading" id="slot-list-section">
         <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
           <h2
             id="slots-heading"
             className="font-serif text-2xl font-semibold text-baerenstark-bark"
           >
-            2. Wähle ein Zeitfenster
+            {isRebookMode ? '2. Wähle ein Zeitfenster' : '3. Wähle ein Zeitfenster'}
           </h2>
           {selectedDate && (
             <button
@@ -241,9 +314,10 @@ export function BookingClient() {
           </Banner>
         )}
 
-        {selectedDate && !isRebookMode && (
+        {selectedDate && showTimeSlotPicker && (
           <TimeSlotPicker
             date={selectedDate}
+            duration={durationMinutes}
             selectedSlot={selectedTimeSlot}
             onSelect={handleTimeSlotSelect}
           />
@@ -275,12 +349,15 @@ export function BookingClient() {
           id="form-heading"
           className="mb-4 font-serif text-2xl font-semibold text-baerenstark-bark"
         >
-          3. {isRebookMode ? 'Neuen Termin bestätigen' : 'Deine Kontaktdaten'}
+          {isRebookMode
+            ? '3. Neuen Termin bestätigen'
+            : '4. Deine Kontaktdaten'}
         </h2>
         <BookingForm
           selectedSlot={selectedLegacySlot}
           selectedTimeSlot={isRebookMode ? null : selectedTimeSlot}
           defaultService={defaultService}
+          onServiceChange={(slug) => setPickedService(isService(slug) ? slug : null)}
           onClearSelection={() => {
             setSelectedSlotId(null);
             setSelectedTimeSlot(null);

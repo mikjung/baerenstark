@@ -43,8 +43,14 @@ function toCustomerBooking(b: BookingWithRels) {
     date: b.date,
     startTime: b.startTime,
     endTime: b.endTime,
+    // IT5 / US-33: Auftragsdauer in Minuten.
+    durationMinutes: b.durationMinutes,
     service: b.service as Service,
     description: b.description,
+    // IT5 / US-32: Adresse — nullable für Bestandsbuchungen.
+    addressStreet: b.addressStreet,
+    addressZip: b.addressZip,
+    addressCity: b.addressCity,
     status: b.status,
     cancellableUntilHours: cancellable ? hoursUntil : null,
     isCancellable: cancellable,

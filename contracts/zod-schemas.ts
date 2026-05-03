@@ -1,11 +1,33 @@
 /**
- * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.4.1 — Iteration 4 Revision)
+ * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.5 — Iteration 5)
  *
  * Diese Datei ist die einzige Quelle der Wahrheit für die Form
  * der API-Payloads. Sowohl Frontend (Forms, Fetch-Wrapper) als auch
  * Backend (API-Routes) importieren von hier.
  *
  * Pfad in der Live-App: src/lib/schemas.ts (synchron mit dieser Datei).
+ *
+ * Änderungen v1.5 (Iteration 5 — US-30 bis US-34):
+ *   - **US-31 (OAuth2):** `CustomerUserPublicSchema` erhält
+ *     `oauthProvider`, `avatarUrl`. Neue Konstante `CUSTOMER_OAUTH_PROVIDERS`.
+ *     Fehlercode `OAUTH_ONLY_ACCOUNT` (422) — Login mit Passwort gegen
+ *     Konto ohne lokales Passwort.
+ *   - **US-32 (Adresse):** `CreateBookingSchema` erhält drei neue
+ *     Pflichtfelder `addressStreet`, `addressZip` (5-stellig), `addressCity`.
+ *     `BookingFormSchema` ebenfalls. `BookingAdminSchema` und
+ *     `CustomerBookingSchema` führen die Felder als nullable im Response
+ *     (Bestand-Buchungen ohne Adresse).
+ *   - **US-33 (Dauer):** `CreateBookingSchema.durationMinutes` neu
+ *     (Whitelist 60/120/180/240/300/360/480 oder spezielle „all-day"-
+ *     Markierung). `endTime` wird im API-Layer aus `startTime + duration`
+ *     berechnet — Frontend schickt nur `startTime` + `durationMinutes`.
+ *     `AvailableSlotsQuerySchema` erhält optionalen Param `duration`.
+ *     Neuer `BOOKING_DURATION_OPTIONS` const-Array.
+ *   - **US-34 (Buffer):** Neue Schemas `BufferConfigSchema` (Response),
+ *     `UpdateBufferConfigSchema` (Body). Whitelist-Werte [0,15,30,45,60].
+ *     `BUFFER_MINUTES_DEFAULT = 30`.
+ *   - **US-30 (Admin-Pw-Reset UX):** Kein Schema-Eingriff (bestehende
+ *     `LoginSchema` + `AdminSetupSchema` bleiben). Fix ist UX/Routing-Layer.
  *
  * Änderungen v1.4.1 (QA-Revision):
  *   - **BUG-402 Fix:** `CustomerProfileUpdateSchema` akzeptiert NUR
@@ -256,7 +278,64 @@ const customerEmailRequiredSchema = z.preprocess(
 // Booking — IT3 (Date/Time-basiert) + IT1/IT2-Bestandsfeld slotId
 // IT4-Anmerkung: customerId wird NICHT aus dem Body gelesen — Backend liest
 // die ID aus dem `customer-session`-Cookie und befüllt sie selbst.
+// IT5-Erweiterung (US-32 + US-33):
+//   - Adresse (street/zip/city) ist Pflicht für IT5-Modus.
+//   - durationMinutes ist Pflicht für IT5-Modus (Whitelist).
+//     endTime wird im API-Layer aus startTime + durationMinutes
+//     berechnet — Frontend MUSS endTime trotzdem mitschicken (für
+//     IT3-Rückwärtskompatibilität); BE prüft Konsistenz und nimmt
+//     im Konflikt-Fall den durationMinutes-Wert als Authority.
 // ---------------------------------------------------------------------------
+
+/** IT5 / US-33 — erlaubte Standard-Dauer-Optionen (Minuten). */
+export const BOOKING_DURATION_OPTIONS = [60, 120, 180, 240, 300, 360, 480] as const;
+export type BookingDurationOption = (typeof BOOKING_DURATION_OPTIONS)[number];
+
+/**
+ * Sonderwert „Ganztag" — wird beim Klick auf die „Ganztag"-Kachel vom
+ * Frontend gesendet. Backend löst diesen Wert in die tatsächliche Dauer
+ * des Verfügbarkeitsfensters für das Datum auf (siehe
+ * `lib/availability.ts.resolveAllDayDuration(date)`).
+ */
+export const BOOKING_DURATION_ALL_DAY = -1 as const;
+
+/** Min/Max-Dauer für die DB-CHECK-Constraint. */
+export const BOOKING_DURATION_MIN_MINUTES = 15;
+export const BOOKING_DURATION_MAX_MINUTES = 1440;
+
+/** US-32: 5-stellige deutsche PLZ. */
+export const ZipCodeSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{5}$/, 'PLZ muss 5 Ziffern enthalten');
+
+/** US-32 Adress-Schema (Reuse in BookingForm + Create-Body). */
+export const BookingAddressSchema = z.object({
+  addressStreet: z
+    .string()
+    .trim()
+    .min(3, 'Bitte Straße und Hausnummer angeben')
+    .max(100, 'Adresse ist zu lang'),
+  addressZip: ZipCodeSchema,
+  addressCity: z
+    .string()
+    .trim()
+    .min(2, 'Bitte den Ort angeben')
+    .max(100, 'Ort ist zu lang'),
+});
+export type BookingAddress = z.infer<typeof BookingAddressSchema>;
+
+/** US-33: Dauer-Validierung (Whitelist + Sonderwert). */
+const bookingDurationSchema = z.union([
+  z.literal(BOOKING_DURATION_ALL_DAY),
+  z
+    .number()
+    .int()
+    .refine(
+      (v) => (BOOKING_DURATION_OPTIONS as readonly number[]).includes(v),
+      'Ungültige Dauer. Bitte eine der angebotenen Optionen wählen.',
+    ),
+]);
 
 export const CreateBookingSchema = z
   .object({
@@ -264,6 +343,10 @@ export const CreateBookingSchema = z
     date: DateStringSchema.optional(),
     startTime: TimeStringSchema.optional(),
     endTime: TimeStringSchema.optional(),
+
+    // IT5 / US-33: Auftragsdauer in Minuten (oder `BOOKING_DURATION_ALL_DAY`).
+    // Pflicht im IT3/IT5-Modus, ignoriert im Slot-Modus (Bestand).
+    durationMinutes: bookingDurationSchema.optional(),
 
     // Bestand IT1/IT2 (re-booking):
     slotId: z.string().optional(),
@@ -281,6 +364,21 @@ export const CreateBookingSchema = z
       .trim()
       .min(5, 'Bitte eine kurze Beschreibung angeben')
       .max(2000, 'Beschreibung ist zu lang'),
+
+    // IT5 / US-32: Adresse (Pflicht im IT3/IT5-Modus).
+    addressStreet: z
+      .string()
+      .trim()
+      .min(3, 'Bitte Straße und Hausnummer angeben')
+      .max(100, 'Adresse ist zu lang')
+      .optional(),
+    addressZip: ZipCodeSchema.optional(),
+    addressCity: z
+      .string()
+      .trim()
+      .min(2, 'Bitte den Ort angeben')
+      .max(100, 'Ort ist zu lang')
+      .optional(),
 
     // IT3 / US-18: Datei-Anhänge.
     attachmentIds: z.array(z.string().min(1)).max(5, 'Maximal 5 Dateien').optional(),
@@ -332,6 +430,46 @@ export const CreateBookingSchema = z
           path: ['date'],
         });
       }
+
+      // IT5 / US-33: Dauer ist Pflicht im Date-Modus.
+      if (data.durationMinutes === undefined || data.durationMinutes === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Bitte wählen Sie eine Auftragsdauer.',
+          path: ['durationMinutes'],
+        });
+      } else if (
+        typeof data.durationMinutes === 'number' &&
+        data.durationMinutes !== BOOKING_DURATION_ALL_DAY
+      ) {
+        // Konsistenz-Check: endTime muss zu startTime + durationMinutes passen.
+        // Bei Mismatch nimmt Backend durationMinutes als Authority und
+        // korrigiert endTime intern (kein Validation-Fehler — Frontend kann
+        // sich verzählt haben). Engineers-Hinweis: hier KEIN ctx.addIssue.
+      }
+
+      // IT5 / US-32: Adresse ist Pflicht im Date-Modus.
+      if (!data.addressStreet) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Bitte geben Sie Straße und Hausnummer an.',
+          path: ['addressStreet'],
+        });
+      }
+      if (!data.addressZip) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Bitte geben Sie eine PLZ an.',
+          path: ['addressZip'],
+        });
+      }
+      if (!data.addressCity) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Bitte geben Sie den Ort an.',
+          path: ['addressCity'],
+        });
+      }
     }
 
     if (data.service === CUSTOM_SERVICE_SLUG) {
@@ -361,6 +499,20 @@ export const BookingFormSchema = z
       .trim()
       .min(5, 'Bitte eine kurze Beschreibung angeben')
       .max(2000, 'Beschreibung ist zu lang'),
+    // IT5 / US-32: Adressfelder Pflicht.
+    addressStreet: z
+      .string()
+      .trim()
+      .min(3, 'Bitte Straße und Hausnummer angeben')
+      .max(100, 'Adresse ist zu lang'),
+    addressZip: ZipCodeSchema,
+    addressCity: z
+      .string()
+      .trim()
+      .min(2, 'Bitte den Ort angeben')
+      .max(100, 'Ort ist zu lang'),
+    // IT5 / US-33: Dauer-Auswahl Pflicht (vom DurationPicker gesetzt).
+    durationMinutes: bookingDurationSchema,
     privacyAccepted: z.literal(true, {
       errorMap: () => ({ message: 'Bitte den Datenschutzhinweis bestätigen' }),
     }),
@@ -438,6 +590,8 @@ export const BookingAdminSchema = z.object({
   date: z.string().nullable(),
   startTime: z.string().nullable(),
   endTime: z.string().nullable(),
+  // IT5 / US-33: Auftragsdauer in Minuten (Default 60 für Bestand).
+  durationMinutes: z.number().int().nonnegative(),
   // IT4: optionale Verknüpfung zu einem registrierten Kunden.
   customerId: z.string().nullable(),
   customerName: z.string(),
@@ -445,6 +599,10 @@ export const BookingAdminSchema = z.object({
   customerEmail: z.string(),
   service: ServiceSchema,
   description: z.string(),
+  // IT5 / US-32: Adresse — nullable, weil Bestandsbuchungen sie nicht haben.
+  addressStreet: z.string().nullable(),
+  addressZip: z.string().nullable(),
+  addressCity: z.string().nullable(),
   status: BookingStatusSchema,
   mailSent: z.boolean(),
   mailError: z.string().nullable(),
@@ -622,8 +780,32 @@ export const AvailableSlotsResponseSchema = z.object({
 });
 export type AvailableSlotsResponse = z.infer<typeof AvailableSlotsResponseSchema>;
 
+/**
+ * Query für GET /api/slots/available?date=YYYY-MM-DD&duration=NNN
+ *
+ * IT5 / US-33: optionaler Param `duration` (Minuten). Wenn gesetzt, prüft
+ * der Endpoint, ob ein Slot mit der gewünschten Dauer ab dem Start
+ * verfügbar ist (statt der Default-Slot-Dauer aus dem Template). Der
+ * Wert muss in `BOOKING_DURATION_OPTIONS` enthalten sein oder dem
+ * Sonderwert `BOOKING_DURATION_ALL_DAY` (-1) entsprechen.
+ *
+ * Wenn nicht gesetzt → fallback auf `slotDurationMinutes` aus dem
+ * Availability-Template (IT3-Verhalten, rückwärtskompatibel).
+ */
 export const AvailableSlotsQuerySchema = z.object({
   date: DateStringSchema,
+  duration: z
+    .union([
+      z.literal(BOOKING_DURATION_ALL_DAY),
+      z.coerce
+        .number()
+        .int()
+        .refine(
+          (v) => (BOOKING_DURATION_OPTIONS as readonly number[]).includes(v),
+          'Ungültige Dauer.',
+        ),
+    ])
+    .optional(),
 });
 export type AvailableSlotsQuery = z.infer<typeof AvailableSlotsQuerySchema>;
 
@@ -826,7 +1008,17 @@ export const CustomerProfileUpdateSchema = z
   .strict();
 export type CustomerProfileUpdateInput = z.infer<typeof CustomerProfileUpdateSchema>;
 
-/** Response von GET /api/customer/me. Enthält keine sensiblen Felder. */
+/**
+ * Response von GET /api/customer/me. Enthält keine sensiblen Felder.
+ *
+ * IT5 / US-31 ergänzt:
+ *   - `oauthProvider`: 'google' | 'github' | null. Frontend zeigt das
+ *     Passwort-Feld im Profil nur für `oauthProvider === null`-Konten.
+ *   - `avatarUrl`: optionale Profilbild-URL vom OAuth-Provider.
+ *   - `hasPassword`: true wenn ein lokales Passwort gesetzt ist (für
+ *     gemischte Konten relevant — Kunde kann sowohl per E-Mail/Pw als
+ *     auch per OAuth einloggen).
+ */
 export const CustomerUserPublicSchema = z.object({
   id: z.string(),
   email: z.string(),
@@ -834,6 +1026,10 @@ export const CustomerUserPublicSchema = z.object({
   lastName: z.string(),
   phone: z.string().nullable(),
   emailVerified: z.boolean(),
+  // IT5 / US-31:
+  oauthProvider: z.enum(['google', 'github']).nullable(),
+  avatarUrl: z.string().url().nullable(),
+  hasPassword: z.boolean(),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type CustomerUserPublic = z.infer<typeof CustomerUserPublicSchema>;
@@ -868,8 +1064,14 @@ export const CustomerBookingSchema = z.object({
   date: z.string().nullable(),
   startTime: z.string().nullable(),
   endTime: z.string().nullable(),
+  // IT5 / US-33: vom Kunden gewählte Dauer (Minuten).
+  durationMinutes: z.number().int().nonnegative(),
   service: ServiceSchema,
   description: z.string(),
+  // IT5 / US-32: Adresse (nullable für Bestand).
+  addressStreet: z.string().nullable(),
+  addressZip: z.string().nullable(),
+  addressCity: z.string().nullable(),
   status: BookingStatusSchema,
   /** Liegt das Datum mehr als 24h in der Zukunft? Backend berechnet, Frontend zeigt Storno-Button. */
   cancellableUntilHours: z.number().int().nullable(),
@@ -1174,6 +1376,8 @@ export const ApiErrorSchema = z.object({
       'UNSUPPORTED_MEDIA_TYPE',
       'EMAIL_NOT_VERIFIED', // IT4
       'STRIPE_ERROR', // IT4
+      'OAUTH_ONLY_ACCOUNT', // IT5 / US-31 — Login mit Pw gegen OAuth-only-Konto.
+      'OAUTH_ERROR', // IT5 / US-31 — Provider-Fehler oder Flow-Abbruch.
       'RATE_LIMITED',
       'MAIL_FAILED',
       'INTERNAL_ERROR',
@@ -1183,3 +1387,80 @@ export const ApiErrorSchema = z.object({
   }),
 });
 export type ApiError = z.infer<typeof ApiErrorSchema>;
+
+// ===========================================================================
+// ITERATION 5 — OAuth2 Customer-Login (US-31)
+// ===========================================================================
+
+/**
+ * Erlaubte OAuth-Provider für Kunden-Login. Liste muss synchron mit der
+ * NextAuth-Customer-Konfiguration in `lib/customer-oauth.ts` sein.
+ */
+export const CUSTOMER_OAUTH_PROVIDERS = ['google', 'github'] as const;
+export type CustomerOAuthProvider = (typeof CUSTOMER_OAUTH_PROVIDERS)[number];
+
+export const CustomerOAuthProviderSchema = z.enum(CUSTOMER_OAUTH_PROVIDERS);
+
+/**
+ * Body für POST /api/auth/customer/oauth-callback (intern, vom NextAuth-
+ * Customer-Adapter aufgerufen). Engineers-Hinweis: dieses Schema wird
+ * im NextAuth-Callback verwendet, um den User-Provider-Datensatz zu
+ * normalisieren, bevor er gegen die DB gemappt wird.
+ *
+ * - `email` ist immer Pflicht (Account-Verknüpfung erfolgt per E-Mail).
+ * - `oauthId` ist die provider-spezifische User-ID (Google `sub`,
+ *   GitHub `id`).
+ * - `firstName` / `lastName` werden aus dem Provider-Profil abgeleitet
+ *   (Google `given_name`/`family_name`; GitHub `name` wird gesplittet).
+ * - `avatarUrl` ist optional.
+ */
+export const OAuthProfileNormalizedSchema = z.object({
+  provider: CustomerOAuthProviderSchema,
+  oauthId: z.string().min(1),
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email('Provider-E-Mail ungültig'),
+  firstName: z.string().trim().min(1).max(120),
+  lastName: z.string().trim().min(1).max(120),
+  avatarUrl: z.string().url().optional().nullable(),
+});
+export type OAuthProfileNormalized = z.infer<typeof OAuthProfileNormalizedSchema>;
+
+// ===========================================================================
+// ITERATION 5 — Buffer-Konfiguration (US-34)
+// ===========================================================================
+
+/** Whitelist für Buffer-Werte (Minuten). Default ist 30. */
+export const BUFFER_MINUTES_OPTIONS = [0, 15, 30, 45, 60] as const;
+export type BufferMinutesOption = (typeof BUFFER_MINUTES_OPTIONS)[number];
+export const BUFFER_MINUTES_DEFAULT: BufferMinutesOption = 30;
+
+/** Response von GET /api/admin/buffer-config. */
+export const BufferConfigSchema = z.object({
+  bufferMinutes: z
+    .number()
+    .int()
+    .min(0, 'Buffer darf nicht negativ sein')
+    .max(240, 'Buffer ist zu groß'),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type BufferConfig = z.infer<typeof BufferConfigSchema>;
+
+/**
+ * Body für PUT /api/admin/buffer-config.
+ *
+ * Validiert auf Whitelist [0, 15, 30, 45, 60]. DB akzeptiert größere Werte
+ * (Forward-Kompatibilität); im MVP zwingt das App-Layer die Whitelist.
+ */
+export const UpdateBufferConfigSchema = z.object({
+  bufferMinutes: z
+    .number()
+    .int()
+    .refine(
+      (v) => (BUFFER_MINUTES_OPTIONS as readonly number[]).includes(v),
+      `Bitte einen der erlaubten Werte wählen: ${BUFFER_MINUTES_OPTIONS.join(', ')} Minuten.`,
+    ),
+});
+export type UpdateBufferConfigInput = z.infer<typeof UpdateBufferConfigSchema>;

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { apiSuccess, apiError } from '@/lib/api';
 import { sendPasswordResetEmail } from '@/lib/mail';
+import { adminBaseUrl } from '@/lib/baseUrl';
 
 const Schema = z.object({ email: z.string().email() });
 
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
       data: { resetToken: token, resetTokenExpiry: expiry },
     });
 
-    const base = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000';
+    const base = adminBaseUrl();
     const resetUrl = `${base}/admin/passwort-reset?token=${token}`;
     void sendPasswordResetEmail(user.email, resetUrl);
 

@@ -509,7 +509,7 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 
 ---
 
-### Iteration 4 (geplant — nach Iteration 3)
+### Iteration 4 (abgeschlossen)
 
 ---
 
@@ -727,6 +727,228 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 
 ---
 
+### Iteration 5 (aktuell)
+
+---
+
+#### US-30: Admin-Passwort-Reset verbessern (UX-Fix)
+
+**Als** Admin (Tom)
+**möchte ich** auf der Login-Seite einen gut sichtbaren „Passwort vergessen?"-Link finden und einen funktionierenden Reset-Prozess sowohl in der lokalen Entwicklungsumgebung als auch in der Produktion nutzen,
+**damit** ich mich auch nach einem vergessenen Passwort zuverlässig und ohne fremde Hilfe wieder einloggen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/admin/login` auf,
+  **When** die Seite geladen ist,
+  **Then** ist der Link „Passwort vergessen?" direkt unterhalb des Passwortfelds gut sichtbar platziert (ausreichende Schriftgröße, klickbare Fläche, kein visuelles Verstecken).
+
+- **Given** ich klicke auf „Passwort vergessen?" und gebe meine Admin-E-Mail ein,
+  **When** das Formular abgeschickt wird,
+  **Then** erhalte ich innerhalb von 2 Minuten eine E-Mail über Resend mit einem Reset-Link, der auf die korrekte Umgebungs-URL zeigt (lokale Entwicklung: `http://localhost:3000/admin/passwort-reset`, Produktion: `https://<produktions-domain>/admin/passwort-reset`).
+
+- **Given** ich klicke auf den Reset-Link in der E-Mail,
+  **When** der Link aufgerufen wird und noch gültig ist (max. 1 Stunde),
+  **Then** sehe ich das Formular unter `/admin/passwort-reset` mit zwei Feldern: „Neues Passwort" und „Passwort bestätigen".
+
+- **Given** ich gebe ein neues Passwort (mind. 8 Zeichen) ein und bestätige es,
+  **When** ich auf „Passwort ändern" klicke,
+  **Then** wird das Passwort gespeichert, ich werde zu `/admin/login` weitergeleitet und sehe die Erfolgsmeldung „Passwort erfolgreich geändert. Bitte melden Sie sich an."
+
+- **Given** ich lasse eines der Passwortfelder leer oder die Felder stimmen nicht überein,
+  **When** ich auf „Passwort ändern" klicke,
+  **Then** erscheint eine verständliche deutschsprachige Inline-Fehlermeldung direkt am entsprechenden Feld.
+
+- **Given** ich rufe einen abgelaufenen oder bereits verwendeten Reset-Link auf,
+  **When** die Seite geladen wird,
+  **Then** sehe ich die Fehlermeldung „Dieser Link ist nicht mehr gültig. Bitte fordern Sie einen neuen Reset-Link an." mit einem Link zurück zu `/admin/passwort-vergessen`.
+
+- **Given** ich gebe beim „Passwort vergessen?"-Formular eine unbekannte E-Mail ein,
+  **When** das Formular abgeschickt wird,
+  **Then** sehe ich dennoch die neutrale Meldung „Falls diese Adresse registriert ist, erhalten Sie eine E-Mail." (keine Preisgabe von Kontoexistenz).
+
+**Hinweis:** Reset-Link-Basis-URL muss aus der Umgebungsvariable `NEXTAUTH_URL` (oder äquivalent) ausgelesen werden — kein Hardcoding. Implementierung mit NextAuth v5 und Resend.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-31: OAuth2-Login für Kunden (Google + GitHub)
+
+**Als** Kunde
+**möchte ich** mich alternativ mit meinem Google- oder GitHub-Konto anmelden können,
+**damit** ich kein separates Passwort erstellen und merken muss.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/konto/login` auf,
+  **When** die Seite geladen ist,
+  **Then** sehe ich neben „E-Mail / Passwort" zwei zusätzliche Schaltflächen: „Mit Google anmelden" und „Mit GitHub anmelden".
+
+- **Given** ich klicke auf „Mit Google anmelden",
+  **When** ich den Google-OAuth2-Flow abschließe und Google meine Identität bestätigt,
+  **Then** bin ich eingeloggt, werde zu `/konto` weitergeleitet und sehe meinen Vor- und Nachnamen (aus dem Google-Profil übernommen) in der Navigation.
+
+- **Given** ich klicke auf „Mit GitHub anmelden",
+  **When** ich den GitHub-OAuth2-Flow abschließe und GitHub meine Identität bestätigt,
+  **Then** bin ich eingeloggt, werde zu `/konto` weitergeleitet und sehe meinen Anzeigenamen (aus dem GitHub-Profil übernommen) in der Navigation.
+
+- **Given** ich melde mich zum ersten Mal per OAuth an,
+  **When** mein Konto automatisch angelegt wird,
+  **Then** enthält es Vorname und Nachname aus dem Provider-Profil; E-Mail-Verifizierung ist für OAuth-Konten nicht erforderlich.
+
+- **Given** ich habe bereits ein E-Mail/Passwort-Konto mit derselben E-Mail-Adresse,
+  **When** ich mich mit OAuth und dieser E-Mail-Adresse anmelde,
+  **Then** wird mein bestehendes Konto erkannt, beide Methoden sind für dieselbe E-Mail verknüpft, und ich werde ohne Fehler eingeloggt.
+
+- **Given** ich bin per OAuth eingeloggt,
+  **When** ich mein Profil unter `/konto/profil` aufrufe,
+  **Then** ist das Passwortfeld nicht sichtbar (OAuth-Konten haben kein lokales Passwort); alle anderen Profildaten können wie gewohnt bearbeitet werden.
+
+- **Given** ich nutze E-Mail/Passwort,
+  **When** ich die Login-Seite aufrufe,
+  **Then** ist die bestehende E-Mail/Passwort-Anmeldung unverändert und funktioniert weiterhin.
+
+- **Given** der OAuth-Anbieter einen Fehler zurückgibt oder ich den Flow abbreche,
+  **When** ich zur Anwendung zurückgeleitet werde,
+  **Then** erscheint eine verständliche deutschsprachige Fehlermeldung und ich befinde mich weiterhin auf `/konto/login`.
+
+**Hinweis:** Provider-Konfiguration (Client-ID, Client-Secret) erfolgt über Umgebungsvariablen. Google und GitHub müssen als OAuth-Apps in den jeweiligen Developer-Konsolen registriert sein — Zugangsdaten liefert Tom. E-Mail/Passwort-Login bleibt vollständig erhalten (OAuth ist additiv).
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-32: Adressfeld in Buchungsformular
+
+**Als** Kunde
+**möchte ich** beim Ausfüllen einer Buchungsanfrage die Adresse des Auftragsorts angeben,
+**damit** Tom direkt weiß, wo der Einsatz stattfindet, und Anfahrt sowie Aufwand vorab einschätzen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich befinde mich im Buchungsformular,
+  **When** die Seite geladen ist,
+  **Then** sehe ich drei neue Pflichtfelder: „Straße & Hausnummer", „PLZ" und „Ort", die klar als Pflichtfelder gekennzeichnet sind.
+
+- **Given** ich lasse eines der drei Adressfelder leer und klicke auf „Absenden",
+  **When** die Validierung ausgeführt wird,
+  **Then** erscheint eine Inline-Fehlermeldung direkt am leeren Feld (z.B. „Bitte geben Sie die Straße an"), ohne dass die Seite neu geladen wird.
+
+- **Given** ich gebe eine PLZ ein, die nicht aus 5 Ziffern besteht,
+  **When** ich das PLZ-Feld verlasse,
+  **Then** erscheint die Fehlermeldung „PLZ muss 5 Ziffern enthalten".
+
+- **Given** ich habe alle Felder inklusive Adresse korrekt ausgefüllt und schicke das Formular ab,
+  **When** die Buchungsanfrage verarbeitet wird,
+  **Then** wird die vollständige Adresse (Straße, PLZ, Ort) in der Datenbank gespeichert und ist der Anfrage zugeordnet.
+
+- **Given** Tom öffnet eine eingegangene Anfrage im Admin-Portal,
+  **When** die Detailansicht geladen ist,
+  **Then** ist die Auftragsadresse (Straße, PLZ, Ort) gut sichtbar als eigener Abschnitt dargestellt.
+
+- **Given** Tom ruft die Buchungsübersicht oder die Terminliste im Admin-Bereich auf,
+  **When** die Liste geladen ist,
+  **Then** wird die Adresse (zumindest PLZ und Ort) als Kurzinfo pro Eintrag angezeigt.
+
+- **Given** ich bin eingeloggter Kunde und rufe meine Auftragsdetails im Kundenportal auf,
+  **When** die Detailseite geladen ist,
+  **Then** ist die von mir angegebene Adresse sichtbar.
+
+**Hinweis:** Adresse ist immer Pflicht — keine Gastbuchung ohne Adresse. Datenbankschema (`Booking`-Modell) muss um `street`, `zip` und `city` erweitert werden.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-33: Buchungsdauer auswählen (Multi-Stunden)
+
+**Als** Kunde
+**möchte ich** beim Buchen eine gewünschte Auftragsdauer wählen können,
+**damit** Tom und ich von Anfang an das gleiche Zeitfenster einplanen und ein realistisches Angebot erstellt werden kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich habe im Buchungsformular einen Startzeitpunkt gewählt,
+  **When** der Durationsschritt angezeigt wird,
+  **Then** sehe ich Kacheln mit den Optionen: 1 h, 2 h, 3 h, 4 h, 5 h, 6 h, 8 h und „Ganztag".
+
+- **Given** die Dauer-Kacheln angezeigt werden,
+  **When** eine Kachel dargestellt wird,
+  **Then** enthält sie die Dauer (z.B. „3 h") und eine Preisschätzung (z.B. „ca. 105–210 €") basierend auf dem gewählten Service und dem Richtpreis aus US-20.
+
+- **Given** ich klicke auf eine Dauer-Kachel,
+  **When** die Auswahl gespeichert wird,
+  **Then** ist die Kachel visuell hervorgehoben (aktiver Zustand) und die übrigen Kacheln sind deaktiviert.
+
+- **Given** ich habe eine Dauer gewählt,
+  **When** das System die Verfügbarkeit prüft,
+  **Then** wird geprüft, ob das Verfügbarkeitsfenster (DayOverride oder Wochentag-Template) ausreichend Zeit ab der gewählten Startzeit hat; Kacheln, für die das Zeitfenster nicht ausreicht, sind ausgegraut und nicht wählbar.
+
+- **Given** ich wähle einen Ganztag,
+  **When** die Buchungsanfrage abgeschickt wird,
+  **Then** wird der gesamte Verfügbarkeitszeitraum des Tages reserviert und andere Buchungen an diesem Tag sind nicht mehr möglich.
+
+- **Given** die Buchungsanfrage erfolgreich abgeschickt wurde,
+  **When** Tom die Anfrage im Admin-Portal öffnet,
+  **Then** sieht er die gewählte Dauer als eigenes Feld (z.B. „Dauer: 3 Stunden") zusätzlich zu Start- und Endzeit.
+
+- **Given** Tom die Terminliste im Admin-Dashboard aufruft,
+  **When** die Liste geladen ist,
+  **Then** ist die Dauer pro Eintrag sichtbar.
+
+- **Given** ich lasse die Dauer-Auswahl leer und versuche, das Formular abzuschicken,
+  **When** die Validierung ausgeführt wird,
+  **Then** erscheint die Fehlermeldung „Bitte wählen Sie eine Auftragsdauer."
+
+**Hinweis:** Preisschätzung ist ein Richtwert ohne rechtliche Bindung — ein Disclaimer muss sichtbar sein (analog US-20). Datenbankschema (`Booking`) um `durationMinutes` erweitern. Ganztag = gesamte Dauer des Verfügbarkeitsfensters des jeweiligen Tages. Endzeit = Startzeit + gewählte Dauer.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-34: Buffer-Zeit zwischen Buchungen (Admin)
+
+**Als** Admin (Tom)
+**möchte ich** eine globale Buffer-Zeit nach jeder bestätigten Buchung konfigurieren können,
+**damit** Fahrtzeiten und mögliche Pausen automatisch reserviert werden und kein Folgeauftrag zu knapp anschließt.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt im Admin-Bereich und öffne die Einstellungen,
+  **When** die Einstellungsseite geladen ist,
+  **Then** sehe ich einen Konfigurationsbereich „Buffer-Zeit nach Buchungen" mit einer Auswahl: 0 min, 15 min, 30 min, 45 min, 60 min.
+
+- **Given** ich wähle eine Buffer-Zeit und speichere,
+  **When** die Einstellung gespeichert wird,
+  **Then** erscheint die Bestätigungsmeldung „Einstellung gespeichert" und der neue Wert ist dauerhaft aktiv.
+
+- **Given** eine Buchung ist bestätigt (Status CONFIRMED) und die Buffer-Zeit beträgt 30 Minuten,
+  **When** die API `GET /api/slots/available` aufgerufen wird,
+  **Then** werden die 30 Minuten direkt nach dem Endzeitpunkt der bestätigten Buchung als nicht buchbar markiert und nicht als verfügbarer Slot zurückgegeben.
+
+- **Given** eine bestätigte Buchung endet um 14:00 Uhr und die Buffer-Zeit ist 30 Minuten,
+  **When** ein Kunde die Buchungsseite aufruft,
+  **Then** sind Zeitslots zwischen 14:00 und 14:30 nicht verfügbar; ab 14:30 sind Slots (sofern im Verfügbarkeitsfenster) wieder buchbar.
+
+- **Given** ich rufe die Admin-Kalenderansicht auf,
+  **When** eine bestätigte Buchung mit Buffer angezeigt wird,
+  **Then** ist der Buffer-Zeitraum als grauer Block direkt anschließend an die Buchung dargestellt — visuell klar von der eigentlichen Buchung (farbig) unterschieden.
+
+- **Given** kein Admin-Wert gesetzt wurde (Erstinstallation / Reset),
+  **When** das System Slots berechnet,
+  **Then** gilt ein Default-Wert von 30 Minuten.
+
+- **Given** ich stelle die Buffer-Zeit auf 0 Minuten und speichere,
+  **When** die Slot-Berechnung ausgeführt wird,
+  **Then** werden keine Buffer-Blöcke reserviert und Folgebuchungen können direkt im Anschluss an bestehende Buchungen beginnen.
+
+**Hinweis:** Buffer gilt nur nach bestätigten Buchungen (CONFIRMED), nicht nach offenen (PENDING) oder abgelehnten/stornierten Buchungen. Default-Wert 30 Minuten muss in der Datenbank oder Konfiguration hinterlegt sein. Buffer-Logik muss zentral in der Slot-Berechnung implementiert werden.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
 ### Backlog (nach MVP)
 
 ---
@@ -813,20 +1035,25 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 | US-14      | Anfrage stornieren (Kunde)                    | Must Have    | Iteration 2 (abgeschlossen)          |
 | US-15      | Wochentag-basierte Verfügbarkeit (Admin)      | Must Have    | Iteration 2 (abgeschlossen)          |
 | US-16      | Kalenderansicht für Kunden                    | Must Have    | Iteration 2 (abgeschlossen)          |
-| BUG IT3    | Buchungsformular-Übermittlung                 | Blocker      | Iteration 3 (aktuell)                |
-| US-17      | Zeitfenster-Redesign (Von/Bis + Default)      | Must Have    | Iteration 3 (aktuell)                |
-| US-18      | Datei-Upload im Buchungsformular              | Must Have    | Iteration 3 (aktuell)                |
-| US-19      | Individuelle Serviceanfrage                   | Must Have    | Iteration 3 (aktuell)                |
-| US-20      | Preise für Serviceleistungen                  | Must Have    | Iteration 3 (aktuell)                |
-| US-21      | Admin-Dashboard Terminübersicht               | Must Have    | Iteration 3 (aktuell)                |
-| US-22      | Feedback-Sektion mit Bewertungen              | Must Have    | Iteration 3 (aktuell)                |
-| US-23      | Service-Popups Vorher/Nachher                 | Must Have    | Iteration 3 (aktuell)                |
-| US-24      | Bestätigungs- und Storno-E-Mail               | Must Have    | Iteration 3 (aktuell)                |
-| US-25      | Kundenportal Registrierung/Login              | Must Have    | Iteration 4 (geplant)                |
-| US-26      | Kundenportal Auftragsübersicht                | Must Have    | Iteration 4 (geplant)                |
-| US-27      | Kundenportal Stornierung                      | Must Have    | Iteration 4 (geplant)                |
-| US-28      | Zahlungsabwicklung PayPal / Apple Pay         | Must Have    | Iteration 4 (geplant)                |
-| US-29      | Kundenportal Feedback/Bewertung               | Must Have    | Iteration 4 (geplant)                |
+| BUG IT3    | Buchungsformular-Übermittlung                 | Blocker      | Iteration 3 (abgeschlossen)          |
+| US-17      | Zeitfenster-Redesign (Von/Bis + Default)      | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-18      | Datei-Upload im Buchungsformular              | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-19      | Individuelle Serviceanfrage                   | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-20      | Preise für Serviceleistungen                  | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-21      | Admin-Dashboard Terminübersicht               | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-22      | Feedback-Sektion mit Bewertungen              | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-23      | Service-Popups Vorher/Nachher                 | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-24      | Bestätigungs- und Storno-E-Mail               | Must Have    | Iteration 3 (abgeschlossen)          |
+| US-25      | Kundenportal Registrierung/Login              | Must Have    | Iteration 4 (abgeschlossen)          |
+| US-26      | Kundenportal Auftragsübersicht                | Must Have    | Iteration 4 (abgeschlossen)          |
+| US-27      | Kundenportal Stornierung                      | Must Have    | Iteration 4 (abgeschlossen)          |
+| US-28      | Zahlungsabwicklung PayPal / Apple Pay         | Must Have    | Iteration 4 (abgeschlossen)          |
+| US-29      | Kundenportal Feedback/Bewertung               | Must Have    | Iteration 4 (abgeschlossen)          |
+| US-30      | Admin-Passwort-Reset verbessern (UX-Fix)      | Must Have    | Iteration 5 (aktuell)                |
+| US-31      | OAuth2-Login für Kunden (Google + GitHub)     | Must Have    | Iteration 5 (aktuell)                |
+| US-32      | Adressfeld in Buchungsformular                | Must Have    | Iteration 5 (aktuell)                |
+| US-33      | Buchungsdauer auswählen (Multi-Stunden)       | Must Have    | Iteration 5 (aktuell)                |
+| US-34      | Buffer-Zeit zwischen Buchungen (Admin)        | Must Have    | Iteration 5 (aktuell)                |
 | US-09      | Instagram-Feed einbinden                      | Should Have  | Backlog                              |
 | US-10      | Kundenbewertungen anzeigen                    | Should Have  | Ersetzt durch US-22                  |
 | US-11      | Bestätigungs-E-Mail an Kunden                 | Should Have  | Ersetzt durch US-24                  |
@@ -848,3 +1075,7 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 - Zahlungsauslöser (US-28): Betrag wird manuell von Tom nach Terminbestätigung hinterlegt — E-Mail-Aufforderung an Kunden wird beim Speichern des Betrags ausgelöst. Automatische Preisberechnung ist Backlog.
 - Zahlungs-Stack (US-28): Stripe wird eingesetzt — unterstützt PayPal, Apple Pay und Google Pay über eine einzige Integration. Entschieden.
 - Kunden-Auth (US-25): Separate `CustomerUser`-Entität, vollständig getrennt vom Admin-`User`. Entschieden.
+- OAuth2-Provider (US-31): Google und GitHub. Client-IDs und Client-Secrets liefert Tom. E-Mail/Passwort-Login bleibt parallel erhalten. OAuth ist additiv.
+- Buchungsdauer (US-33): Verfügbare Optionen 1 h, 2 h, 3 h, 4 h, 5 h, 6 h, 8 h und Ganztag. Preisschätzung basiert auf Richtpreisen aus US-20 — kein rechtsverbindlicher Preis.
+- Buffer-Zeit (US-34): Default 30 Minuten. Gilt nur nach bestätigten Buchungen (CONFIRMED). Konfiguration global (ein Wert für alle Buchungen).
+- Adressfelder (US-32): Straße + Hausnummer, PLZ (5-stellig, Deutschland), Ort — alle Pflichtfelder, keine optionale Adresse.

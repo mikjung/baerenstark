@@ -4,12 +4,19 @@
  * GET  (admin)   — Liste der Buchungen, optional gefiltert nach Status.
  * POST (public)  — Buchungsanfrage anlegen + fire-and-forget Mail-Dispatch.
  *
- * Iteration 3 Änderungen:
- *  - POST akzeptiert beide Modi: slotId-basiert (Bestand) und
- *    date/startTime/endTime-basiert (US-17, neu).
- *  - POST verknüpft optional übergebene attachmentIds mit der Buchung (US-18).
- *  - Verfügbarkeits-Check für IT3-Modus (DayOverride/Template + Slot-Block).
- *  - GET liefert zusätzlich date/startTime/endTime und attachments.
+ * Iteration 5 Änderungen:
+ *  - POST akzeptiert `durationMinutes` (US-33). endTime wird im IT3/IT5-
+ *    Modus aus `startTime + durationMinutes` als Authority neu berechnet.
+ *  - POST akzeptiert Adressfelder (US-32) — Pflicht im IT3/IT5-Modus.
+ *  - Race-Condition-Fix BUG-IT5-001: Overlap- und Buffer-Check laufen in
+ *    SQLite-Serializable-Transaktion (`lib/booking-create.ts`).
+ *  - Ganztag-Auflösung (`durationMinutes === -1`): startTime/endTime werden
+ *    auf das Verfügbarkeitsfenster gesetzt.
+ *  - GET liefert zusätzlich `durationMinutes` + Adressfelder.
+ *
+ * Iteration 3:
+ *  - POST akzeptiert beide Modi: slotId (Bestand) und date/startTime/endTime.
+ *  - POST verknüpft optional übergebene attachmentIds (US-18).
  *
  * Iteration 2 (Bestand):
  *  - POST antwortet IMMER 201 sobald die Buchung in der DB liegt; Mail
@@ -26,6 +33,7 @@ import {
   BookingStatusSchema,
   type BookingStatus,
   UPLOAD_MAX_FILES_PER_BOOKING,
+  BOOKING_DURATION_ALL_DAY,
 } from '@/lib/schemas';
 import { apiError, apiSuccess, internalError, zodErrorResponse } from '@/lib/api';
 import { runMailDispatch, type BookingMailPayload } from '@/lib/mail';
@@ -33,18 +41,18 @@ import { bookingLimiter, getClientIp } from '@/lib/ratelimit';
 import { getAvailabilityForDate } from '@/lib/availability';
 import { revalidateTag } from 'next/cache';
 import { readCustomerSessionFromRequest } from '@/lib/customer-auth';
+import {
+  createBookingWithOverlapCheck,
+  BookingConflictError,
+} from '@/lib/booking-create';
+import { addMinutesToTime, timeToMinutes } from '@/lib/time-utils';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-function timeToMinutes(t: string): number {
-  const [h, m] = t.split(':').map(Number);
-  return h * 60 + m;
-}
-
 /**
  * GET /api/bookings — admin only.
- * Query: ?status=PENDING|CONFIRMED|REJECTED|COUNTER_PROPOSED|CANCELLED (optional)
+ * Query: ?status=PENDING|CONFIRMED|REJECTED|COUNTER_PROPOSED|CANCELLED|COMPLETED (optional)
  */
 export async function GET(req: NextRequest): Promise<Response> {
   try {
@@ -62,7 +70,7 @@ export async function GET(req: NextRequest): Promise<Response> {
         return apiError({
           code: 'VALIDATION_ERROR',
           message:
-            'Status muss PENDING, CONFIRMED, REJECTED, COUNTER_PROPOSED oder CANCELLED sein.',
+            'Status muss PENDING, CONFIRMED, REJECTED, COUNTER_PROPOSED, CANCELLED oder COMPLETED sein.',
           field: 'status',
         });
       }
@@ -96,12 +104,18 @@ export async function GET(req: NextRequest): Promise<Response> {
       date: b.date,
       startTime: b.startTime,
       endTime: b.endTime,
+      // IT5 / US-33: Auftragsdauer in Minuten.
+      durationMinutes: b.durationMinutes,
       customerId: b.customerId,
       customerName: b.customerName,
       customerPhone: b.customerPhone,
       customerEmail: b.customerEmail,
       service: b.service,
       description: b.description,
+      // IT5 / US-32: Adressfelder.
+      addressStreet: b.addressStreet,
+      addressZip: b.addressZip,
+      addressCity: b.addressCity,
       status: b.status,
       mailSent: b.mailSent,
       mailError: b.mailError,
@@ -154,18 +168,19 @@ export async function GET(req: NextRequest): Promise<Response> {
  * POST /api/bookings (public).
  *
  * Akzeptiert beide Modi:
- *   - Modus IT3 (NEU): { date, startTime, endTime, customerName, ... }
- *   - Modus Bestand:   { slotId, customerName, ... }
+ *   - Modus IT3/IT5: { date, startTime, durationMinutes, address*, ... }
+ *   - Modus Bestand: { slotId, ... }
  *
- * Verifizierung:
+ * Verifizierung (IT3/IT5):
  *   1. Rate-Limit (10/h/IP).
- *   2. Zod-Validierung — superRefine sorgt dafür, dass GENAU einer der
- *      Modi erfüllt ist (sonst 400 mit field-Hinweis).
- *   3. IT3-Modus: Verfügbarkeits-Check (DayOverride/Template + Slot-Block);
- *      Bestand-Modus: Slot existiert und ist nicht soft-deleted.
- *   4. Insert; Race-Condition-Schutz via Partial Unique Index → 409 CONFLICT.
- *   5. attachmentIds verknüpfen (falls übergeben).
- *   6. Sofort 201 Response — Mail läuft fire-and-forget.
+ *   2. Zod-Validierung (CreateBookingSchema mit superRefine).
+ *   3. Verfügbarkeitsfenster prüfen.
+ *   4. Ganztag-Auflösung (durationMinutes === -1) → startTime/endTime aus
+ *      Template/Override.
+ *   5. endTime aus durationMinutes neu berechnen (Authority).
+ *   6. Window-Check (endTime <= templateEnd).
+ *   7. Overlap-Check + Buffer-Check + Insert in Serializable-Transaktion.
+ *   8. attachmentIds verknüpfen, fire-and-forget Mail.
  */
 export async function POST(req: NextRequest): Promise<Response> {
   try {
@@ -186,15 +201,20 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     const data = CreateBookingSchema.parse(json);
-    const isDateMode = !!(data.date && data.startTime && data.endTime);
+    const isDateMode = !!(data.date && data.startTime);
+    const isSlotMode = !!data.slotId;
 
     // ---------------------------------------------------------------------
     // Modus-spezifische Verifizierung
     // ---------------------------------------------------------------------
     let slotForMail: { startsAt: Date; endsAt: Date; description: string | null } | null = null;
+    // IT3/IT5: berechnete Termin-Daten nach Ganztag-/Duration-Auflösung.
+    let resolvedDate: string | null = null;
+    let resolvedStartTime: string | null = null;
+    let resolvedEndTime: string | null = null;
+    let resolvedDuration: number = 60;
 
     if (isDateMode) {
-      // IT3-Modus: Verfügbarkeitsfenster prüfen.
       const day = await getAvailabilityForDate(data.date!);
       if (!day.isActive) {
         return apiError({
@@ -204,28 +224,60 @@ export async function POST(req: NextRequest): Promise<Response> {
         });
       }
 
-      const startMin = timeToMinutes(data.startTime!);
-      const endMin = timeToMinutes(data.endTime!);
       const fenStart = timeToMinutes(day.startTime!);
       const fenEnd = timeToMinutes(day.endTime!);
 
-      if (startMin < fenStart || endMin > fenEnd) {
+      // Duration ist im IT3/IT5-Modus Pflicht (Schema enforced).
+      const reqDuration = data.durationMinutes;
+      if (reqDuration === undefined || reqDuration === null) {
         return apiError({
-          code: 'CONFLICT',
-          message: 'Das gewählte Zeitfenster liegt außerhalb der Verfügbarkeit.',
-          field: 'startTime',
+          code: 'VALIDATION_ERROR',
+          message: 'Bitte wählen Sie eine Auftragsdauer.',
+          field: 'durationMinutes',
         });
       }
 
-      // Slot-Block-Länge (verhindert "Custom"-Slots).
-      if (endMin - startMin !== day.slotDurationMinutes) {
-        return apiError({
-          code: 'VALIDATION_ERROR',
-          message: `Termin muss ${day.slotDurationMinutes} Minuten dauern.`,
-          field: 'endTime',
-        });
+      // ---- Ganztag-Auflösung (US-33 §18.4.5) ----
+      if (reqDuration === BOOKING_DURATION_ALL_DAY) {
+        resolvedDate = data.date!;
+        resolvedStartTime = day.startTime!;
+        resolvedEndTime = day.endTime!;
+        resolvedDuration = fenEnd - fenStart;
+      } else {
+        // ---- Standard-Dauer ----
+        const startMin = timeToMinutes(data.startTime!);
+        const computedEndTime = addMinutesToTime(data.startTime!, reqDuration);
+        const endMin = startMin + reqDuration;
+
+        if (startMin < fenStart) {
+          return apiError({
+            code: 'CONFLICT',
+            message: 'Die gewählte Startzeit liegt außerhalb der Verfügbarkeit.',
+            field: 'startTime',
+          });
+        }
+        if (endMin > fenEnd) {
+          return apiError({
+            code: 'CONFLICT',
+            message: 'Die gewählte Dauer passt nicht in den verfügbaren Zeitraum.',
+            field: 'durationMinutes',
+          });
+        }
+
+        resolvedDate = data.date!;
+        resolvedStartTime = data.startTime!;
+        resolvedEndTime = computedEndTime;
+        resolvedDuration = reqDuration;
+
+        // Hinweis: bei abweichendem `data.endTime` greift Backend-Authority —
+        // wir überschreiben silent mit `computedEndTime` und loggen.
+        if (data.endTime && data.endTime !== computedEndTime) {
+          console.info(
+            `[bookings] endTime corrected from ${data.endTime} to ${computedEndTime} based on durationMinutes=${reqDuration}`,
+          );
+        }
       }
-    } else {
+    } else if (isSlotMode) {
       // Bestand-Modus: Slot existiert.
       const slot = await prisma.slot.findUnique({
         where: { id: data.slotId! },
@@ -283,32 +335,92 @@ export async function POST(req: NextRequest): Promise<Response> {
     // IT4 (US-25 AC8): eingeloggte Kunden bekommen ihre Buchung automatisch
     // zugeordnet. Gastbuchungen lassen `customerId` leer.
     const customerSession = await readCustomerSessionFromRequest(req);
+    const customerId = customerSession?.customerId ?? null;
 
-    let booking;
-    try {
-      booking = await prisma.booking.create({
-        data: {
-          slotId: isDateMode ? null : data.slotId,
-          date: isDateMode ? data.date : null,
-          startTime: isDateMode ? data.startTime : null,
-          endTime: isDateMode ? data.endTime : null,
-          customerId: customerSession?.customerId ?? null,
+    let bookingId: string;
+    let bookingStatus: string;
+    let bookingCreatedAt: Date;
+    let bookingCancelToken: string;
+
+    if (isDateMode && resolvedDate && resolvedStartTime && resolvedEndTime) {
+      // IT3/IT5: Serializable-Transaktion mit Overlap-/Buffer-Check.
+      try {
+        const created = await createBookingWithOverlapCheck({
+          date: resolvedDate,
+          startTime: resolvedStartTime,
+          endTime: resolvedEndTime,
+          durationMinutes: resolvedDuration,
+          customerId,
           customerName: data.customerName,
           customerPhone: data.customerPhone,
           customerEmail: data.customerEmail,
           service: data.service,
           description: data.description,
-        },
-      });
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        return apiError({
-          code: 'CONFLICT',
-          message:
-            'Dieses Zeitfenster wurde gerade gebucht. Bitte wählen Sie ein anderes.',
+          addressStreet: data.addressStreet ?? null,
+          addressZip: data.addressZip ?? null,
+          addressCity: data.addressCity ?? null,
         });
+        bookingId = created.id;
+        bookingStatus = created.status;
+        bookingCreatedAt = created.createdAt;
+        bookingCancelToken = created.cancelToken;
+      } catch (err) {
+        if (err instanceof BookingConflictError) {
+          return apiError({
+            code: 'CONFLICT',
+            message: err.message,
+          });
+        }
+        if (
+          err instanceof Prisma.PrismaClientKnownRequestError &&
+          err.code === 'P2002'
+        ) {
+          return apiError({
+            code: 'CONFLICT',
+            message:
+              'Dieses Zeitfenster wurde gerade gebucht. Bitte wählen Sie ein anderes.',
+          });
+        }
+        throw err;
       }
-      throw err;
+    } else {
+      // Slot-Modus (Bestand) — kein Overlap-Check (Slot-FK + Unique reichen).
+      try {
+        const booking = await prisma.booking.create({
+          data: {
+            slotId: data.slotId,
+            date: null,
+            startTime: null,
+            endTime: null,
+            customerId,
+            customerName: data.customerName,
+            customerPhone: data.customerPhone,
+            customerEmail: data.customerEmail,
+            service: data.service,
+            description: data.description,
+            // Adresse im Slot-Modus optional — wir persistieren wenn vorhanden.
+            addressStreet: data.addressStreet ?? null,
+            addressZip: data.addressZip ?? null,
+            addressCity: data.addressCity ?? null,
+          },
+        });
+        bookingId = booking.id;
+        bookingStatus = booking.status;
+        bookingCreatedAt = booking.createdAt;
+        bookingCancelToken = booking.cancelToken;
+      } catch (err) {
+        if (
+          err instanceof Prisma.PrismaClientKnownRequestError &&
+          err.code === 'P2002'
+        ) {
+          return apiError({
+            code: 'CONFLICT',
+            message:
+              'Dieses Zeitfenster wurde gerade gebucht. Bitte wählen Sie ein anderes.',
+          });
+        }
+        throw err;
+      }
     }
 
     // ---------------------------------------------------------------------
@@ -318,7 +430,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       try {
         await prisma.bookingAttachment.updateMany({
           where: { id: { in: attachmentIds }, bookingId: null },
-          data: { bookingId: booking.id },
+          data: { bookingId },
         });
       } catch (err) {
         // Attachment-Linkage darf den 201 nicht kippen — loggen und weiter.
@@ -330,19 +442,19 @@ export async function POST(req: NextRequest): Promise<Response> {
     // Fire-and-forget Mail-Dispatch
     // ---------------------------------------------------------------------
     const mailPayload: BookingMailPayload = {
-      bookingId: booking.id,
-      customerName: booking.customerName,
-      customerPhone: booking.customerPhone,
-      customerEmail: booking.customerEmail,
+      bookingId,
+      customerName: data.customerName,
+      customerPhone: data.customerPhone,
+      customerEmail: data.customerEmail,
       service: data.service,
-      description: booking.description,
-      cancelToken: booking.cancelToken,
+      description: data.description,
+      cancelToken: bookingCancelToken,
       slot: slotForMail,
-      date: isDateMode ? data.date! : null,
-      startTime: isDateMode ? data.startTime! : null,
-      endTime: isDateMode ? data.endTime! : null,
+      date: isDateMode ? resolvedDate : null,
+      startTime: isDateMode ? resolvedStartTime : null,
+      endTime: isDateMode ? resolvedEndTime : null,
     };
-    void runMailDispatch(booking.id, mailPayload).catch((err) => {
+    void runMailDispatch(bookingId, mailPayload).catch((err) => {
       console.error('[mail-dispatch] unexpected error:', err);
     });
 
@@ -355,9 +467,9 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     return apiSuccess(
       {
-        id: booking.id,
-        status: booking.status,
-        createdAt: booking.createdAt.toISOString(),
+        id: bookingId,
+        status: bookingStatus,
+        createdAt: bookingCreatedAt.toISOString(),
       },
       201,
     );

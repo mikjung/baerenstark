@@ -98,17 +98,14 @@ function publicBaseUrl(): string {
   return (
     process.env.NEXT_PUBLIC_BASE_URL ||
     process.env.NEXTAUTH_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
     'http://localhost:3000'
   ).replace(/\/+$/, '');
 }
 
-/** Gleiche Quelle wie publicBaseUrl(); für Admin-Links lokalisiert. */
+/** Gleiche Quelle wie publicBaseUrl(); für Admin-Links. */
 function adminBaseUrl(): string {
-  return (
-    process.env.NEXTAUTH_URL ||
-    process.env.NEXT_PUBLIC_BASE_URL ||
-    'http://localhost:3000'
-  ).replace(/\/+$/, '');
+  return publicBaseUrl();
 }
 
 /**

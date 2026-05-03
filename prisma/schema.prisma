@@ -1,5 +1,13 @@
-// Bärenstark Hausservice — Live Prisma Schema (v1.4.1 — Iteration 4)
+// Bärenstark Hausservice — Live Prisma Schema (v1.5 — Iteration 5)
 // Synchron gehalten mit /contracts/schema.prisma.
+//
+// Iteration 5 Änderungen:
+//   - US-31 (OAuth2): CustomerUser.oauthProvider/oauthId/avatarUrl neu;
+//     passwordHash wird nullable (OAuth-only-Konten ohne lokales Passwort).
+//   - US-32 (Adresse): Booking.addressStreet/addressZip/addressCity neu
+//     (DB-nullable für Bestand, API-Pflicht ab IT5).
+//   - US-33 (Dauer): Booking.durationMinutes Int @default(60) neu.
+//   - US-34 (Buffer): NEUE Tabelle BufferConfig (Singleton, Default 30 min).
 //
 // Iteration 4 Änderungen:
 //   - NEU: CustomerUser (US-25) — separate Kunden-Auth-Entität.
@@ -29,28 +37,39 @@ model User {
   @@map("users")
 }
 
-/// Kunden-Account (Iteration 4 / US-25).
+/// Kunden-Account (Iteration 4 / US-25, Iteration 5 / US-31).
 /// Vollständig getrennt vom Admin-`User`-Modell.
+///
+/// IT5 / US-31: passwordHash nullable; oauthProvider/oauthId/avatarUrl neu.
 model CustomerUser {
   id                      String    @id @default(cuid())
   email                   String    @unique
-  passwordHash            String
+  /// IT5 nullable: OAuth-only-Konten haben kein lokales Passwort.
+  passwordHash            String?
   firstName               String
   lastName                String
   phone                   String?
+  /// IT5: OAuth-Konten erhalten direkt `emailVerified = true` (Provider-Trust).
   emailVerified           Boolean   @default(false)
   verificationToken       String?   @unique
   /// 24h-Ablauf (BUG-401-Fix v1.4.1) — wird bei Resend mit-aktualisiert.
   verificationTokenExpiry DateTime?
   resetToken              String?   @unique
   resetTokenExpiry        DateTime?
-  createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
 
-  bookings  Booking[]
-  reviews   Review[]
+  /// IT5 / US-31 — OAuth2-Verknüpfung. Null = reines E-Mail/Passwort-Konto.
+  oauthProvider String?
+  oauthId       String?
+  avatarUrl     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookings Booking[]
+  reviews  Review[]
 
   @@index([email])
+  @@index([oauthProvider, oauthId])
   @@map("customer_users")
 }
 
@@ -75,20 +94,24 @@ model Slot {
 /// werden im API-Layer durch Zod (BookingStatusSchema) erzwungen.
 /// Werte (IT4): 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'COUNTER_PROPOSED' | 'CANCELLED' | 'COMPLETED'.
 model Booking {
-  id            String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // Iteration 1/2: Slot-basiert (DEPRECATED, nur Bestand). Optional ab IT3.
-  slotId        String?
-  slot          Slot?    @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
+  slotId String?
+  slot   Slot?   @relation("BookingPrimarySlot", fields: [slotId], references: [id], onDelete: Restrict)
 
   // Iteration 3 (US-17): Date/Time-basierte Buchung.
-  date          String?
-  startTime     String?
-  endTime       String?
+  date      String?
+  startTime String?
+  endTime   String?
+
+  // Iteration 5 (US-33): vom Kunden gewählte Auftragsdauer in Minuten.
+  // endTime = startTime + durationMinutes (App-Layer berechnet/validiert).
+  durationMinutes Int @default(60)
 
   // Iteration 4 (US-25/26): optionale Verknüpfung mit Kundenkonto.
-  customerId    String?
-  customer      CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerId String?
+  customer   CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   customerName  String
   customerPhone String
@@ -96,10 +119,16 @@ model Booking {
   service       String
   description   String
 
-  status        String   @default("PENDING")
+  // Iteration 5 (US-32): Adresse des Auftragsorts.
+  // DB-nullable für Bestand, API-Pflicht für neue Buchungen.
+  addressStreet String?
+  addressZip    String?
+  addressCity   String?
 
-  mailSent      Boolean  @default(false)
-  mailError    String?
+  status String @default("PENDING")
+
+  mailSent  Boolean @default(false)
+  mailError String?
 
   // Iteration 2 Felder
   cancelToken           String  @unique @default(cuid())
@@ -107,14 +136,14 @@ model Booking {
   counterProposalSlot   Slot?   @relation("BookingCounterProposalSlot", fields: [counterProposalSlotId], references: [id], onDelete: SetNull)
 
   // Iteration 3: Datei-Anhänge.
-  attachments   BookingAttachment[]
+  attachments BookingAttachment[]
 
   // Iteration 4 Backrefs.
-  payment   Payment?
-  review    Review?
+  payment Payment?
+  review  Review?
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([slotId])
   @@index([status, createdAt])
@@ -206,18 +235,29 @@ model Payment {
 /// Kundenbewertung (Iteration 4 / US-29).
 /// 1:1 zu Booking, optional zu CustomerUser.
 model Review {
-  id          String        @id @default(cuid())
-  customerId  String?
-  customer    CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  bookingId   String?       @unique
-  booking     Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
-  stars       Int
-  text        String?
-  approved    Boolean       @default(false)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  id         String        @id @default(cuid())
+  customerId String?
+  customer   CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  bookingId  String?       @unique
+  booking    Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  stars      Int
+  text       String?
+  approved   Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
 
   @@index([approved, createdAt])
   @@index([customerId])
   @@map("reviews")
+}
+
+/// Globale Buffer-Konfiguration (Iteration 5 / US-34).
+/// Singleton — genau ein Datensatz. Default 30 Minuten.
+/// App-Layer validiert auf Whitelist [0, 15, 30, 45, 60].
+model BufferConfig {
+  id            String   @id @default(cuid())
+  bufferMinutes Int      @default(30)
+  updatedAt     DateTime @updatedAt
+
+  @@map("buffer_config")
 }

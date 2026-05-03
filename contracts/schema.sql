@@ -1,6 +1,20 @@
--- Bärenstark Hausservice — SQL-Referenz (MVP, v1.4.1 — Iteration 4 Revision)
+-- Bärenstark Hausservice — SQL-Referenz (MVP, v1.5 — Iteration 5)
 -- Diese Datei dient als lesbare Referenz. Die produktive Schema-Erstellung
 -- erfolgt via `prisma migrate`. Keine direkte Ausführung empfohlen.
+--
+-- Änderungen v1.5 (Iteration 5 — US-30 bis US-34):
+--   - customer_users:
+--       * password_hash wird NULLABLE (US-31: OAuth-only-Konten ohne lokales Pw).
+--       * NEUE Spalten: oauth_provider, oauth_id, avatar_url (alle NULL).
+--       * NEUER Index idx_customer_users_oauth (oauth_provider, oauth_id).
+--   - bookings:
+--       * NEUE Spalten: address_street, address_zip, address_city (alle NULL
+--         im DB-Schema; API-Layer macht sie ab IT5 Pflicht für neue Buchungen).
+--       * NEUE Spalte: duration_minutes INTEGER NOT NULL DEFAULT 60.
+--   - NEUE Tabelle: buffer_config (Singleton, US-34). Default-Wert
+--     30 Minuten wird beim ersten Lesen on-the-fly geseedet.
+--   - US-30 (Admin-Pw-Reset UX): kein Schema-Eingriff — `users.reset_token`
+--     existiert bereits seit IT4-Vorarbeit (siehe Live-Schema).
 --
 -- Änderungen v1.4.1 (Iteration 4 — QA-Revision: BUG-401):
 --   - customer_users: NEUE Spalte verification_token_expiry DATETIME NULL
@@ -53,7 +67,8 @@ CREATE TABLE users (
 CREATE TABLE customer_users (
   id                          TEXT PRIMARY KEY,
   email                       TEXT NOT NULL UNIQUE,             -- lowercase, normalisiert
-  password_hash               TEXT NOT NULL,                     -- bcrypt cost 10
+  -- IT5 / US-31: NULLABLE — OAuth-only-Konten ohne lokales Passwort.
+  password_hash               TEXT NULL,                         -- bcrypt cost 10
   first_name                  TEXT NOT NULL,
   last_name                   TEXT NOT NULL,
   phone                       TEXT NULL,
@@ -64,11 +79,17 @@ CREATE TABLE customer_users (
                                                                  --   wird bei resend-verification mit-aktualisiert.
   reset_token                 TEXT NULL UNIQUE,                  -- cuid, gesetzt bei Forgot
   reset_token_expiry          DATETIME NULL,                     -- 1h nach Anfrage
+  -- IT5 / US-31: OAuth2-Verknüpfung (Google + GitHub).
+  oauth_provider              TEXT NULL,                         -- 'google' | 'github' | NULL
+  oauth_id                    TEXT NULL,                         -- Provider-spezifische User-ID
+  avatar_url                  TEXT NULL,                         -- Profilbild-URL vom Provider
   created_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_customer_users_email ON customer_users (email);
+-- IT5 / US-31: Index für OAuth-Callback-Lookup (Provider+ID).
+CREATE INDEX idx_customer_users_oauth ON customer_users (oauth_provider, oauth_id);
 
 -- ---------------------------------------------------------------------------
 -- Tabelle: slots (DEPRECATED in IT3, bleibt für Bestand)
@@ -98,6 +119,10 @@ CREATE TABLE bookings (
   date                      TEXT NULL,                                  -- "YYYY-MM-DD" Berlin-TZ
   start_time                TEXT NULL,                                  -- "HH:MM" Berlin-TZ
   end_time                  TEXT NULL,                                  -- "HH:MM" Berlin-TZ
+  -- IT5 / US-33: vom Kunden gewählte Auftragsdauer in Minuten.
+  -- end_time = start_time + duration_minutes (App-Layer berechnet).
+  duration_minutes          INTEGER NOT NULL DEFAULT 60
+    CHECK (duration_minutes >= 15 AND duration_minutes <= 1440),
   -- IT4 (US-25/26): optionale Verknüpfung mit Kundenkonto.
   customer_id               TEXT NULL,
   customer_name             TEXT NOT NULL,
@@ -105,6 +130,11 @@ CREATE TABLE bookings (
   customer_email            TEXT NULL,
   service                   TEXT NOT NULL,                              -- Slug-Liste siehe Footer
   description               TEXT NOT NULL,
+  -- IT5 / US-32: Adresse des Auftragsorts. DB-nullable für Bestand,
+  -- API-Layer macht alle drei Felder ab IT5 Pflicht für neue Buchungen.
+  address_street            TEXT NULL,                                  -- "Musterstraße 12"
+  address_zip               TEXT NULL,                                  -- "64283" (5 Ziffern, App-Validierung)
+  address_city              TEXT NULL,                                  -- "Darmstadt"
   status                    TEXT NOT NULL DEFAULT 'PENDING'
     CHECK (status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'COUNTER_PROPOSED', 'CANCELLED', 'COMPLETED')),
   mail_sent                 INTEGER NOT NULL DEFAULT 0
@@ -274,6 +304,21 @@ CREATE TABLE reviews (
 -- Composite-Index für öffentliches GET /api/reviews (approved=1, sortiert nach Datum).
 CREATE INDEX idx_reviews_approved_created  ON reviews (approved, created_at DESC);
 CREATE INDEX idx_reviews_customer_id       ON reviews (customer_id);
+
+-- ---------------------------------------------------------------------------
+-- Tabelle: buffer_config (Iteration 5 — US-34)
+--
+-- Singleton — genau ein Datensatz darf existieren. Default-Wert 30 Minuten
+-- wird beim ersten Lesen on-the-fly geseedet. App-Layer validiert auf
+-- Whitelist [0, 15, 30, 45, 60]; DB CHECK lässt Forward-Kompatibilität
+-- (z.B. 90/120) offen.
+-- ---------------------------------------------------------------------------
+CREATE TABLE buffer_config (
+  id              TEXT PRIMARY KEY,
+  buffer_minutes  INTEGER NOT NULL DEFAULT 30
+    CHECK (buffer_minutes >= 0 AND buffer_minutes <= 240),
+  updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 -- ---------------------------------------------------------------------------
 -- Service-Slugs (Konstante, nicht in DB) — Iteration 3 erweitert:

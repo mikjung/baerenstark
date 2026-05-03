@@ -22,6 +22,7 @@ import {
   internalError,
 } from '@/lib/api';
 import { todayInBerlin } from '@/lib/availability';
+import { getBufferConfig } from '@/lib/buffer-config';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -51,9 +52,17 @@ interface UpcomingBookingItem {
   date: string;
   startTime: string;
   endTime: string;
+  /** IT5 / US-33: Auftragsdauer in Minuten. */
+  durationMinutes: number;
   customerName: string;
   customerPhone: string;
   service: string;
+  /** IT5 / US-32: Adressfelder, nullable für Bestand. */
+  addressStreet: string | null;
+  addressZip: string | null;
+  addressCity: string | null;
+  /** IT5 / US-34: globaler Buffer-Wert (für Kalender-Visualisierung). */
+  bufferMinutes: number;
   isToday: boolean;
   /** Sortierschlüssel — nicht im Output. */
   _sortKey: string;
@@ -79,6 +88,8 @@ export async function GET(req: NextRequest): Promise<Response> {
     }
     const { limit } = parsed.data;
     const today = todayInBerlin();
+    const bufferCfg = await getBufferConfig();
+    const bufferMinutes = bufferCfg.bufferMinutes;
 
     // 1) IT3-Modus: date != null und date >= today.
     const it3Bookings = await prisma.booking.findMany({
@@ -93,9 +104,13 @@ export async function GET(req: NextRequest): Promise<Response> {
         date: true,
         startTime: true,
         endTime: true,
+        durationMinutes: true,
         customerName: true,
         customerPhone: true,
         service: true,
+        addressStreet: true,
+        addressZip: true,
+        addressCity: true,
       },
     });
 
@@ -124,9 +139,14 @@ export async function GET(req: NextRequest): Promise<Response> {
         date: b.date,
         startTime: b.startTime,
         endTime: b.endTime,
+        durationMinutes: b.durationMinutes,
         customerName: b.customerName,
         customerPhone: b.customerPhone,
         service: b.service,
+        addressStreet: b.addressStreet,
+        addressZip: b.addressZip,
+        addressCity: b.addressCity,
+        bufferMinutes,
         isToday: b.date === today,
         _sortKey: `${b.date}T${b.startTime}`,
       });
@@ -149,9 +169,14 @@ export async function GET(req: NextRequest): Promise<Response> {
         date: dateStr,
         startTime: startStr,
         endTime: endStr,
+        durationMinutes: b.durationMinutes,
         customerName: b.customerName,
         customerPhone: b.customerPhone,
         service: b.service,
+        addressStreet: b.addressStreet,
+        addressZip: b.addressZip,
+        addressCity: b.addressCity,
+        bufferMinutes,
         isToday: dateStr === today,
         _sortKey: `${dateStr}T${startStr}`,
       });

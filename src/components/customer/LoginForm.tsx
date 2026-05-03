@@ -3,13 +3,15 @@
 /**
  * LoginForm — Client-Komponente für /konto/login.
  *
- * Liest `?callbackUrl=/konto/...` aus der Query (Middleware setzt das beim
- * Redirect von geschützten Seiten) und reicht es als `redirectUrl` an den
- * Login-Endpoint. Server validiert via `safeCustomerCallback()` und gibt
- * den geprüften Pfad in `data.redirectUrl` zurück.
+ * Iteration 5 (US-31):
+ *   - OAuth-Buttons (Google + GitHub) OBERHALB des Pw-Formulars,
+ *     wenn `NEXT_PUBLIC_FEATURE_OAUTH_LOGIN === 'true'`.
+ *   - Fehler-Mapping für `?error=oauth_no_email`,
+ *     `?error=oauth_unverified_conflict` etc.
  *
- * Bei 422 EMAIL_NOT_VERIFIED wird ein "Bestätigungs-E-Mail erneut senden"-
- * Button angezeigt.
+ * Bestand IT4:
+ *   - Liest `?callbackUrl=/konto/...` (Middleware-Redirect-Param).
+ *   - Bei 422 EMAIL_NOT_VERIFIED Anzeige eines Resend-Buttons.
  */
 
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -27,6 +29,12 @@ import {
 } from '@/lib/api-client';
 import { safeCustomerCallback } from '@/lib/customer-portal';
 import { CustomerLoginSchema, type CustomerLoginInput } from '@/lib/schemas';
+import {
+  OAuthButtons,
+  OAuthDivider,
+  mapOAuthErrorMessage,
+  useOAuthEnabled,
+} from './OAuthButtons';
 
 const GENERIC_LOGIN_ERROR = 'E-Mail oder Passwort falsch.';
 
@@ -38,6 +46,7 @@ export function LoginForm() {
   );
   const verifiedQuery = searchParams.get('verified');
   const errorQuery = searchParams.get('error');
+  const oauthEnabled = useOAuthEnabled();
 
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -79,7 +88,14 @@ export function LoginForm() {
         if (err.status === 401) {
           setServerError(GENERIC_LOGIN_ERROR);
         } else if (err.code === 'EMAIL_NOT_VERIFIED' || err.status === 422) {
-          setNeedsVerification(values.email);
+          // OAUTH_ONLY_ACCOUNT (US-31) ist auch 422 — eigene Message:
+          if (err.message && /oauth/i.test(err.message)) {
+            setServerError(
+              'Dieses Konto ist für die Anmeldung mit Google/GitHub eingerichtet — bitte nutze den entsprechenden Anbieter-Button oben.',
+            );
+          } else {
+            setNeedsVerification(values.email);
+          }
         } else if (err.code === 'RATE_LIMITED') {
           setServerError('Zu viele Login-Versuche. Bitte 15 Minuten warten.');
         } else {
@@ -110,11 +126,14 @@ export function LoginForm() {
     }
   };
 
-  // Hinweise aus URL-Params (z.B. nach Verifikation)
+  // Hinweise aus URL-Params (z.B. nach Verifikation oder OAuth-Fehler).
+  const oauthErrorMessage = mapOAuthErrorMessage(errorQuery);
+
   const queryBanner = (() => {
     if (verifiedQuery === '1') {
       return {
         tone: 'success' as const,
+        title: 'E-Mail bestätigt',
         message:
           'Deine E-Mail-Adresse wurde bestätigt. Du kannst dich jetzt einloggen.',
       };
@@ -122,94 +141,121 @@ export function LoginForm() {
     if (errorQuery === 'invalid_token') {
       return {
         tone: 'error' as const,
+        title: 'Bestätigungslink ungültig',
         message:
           'Der Bestätigungslink ist ungültig oder abgelaufen. Bitte fordere einen neuen Link an.',
+      };
+    }
+    if (oauthErrorMessage) {
+      return {
+        tone: 'error' as const,
+        title: 'Anmeldung fehlgeschlagen',
+        message: oauthErrorMessage,
       };
     }
     return null;
   })();
 
   return (
-    <form onSubmit={onSubmit} noValidate className="space-y-4">
+    <div className="space-y-2">
       {queryBanner && (
-        <Banner tone={queryBanner.tone} role="status">
-          {queryBanner.message}
-        </Banner>
-      )}
-
-      <Input
-        label="E-Mail"
-        type="email"
-        autoComplete="username"
-        required
-        error={errors.email?.message}
-        {...register('email')}
-      />
-      <Input
-        label="Passwort"
-        type="password"
-        autoComplete="current-password"
-        required
-        error={errors.password?.message}
-        {...register('password')}
-      />
-
-      <div className="flex justify-end">
-        <Link
-          href="/konto/passwort-vergessen"
-          className="text-sm text-baerenstark-wood underline-offset-2 hover:underline"
-        >
-          Passwort vergessen?
-        </Link>
-      </div>
-
-      {serverError && (
-        <Banner tone="error" role="alert">
-          {serverError}
-        </Banner>
-      )}
-
-      {needsVerification && (
-        <Banner tone="warning" title="E-Mail-Adresse noch nicht bestätigt" role="alert">
-          <p className="mb-3">
-            Bitte bestätige zuerst deine E-Mail-Adresse, indem du den Link aus
-            der Verifikations-E-Mail anklickst.
-          </p>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={onResend}
-            isLoading={resending}
+        <div className="mb-4">
+          <Banner
+            tone={queryBanner.tone}
+            title={queryBanner.title}
+            role={queryBanner.tone === 'error' ? 'alert' : 'status'}
           >
-            Bestätigungs-E-Mail erneut senden
-          </Button>
-          {resendSuccess && (
-            <p className="mt-2 text-sm text-green-900">{resendSuccess}</p>
-          )}
-        </Banner>
+            {queryBanner.message}
+          </Banner>
+        </div>
       )}
 
-      <Button type="submit" isLoading={submitting} className="w-full">
-        Einloggen
-      </Button>
+      {oauthEnabled && (
+        <>
+          <OAuthButtons />
+          <OAuthDivider label="oder" />
+        </>
+      )}
 
-      <p className="pt-2 text-center text-sm text-baerenstark-bark/80">
-        Noch kein Konto?{' '}
-        <Link
-          href={
-            callbackUrl !== '/konto'
-              ? `/konto/registrieren?callbackUrl=${encodeURIComponent(callbackUrl)}`
-              : '/konto/registrieren'
-          }
-          className="text-baerenstark-wood underline-offset-2 hover:underline"
-        >
-          Jetzt registrieren
-        </Link>
-      </p>
+      <form onSubmit={onSubmit} noValidate className="space-y-4">
+        <Input
+          label="E-Mail"
+          type="email"
+          autoComplete="username"
+          required
+          error={errors.email?.message}
+          {...register('email')}
+        />
+        <Input
+          label="Passwort"
+          type="password"
+          autoComplete="current-password"
+          required
+          error={errors.password?.message}
+          {...register('password')}
+        />
 
-      {/* Hidden marker for tests / dev tools — see getValues() if needed */}
-      <input type="hidden" name="callbackUrl" value={getValues('redirectUrl') ?? callbackUrl} />
-    </form>
+        <div className="flex justify-end">
+          <Link
+            href="/konto/passwort-vergessen"
+            className="text-sm text-baerenstark-wood underline-offset-2 hover:underline"
+          >
+            Passwort vergessen?
+          </Link>
+        </div>
+
+        {serverError && (
+          <Banner tone="error" role="alert">
+            {serverError}
+          </Banner>
+        )}
+
+        {needsVerification && (
+          <Banner tone="warning" title="E-Mail-Adresse noch nicht bestätigt" role="alert">
+            <p className="mb-3">
+              Bitte bestätige zuerst deine E-Mail-Adresse, indem du den Link aus
+              der Verifikations-E-Mail anklickst.
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={onResend}
+              isLoading={resending}
+            >
+              Bestätigungs-E-Mail erneut senden
+            </Button>
+            {resendSuccess && (
+              <p className="mt-2 text-sm text-green-900">{resendSuccess}</p>
+            )}
+          </Banner>
+        )}
+
+        <Button type="submit" isLoading={submitting} className="w-full">
+          Einloggen
+        </Button>
+
+        <p className="pt-2 text-center text-sm text-baerenstark-bark/80">
+          Noch kein Konto?{' '}
+          <Link
+            href={
+              callbackUrl !== '/konto'
+                ? `/konto/registrieren?callbackUrl=${encodeURIComponent(callbackUrl)}`
+                : '/konto/registrieren'
+            }
+            className="text-baerenstark-wood underline-offset-2 hover:underline"
+          >
+            Jetzt registrieren
+          </Link>
+        </p>
+
+        {/* Hidden marker for tests / dev tools */}
+        <input
+          type="hidden"
+          name="callbackUrl"
+          value={getValues('redirectUrl') ?? callbackUrl}
+        />
+      </form>
+    </div>
   );
 }

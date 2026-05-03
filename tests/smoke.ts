@@ -452,15 +452,21 @@ async function run() {
   // -----------------------------------------------------------------
 
   await group('Iteration 3 — Schema Validation (Date/Time, Sonstiges, Attachments)', async () => {
+    // IT5 (US-32 + US-33): Adressfelder + durationMinutes sind Pflicht
+    // im Date-Modus.
     const r1 = CreateBookingSchema.safeParse({
       date: '2099-05-15',
       startTime: '09:00',
       endTime: '10:00',
+      durationMinutes: 60,
       customerName: 'Maria',
       customerPhone: '0157 12345678',
       customerEmail: 'maria@example.com',
       service: 'entruempelung',
       description: 'Keller leeren',
+      addressStreet: 'Musterstraße 12',
+      addressZip: '64283',
+      addressCity: 'Darmstadt',
       privacyAccepted: true,
     });
     r1.success
@@ -519,11 +525,15 @@ async function run() {
       date: '2099-05-15',
       startTime: '09:00',
       endTime: '10:00',
+      durationMinutes: 60,
       customerName: 'Maria',
       customerPhone: '0157 12345678',
       customerEmail: 'maria@example.com',
       service: 'sonstiges',
       description: 'Eine ausführliche Beschreibung mit mehr als 30 Zeichen!',
+      addressStreet: 'Musterstraße 12',
+      addressZip: '64283',
+      addressCity: 'Darmstadt',
       privacyAccepted: true,
     });
     r6.success ? ok('CreateBooking accepts sonstiges with >=30 char description') : bad('sonstiges >=30');
@@ -980,7 +990,7 @@ async function run() {
         emailVerified: true,
       },
     });
-    if (u.id && u.email === email && !u.passwordHash.startsWith('test-')) {
+    if (u.id && u.email === email && u.passwordHash && !u.passwordHash.startsWith('test-')) {
       ok('CustomerUser created with bcrypt-hashed password');
     } else {
       bad('CustomerUser create roundtrip');
@@ -1055,6 +1065,571 @@ async function run() {
     if (!isStripeConfigured()) ok('isStripeConfigured() false without key');
     else bad('isStripeConfigured() should be false');
     if (before !== undefined) process.env.STRIPE_SECRET_KEY = before;
+  });
+
+  // -----------------------------------------------------------------
+  // Iteration 5 Tests
+  // -----------------------------------------------------------------
+
+  await group('Iteration 5 — time-utils', async () => {
+    const { addMinutesToTime, subtractMinutesFromTime, timeToMinutes, minutesToTime } =
+      await import('../src/lib/time-utils');
+    if (addMinutesToTime('09:00', 120) === '11:00') ok('addMinutesToTime 09:00 + 120 = 11:00');
+    else bad('addMinutesToTime 09:00 + 120');
+    if (addMinutesToTime('08:30', 60) === '09:30') ok('addMinutesToTime 08:30 + 60 = 09:30');
+    else bad('addMinutesToTime 08:30 + 60');
+    if (subtractMinutesFromTime('11:00', 30) === '10:30') ok('subtractMinutesFromTime 11:00 - 30 = 10:30');
+    else bad('subtractMinutesFromTime 11:00 - 30');
+    if (timeToMinutes('09:30') === 570) ok('timeToMinutes 09:30 = 570');
+    else bad('timeToMinutes 09:30');
+    if (minutesToTime(570) === '09:30') ok('minutesToTime 570 = 09:30');
+    else bad('minutesToTime 570');
+  });
+
+  await group('Iteration 5 — adminBaseUrl resolver', async () => {
+    const { adminBaseUrl } = await import('../src/lib/baseUrl');
+    const before = {
+      NEXTAUTH_URL: process.env.NEXTAUTH_URL,
+      NEXT_PUBLIC_BASE_URL: process.env.NEXT_PUBLIC_BASE_URL,
+      VERCEL_URL: process.env.VERCEL_URL,
+    };
+
+    delete process.env.NEXTAUTH_URL;
+    delete process.env.NEXT_PUBLIC_BASE_URL;
+    delete process.env.VERCEL_URL;
+    if (adminBaseUrl() === 'http://localhost:3000') ok('adminBaseUrl falls back to localhost:3000');
+    else bad('adminBaseUrl localhost fallback');
+
+    process.env.NEXTAUTH_URL = 'https://www.example.app/';
+    if (adminBaseUrl() === 'https://www.example.app') ok('adminBaseUrl strips trailing slash');
+    else bad('adminBaseUrl strip slash');
+
+    delete process.env.NEXTAUTH_URL;
+    process.env.VERCEL_URL = 'preview-abc.vercel.app';
+    if (adminBaseUrl() === 'https://preview-abc.vercel.app') ok('adminBaseUrl prefixes https for VERCEL_URL');
+    else bad('adminBaseUrl VERCEL_URL prefix');
+
+    // Restore.
+    process.env.NEXTAUTH_URL = before.NEXTAUTH_URL ?? '';
+    process.env.NEXT_PUBLIC_BASE_URL = before.NEXT_PUBLIC_BASE_URL ?? '';
+    process.env.VERCEL_URL = before.VERCEL_URL ?? '';
+    if (!process.env.NEXTAUTH_URL) delete process.env.NEXTAUTH_URL;
+    if (!process.env.NEXT_PUBLIC_BASE_URL) delete process.env.NEXT_PUBLIC_BASE_URL;
+    if (!process.env.VERCEL_URL) delete process.env.VERCEL_URL;
+  });
+
+  await group('Iteration 5 — IT5 schemas (US-32 + US-33 + US-34)', async () => {
+    const {
+      CreateBookingSchema,
+      ZipCodeSchema,
+      BookingAddressSchema,
+      BOOKING_DURATION_OPTIONS,
+      BOOKING_DURATION_ALL_DAY,
+      BUFFER_MINUTES_OPTIONS,
+      UpdateBufferConfigSchema,
+      AvailableSlotsQuerySchema,
+    } = await import('../contracts/zod-schemas');
+
+    if (ZipCodeSchema.safeParse('12345').success) ok('ZipCode 12345 accepted');
+    else bad('ZipCode 12345');
+    if (!ZipCodeSchema.safeParse('1234').success) ok('ZipCode 1234 rejected');
+    else bad('ZipCode 1234');
+    if (!ZipCodeSchema.safeParse('123456').success) ok('ZipCode 123456 rejected');
+    else bad('ZipCode 123456');
+
+    if (
+      BookingAddressSchema.safeParse({
+        addressStreet: 'Musterstraße 12',
+        addressZip: '64283',
+        addressCity: 'Darmstadt',
+      }).success
+    )
+      ok('BookingAddress accepts valid input');
+    else bad('BookingAddress accepts valid');
+
+    // US-33: dur-Options
+    for (const d of BOOKING_DURATION_OPTIONS) {
+      const r = CreateBookingSchema.safeParse({
+        date: '2099-05-15',
+        startTime: '09:00',
+        endTime: '10:00',
+        durationMinutes: d,
+        customerName: 'Maria',
+        customerPhone: '0157 12345678',
+        customerEmail: 'maria@example.com',
+        service: 'entruempelung',
+        description: 'Keller leeren',
+        addressStreet: 'Musterstraße 12',
+        addressZip: '64283',
+        addressCity: 'Darmstadt',
+        privacyAccepted: true,
+      });
+      if (r.success) ok(`CreateBooking accepts durationMinutes=${d}`);
+      else bad(`CreateBooking duration ${d}`, r.error);
+    }
+    // Ganztag
+    const rAll = CreateBookingSchema.safeParse({
+      date: '2099-05-15',
+      startTime: '09:00',
+      endTime: '17:00',
+      durationMinutes: BOOKING_DURATION_ALL_DAY,
+      customerName: 'Maria',
+      customerPhone: '0157 12345678',
+      customerEmail: 'maria@example.com',
+      service: 'entruempelung',
+      description: 'Keller leeren',
+      addressStreet: 'Musterstraße 12',
+      addressZip: '64283',
+      addressCity: 'Darmstadt',
+      privacyAccepted: true,
+    });
+    if (rAll.success) ok('CreateBooking accepts BOOKING_DURATION_ALL_DAY');
+    else bad('CreateBooking ganztag', rAll.error);
+
+    // US-32: missing addressStreet → 400
+    const rMissingAddr = CreateBookingSchema.safeParse({
+      date: '2099-05-15',
+      startTime: '09:00',
+      endTime: '10:00',
+      durationMinutes: 60,
+      customerName: 'Maria',
+      customerPhone: '0157 12345678',
+      customerEmail: 'maria@example.com',
+      service: 'entruempelung',
+      description: 'Keller leeren',
+      addressZip: '64283',
+      addressCity: 'Darmstadt',
+      privacyAccepted: true,
+    });
+    if (!rMissingAddr.success) ok('CreateBooking rejects missing addressStreet');
+    else bad('CreateBooking missing addressStreet');
+
+    // US-32: invalid zip
+    const rBadZip = CreateBookingSchema.safeParse({
+      date: '2099-05-15',
+      startTime: '09:00',
+      endTime: '10:00',
+      durationMinutes: 60,
+      customerName: 'Maria',
+      customerPhone: '0157 12345678',
+      customerEmail: 'maria@example.com',
+      service: 'entruempelung',
+      description: 'Keller leeren',
+      addressStreet: 'Musterstraße 12',
+      addressZip: '1234',
+      addressCity: 'Darmstadt',
+      privacyAccepted: true,
+    });
+    if (!rBadZip.success) ok('CreateBooking rejects 4-digit zip');
+    else bad('CreateBooking zip 4 digits');
+
+    // US-33: missing duration in date mode
+    const rMissingDuration = CreateBookingSchema.safeParse({
+      date: '2099-05-15',
+      startTime: '09:00',
+      endTime: '10:00',
+      customerName: 'Maria',
+      customerPhone: '0157 12345678',
+      customerEmail: 'maria@example.com',
+      service: 'entruempelung',
+      description: 'Keller leeren',
+      addressStreet: 'Musterstraße 12',
+      addressZip: '64283',
+      addressCity: 'Darmstadt',
+      privacyAccepted: true,
+    });
+    if (!rMissingDuration.success) ok('CreateBooking rejects missing durationMinutes (date mode)');
+    else bad('CreateBooking missing duration date mode');
+
+    // US-33: invalid duration
+    const rBadDuration = CreateBookingSchema.safeParse({
+      date: '2099-05-15',
+      startTime: '09:00',
+      endTime: '10:00',
+      durationMinutes: 75,
+      customerName: 'Maria',
+      customerPhone: '0157 12345678',
+      customerEmail: 'maria@example.com',
+      service: 'entruempelung',
+      description: 'Keller leeren',
+      addressStreet: 'Musterstraße 12',
+      addressZip: '64283',
+      addressCity: 'Darmstadt',
+      privacyAccepted: true,
+    });
+    if (!rBadDuration.success) ok('CreateBooking rejects durationMinutes=75 (off-whitelist)');
+    else bad('CreateBooking duration off-whitelist');
+
+    // US-34: BufferConfig whitelist
+    for (const v of BUFFER_MINUTES_OPTIONS) {
+      if (UpdateBufferConfigSchema.safeParse({ bufferMinutes: v }).success)
+        ok(`UpdateBufferConfig accepts ${v}`);
+      else bad(`UpdateBufferConfig accepts ${v}`);
+    }
+    if (!UpdateBufferConfigSchema.safeParse({ bufferMinutes: 17 }).success)
+      ok('UpdateBufferConfig rejects 17');
+    else bad('UpdateBufferConfig rejects 17');
+
+    // AvailableSlots query with duration
+    if (
+      AvailableSlotsQuerySchema.safeParse({ date: '2099-05-15', duration: '120' }).success
+    )
+      ok('AvailableSlotsQuery coerces duration string → number');
+    else bad('AvailableSlotsQuery coerce duration');
+    if (
+      // Numerisches -1 — Route coerced den String vorab zu Number.
+      AvailableSlotsQuerySchema.safeParse({ date: '2099-05-15', duration: -1 }).success
+    )
+      ok('AvailableSlotsQuery accepts duration=-1 (ganztag)');
+    else bad('AvailableSlotsQuery duration -1');
+    if (
+      !AvailableSlotsQuerySchema.safeParse({ date: '2099-05-15', duration: '75' }).success
+    )
+      ok('AvailableSlotsQuery rejects duration=75');
+    else bad('AvailableSlotsQuery rejects 75');
+  });
+
+  await group('Iteration 5 — BufferConfig helper', async () => {
+    const { getBufferConfig, setBufferConfig } = await import('../src/lib/buffer-config');
+    const before = await getBufferConfig();
+    if (typeof before.bufferMinutes === 'number') ok('getBufferConfig returns bufferMinutes');
+    else bad('getBufferConfig returns bufferMinutes');
+
+    const updated = await setBufferConfig(45);
+    if (updated.bufferMinutes === 45) ok('setBufferConfig persists 45');
+    else bad('setBufferConfig 45');
+    const after = await getBufferConfig();
+    if (after.bufferMinutes === 45) ok('getBufferConfig reflects 45');
+    else bad('getBufferConfig reflects 45');
+
+    // Restore default.
+    await setBufferConfig(30);
+  });
+
+  await group('Iteration 5 — createBookingWithOverlapCheck', async () => {
+    const { createBookingWithOverlapCheck, BookingConflictError } = await import(
+      '../src/lib/booking-create'
+    );
+    const { setBufferConfig } = await import('../src/lib/buffer-config');
+    await setBufferConfig(30);
+
+    // Cleanup any prior smoke bookings on this date.
+    const TEST_DATE = '2099-12-15';
+    await prisma.booking.deleteMany({ where: { date: TEST_DATE } });
+
+    const baseInput = {
+      date: TEST_DATE,
+      customerId: null,
+      customerName: 'Smoke',
+      customerPhone: '0157 12345678',
+      customerEmail: 's@example.com',
+      service: 'entruempelung',
+      description: '__SMOKE__ overlap test',
+      addressStreet: 'Musterstraße 12',
+      addressZip: '64283',
+      addressCity: 'Darmstadt',
+    };
+
+    const a = await createBookingWithOverlapCheck({
+      ...baseInput,
+      startTime: '09:00',
+      endTime: '11:00',
+      durationMinutes: 120,
+    });
+    if (a.id) ok('First booking 09:00-11:00 inserted');
+    else bad('First booking');
+
+    // Overlapping booking 10:00-12:00 → conflict.
+    let conflictCaught = false;
+    try {
+      await createBookingWithOverlapCheck({
+        ...baseInput,
+        startTime: '10:00',
+        endTime: '12:00',
+        durationMinutes: 120,
+      });
+    } catch (err) {
+      if (err instanceof BookingConflictError && err.code === 'CONFLICT') conflictCaught = true;
+    }
+    if (conflictCaught) ok('Overlapping booking 10:00-12:00 rejected with CONFLICT');
+    else bad('Overlapping should be rejected');
+
+    // CONFIRMED-Buchung anlegen + Buffer-Test.
+    await prisma.booking.update({
+      where: { id: a.id },
+      data: { status: 'CONFIRMED' },
+    });
+
+    let bufferCaught = false;
+    try {
+      // 11:00-12:00 startet exakt an der Endzeit der CONFIRMED-Buchung.
+      // Mit buffer=30 ist 11:00-11:30 gesperrt → 11:00-12:00 sollte
+      // BUFFER_BLOCKED werfen.
+      await createBookingWithOverlapCheck({
+        ...baseInput,
+        startTime: '11:00',
+        endTime: '12:00',
+        durationMinutes: 60,
+      });
+    } catch (err) {
+      if (err instanceof BookingConflictError && err.code === 'BUFFER_BLOCKED')
+        bufferCaught = true;
+    }
+    if (bufferCaught) ok('Buffer-overlap (CONFIRMED + 30min) rejected with BUFFER_BLOCKED');
+    else bad('Buffer-overlap should be rejected');
+
+    // 11:30-12:30 → erlaubt (buffer reicht bis 11:30).
+    const c = await createBookingWithOverlapCheck({
+      ...baseInput,
+      startTime: '11:30',
+      endTime: '12:30',
+      durationMinutes: 60,
+    });
+    if (c.id) ok('Booking right after buffer-end (11:30-12:30) accepted');
+    else bad('After buffer-end should be accepted');
+
+    // Cleanup.
+    await prisma.booking.deleteMany({ where: { date: TEST_DATE } });
+  });
+
+  await group('Iteration 5 — computeAvailableSlots with duration + buffer', async () => {
+    const { computeAvailableSlots } = await import('../src/lib/availability');
+    const { setBufferConfig } = await import('../src/lib/buffer-config');
+    await setBufferConfig(30);
+
+    const TEST_DATE = '2099-12-16';
+    await prisma.booking.deleteMany({ where: { date: TEST_DATE } });
+
+    // Tag aktiv (Default-Template Mo-Fr aktiv 08:00-17:00).
+    const r1 = await computeAvailableSlots(TEST_DATE, 60);
+    if (r1.isDayActive) ok('computeAvailableSlots (60) returns isDayActive');
+    else bad('Day should be active');
+    if (r1.slots.every((s) => s.available)) ok('All 60-min slots available initially');
+    else bad('All slots should be available initially');
+
+    // Bestätigte Buchung 13:00-14:00 anlegen → 14:00-15:00 wegen Buffer
+    // unavailable, 14:30-15:30 available.
+    await prisma.booking.create({
+      data: {
+        date: TEST_DATE,
+        startTime: '13:00',
+        endTime: '14:00',
+        durationMinutes: 60,
+        customerName: '__SMOKE__',
+        customerPhone: '0157 12345678',
+        customerEmail: 's@example.com',
+        service: 'entruempelung',
+        description: '__SMOKE__ buffer test',
+        status: 'CONFIRMED',
+      },
+    });
+
+    const r2 = await computeAvailableSlots(TEST_DATE, 60);
+    const slot1300 = r2.slots.find((s) => s.startTime === '13:00');
+    const slot1400 = r2.slots.find((s) => s.startTime === '14:00');
+    if (slot1300 && slot1300.available === false)
+      ok('13:00-14:00 (own booking) unavailable');
+    else bad('13:00 should be unavailable');
+    if (slot1400 && slot1400.available === false)
+      ok('14:00-15:00 blocked by 30min buffer after CONFIRMED 13:00-14:00');
+    else bad('14:00 should be blocked by buffer');
+
+    // PENDING-Buchung → kein Buffer.
+    await prisma.booking.deleteMany({ where: { date: TEST_DATE } });
+    await prisma.booking.create({
+      data: {
+        date: TEST_DATE,
+        startTime: '13:00',
+        endTime: '14:00',
+        durationMinutes: 60,
+        customerName: '__SMOKE__',
+        customerPhone: '0157 12345678',
+        customerEmail: 's@example.com',
+        service: 'entruempelung',
+        description: '__SMOKE__ pending test',
+        status: 'PENDING',
+      },
+    });
+
+    const r3 = await computeAvailableSlots(TEST_DATE, 60);
+    const p1400 = r3.slots.find((s) => s.startTime === '14:00');
+    if (p1400 && p1400.available === true)
+      ok('PENDING-Buchung blockiert KEINEN Buffer (14:00 weiterhin available)');
+    else bad('PENDING should not block buffer');
+
+    // buffer = 0 → 14:00 verfügbar trotz CONFIRMED 13:00-14:00.
+    await prisma.booking.deleteMany({ where: { date: TEST_DATE } });
+    await prisma.booking.create({
+      data: {
+        date: TEST_DATE,
+        startTime: '13:00',
+        endTime: '14:00',
+        durationMinutes: 60,
+        customerName: '__SMOKE__',
+        customerPhone: '0157 12345678',
+        customerEmail: 's@example.com',
+        service: 'entruempelung',
+        description: '__SMOKE__ buffer=0 test',
+        status: 'CONFIRMED',
+      },
+    });
+    await setBufferConfig(0);
+
+    const r4 = await computeAvailableSlots(TEST_DATE, 60);
+    const z1400 = r4.slots.find((s) => s.startTime === '14:00');
+    if (z1400 && z1400.available === true) ok('buffer=0: 14:00 verfügbar trotz CONFIRMED 13:00-14:00');
+    else bad('buffer=0 should release 14:00');
+
+    // Restore + cleanup.
+    await setBufferConfig(30);
+    await prisma.booking.deleteMany({ where: { date: TEST_DATE } });
+  });
+
+  await group('Iteration 5 — OAuth helper (no providers configured)', async () => {
+    const { isCustomerOAuthEnabled, normalizeProfile } = await import(
+      '../src/lib/customer-oauth'
+    );
+    const before = {
+      g_id: process.env.GOOGLE_CLIENT_ID,
+      g_sec: process.env.GOOGLE_CLIENT_SECRET,
+      gh_id: process.env.GITHUB_CLIENT_ID,
+      gh_sec: process.env.GITHUB_CLIENT_SECRET,
+      flag: process.env.FEATURE_OAUTH_LOGIN,
+    };
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
+    delete process.env.FEATURE_OAUTH_LOGIN;
+    if (!isCustomerOAuthEnabled()) ok('isCustomerOAuthEnabled false without credentials');
+    else bad('isCustomerOAuthEnabled should be false');
+
+    // normalizeProfile Google
+    const googleProfile = normalizeProfile(
+      'google',
+      {
+        sub: 'google-12345',
+        email: 'maria@example.com',
+        given_name: 'Maria',
+        family_name: 'Müller',
+        picture: 'https://example.com/m.jpg',
+      },
+      { provider: 'google', providerAccountId: 'google-12345' },
+    );
+    if (
+      googleProfile &&
+      googleProfile.provider === 'google' &&
+      googleProfile.email === 'maria@example.com'
+    )
+      ok('normalizeProfile maps Google profile');
+    else bad('normalizeProfile google');
+
+    // GitHub mit name-Split
+    const ghProfile = normalizeProfile(
+      'github',
+      {
+        id: 99,
+        email: 'tom@example.com',
+        name: 'Tom Test',
+        avatar_url: 'https://example.com/t.png',
+      },
+      { provider: 'github', providerAccountId: '99' },
+    );
+    if (
+      ghProfile &&
+      ghProfile.provider === 'github' &&
+      ghProfile.firstName === 'Tom' &&
+      ghProfile.lastName === 'Test'
+    )
+      ok('normalizeProfile maps GitHub profile (name split)');
+    else bad('normalizeProfile github');
+
+    // GitHub ohne E-Mail → null
+    const ghNoEmail = normalizeProfile(
+      'github',
+      { id: 1, name: 'Anon' },
+      { provider: 'github', providerAccountId: '1' },
+    );
+    if (ghNoEmail === null) ok('normalizeProfile returns null when GitHub email missing');
+    else bad('normalizeProfile no email');
+
+    if (before.g_id !== undefined) process.env.GOOGLE_CLIENT_ID = before.g_id;
+    if (before.g_sec !== undefined) process.env.GOOGLE_CLIENT_SECRET = before.g_sec;
+    if (before.gh_id !== undefined) process.env.GITHUB_CLIENT_ID = before.gh_id;
+    if (before.gh_sec !== undefined) process.env.GITHUB_CLIENT_SECRET = before.gh_sec;
+    if (before.flag !== undefined) process.env.FEATURE_OAUTH_LOGIN = before.flag;
+  });
+
+  await group('Iteration 5 — handleCustomerOAuthSignIn (account linking)', async () => {
+    const { handleCustomerOAuthSignIn } = await import('../src/lib/customer-oauth');
+
+    // 1. Brand-new account (no email match).
+    const nuEmail = `oauth-new-${Date.now()}@example.com`;
+    const r1 = await handleCustomerOAuthSignIn('google', {
+      provider: 'google',
+      oauthId: `g-${Date.now()}`,
+      email: nuEmail,
+      firstName: 'Neu',
+      lastName: 'User',
+      avatarUrl: 'https://example.com/n.jpg',
+    });
+    if (r1.ok && r1.email === nuEmail) ok('OAuth signIn creates new CustomerUser');
+    else bad('OAuth signIn create');
+
+    // 2. Existing verified account → linking succeeds (passwordHash preserved).
+    const verifiedEmail = `oauth-verif-${Date.now()}@example.com`;
+    const verified = await prisma.customerUser.create({
+      data: {
+        email: verifiedEmail,
+        passwordHash: '$2a$10$abcdefghijklmnopqrstuv',
+        firstName: 'Maria',
+        lastName: 'Verified',
+        emailVerified: true,
+      },
+    });
+    const r2 = await handleCustomerOAuthSignIn('google', {
+      provider: 'google',
+      oauthId: `g-link-${Date.now()}`,
+      email: verifiedEmail,
+      firstName: 'Maria',
+      lastName: 'Verified',
+      avatarUrl: null,
+    });
+    if (r2.ok && r2.customerId === verified.id) ok('Verified account: OAuth linking succeeds');
+    else bad('Verified linking');
+    const after2 = await prisma.customerUser.findUnique({ where: { id: verified.id } });
+    if (after2?.passwordHash) ok('Verified linking preserves passwordHash');
+    else bad('Linking destroyed passwordHash');
+    if (after2?.oauthProvider === 'google') ok('Verified linking sets oauthProvider');
+    else bad('Linking did not set provider');
+
+    // 3. Existing UNVERIFIED account → linking BLOCKED.
+    const unverifEmail = `oauth-unverif-${Date.now()}@example.com`;
+    const unverif = await prisma.customerUser.create({
+      data: {
+        email: unverifEmail,
+        passwordHash: '$2a$10$abcdefghijklmnopqrstuv',
+        firstName: 'Mallory',
+        lastName: 'Hijack',
+        emailVerified: false,
+      },
+    });
+    const r3 = await handleCustomerOAuthSignIn('google', {
+      provider: 'google',
+      oauthId: `g-hijack-${Date.now()}`,
+      email: unverifEmail,
+      firstName: 'Mallory',
+      lastName: 'Hijack',
+      avatarUrl: null,
+    });
+    if (!r3.ok && r3.error === 'oauth_unverified_conflict')
+      ok('Unverified local account → OAuth linking blocked (BUG-IT5-004)');
+    else bad('Unverified linking should be blocked');
+
+    // Cleanup
+    await prisma.customerUser.deleteMany({
+      where: { email: { in: [nuEmail, verifiedEmail, unverifEmail] } },
+    });
   });
 
   await cleanup();

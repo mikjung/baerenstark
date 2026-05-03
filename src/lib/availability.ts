@@ -9,7 +9,11 @@
 
 import { prisma } from './prisma';
 import type { AvailableTimeSlot } from './schemas';
-import { ACTIVE_BOOKING_STATUSES } from './schemas';
+import {
+  ACTIVE_BOOKING_STATUSES,
+  BOOKING_DURATION_ALL_DAY,
+} from './schemas';
+import { getBufferConfig } from './buffer-config';
 
 const TZ = 'Europe/Berlin';
 
@@ -272,14 +276,25 @@ export async function getBookedTimesForDate(date: string): Promise<string[]> {
 }
 
 /**
- * Berechnet die verfügbaren Zeit-Slots für ein Datum.
+ * Berechnet die verfügbaren Zeit-Slots für ein Datum (IT3 + IT5).
  *
  * 1. Vergangenheit → leeres Array.
  * 2. Resolver liefert Verfügbarkeitsfenster (oder Tag-inaktiv).
- * 3. Slots werden im Fenster mit slotDurationMinutes generiert.
- * 4. Bereits aktiv gebuchte Slots werden mit `available: false` markiert.
+ * 3. Schritt = `slotDurationMinutes` aus dem Template (Schrittweite).
+ *    Block-Größe = `effectiveDuration`:
+ *      - Param `duration` (US-33) ist gesetzt → diese Dauer.
+ *      - Param `BOOKING_DURATION_ALL_DAY` (-1) → Fenster komplett.
+ *      - sonst → `slotDurationMinutes` (IT3-Verhalten).
+ * 4. Aktive Buchungen (PENDING/CONFIRMED/COUNTER_PROPOSED) werden gegen den
+ *    Block geprüft (Overlap = `bStart < aEnd && bEnd > aStart`).
+ * 5. CONFIRMED-Buchungen blockieren ZUSÄTZLICH den Buffer-Bereich
+ *    `[aEnd, aEnd + bufferMinutes)` (US-34). PENDING/COUNTER_PROPOSED
+ *    NICHT — Tom hat noch nicht zugesagt.
  */
-export async function computeAvailableSlots(date: string): Promise<{
+export async function computeAvailableSlots(
+  date: string,
+  duration?: number,
+): Promise<{
   date: string;
   isDayActive: boolean;
   slots: AvailableTimeSlot[];
@@ -302,41 +317,89 @@ export async function computeAvailableSlots(date: string): Promise<{
 
   const startTime = day.startTime!;
   const endTime = day.endTime!;
-  const duration = day.slotDurationMinutes!;
+  const stepMinutes = day.slotDurationMinutes!;
 
   const startMin = timeToMinutes(startTime);
   const endMin = timeToMinutes(endTime);
 
-  const blocks: { startTime: string; endTime: string }[] = [];
-  let cur = startMin;
-  while (cur + duration <= endMin) {
-    blocks.push({
-      startTime: minutesToTime(cur),
-      endTime: minutesToTime(cur + duration),
-    });
-    cur += duration;
+  // IT5: effektive Block-Größe.
+  const effectiveDuration =
+    duration === BOOKING_DURATION_ALL_DAY
+      ? endMin - startMin
+      : (duration ?? stepMinutes);
+
+  if (effectiveDuration <= 0 || endMin - startMin < effectiveDuration) {
+    return { date, isDayActive: true, slots: [] };
   }
 
-  // Belegte Slots ermitteln (Race-Condition-tolerant — der Partial Unique
-  // Index sichert die finale Buchung ab; hier filtern wir nur die Anzeige).
-  const bookings = await prisma.booking.findMany({
-    where: {
-      date,
-      status: { in: ACTIVE_BOOKING_STATUSES as unknown as string[] },
-    },
-    select: { startTime: true, endTime: true },
-  });
-  const taken = new Set(
-    bookings
-      .filter((b) => b.startTime && b.endTime)
-      .map((b) => `${b.startTime}-${b.endTime}`),
-  );
+  // Bei Ganztag: genau EIN Block über das gesamte Fenster.
+  const blocks: { startTime: string; endTime: string }[] = [];
+  if (duration === BOOKING_DURATION_ALL_DAY) {
+    blocks.push({
+      startTime: minutesToTime(startMin),
+      endTime: minutesToTime(endMin),
+    });
+  } else {
+    // Schritt = stepMinutes (Template-Default), Block-Größe = effectiveDuration.
+    let cur = startMin;
+    while (cur + effectiveDuration <= endMin) {
+      blocks.push({
+        startTime: minutesToTime(cur),
+        endTime: minutesToTime(cur + effectiveDuration),
+      });
+      cur += stepMinutes;
+    }
+  }
 
-  const slots: AvailableTimeSlot[] = blocks.map((b) => ({
-    startTime: b.startTime,
-    endTime: b.endTime,
-    available: !taken.has(`${b.startTime}-${b.endTime}`),
-  }));
+  // Aktive Buchungen + Buffer-Konfiguration parallel laden.
+  const [bookings, bufferCfg] = await Promise.all([
+    prisma.booking.findMany({
+      where: {
+        date,
+        status: { in: ACTIVE_BOOKING_STATUSES as unknown as string[] },
+      },
+      select: { startTime: true, endTime: true, status: true },
+    }),
+    getBufferConfig(),
+  ]);
+
+  const bufferMinutes = bufferCfg.bufferMinutes;
+
+  type ActiveBooking = { startMin: number; endMin: number; status: string };
+  const activeBookings: ActiveBooking[] = bookings
+    .filter((b) => b.startTime && b.endTime)
+    .map((b) => ({
+      startMin: timeToMinutes(b.startTime as string),
+      endMin: timeToMinutes(b.endTime as string),
+      status: b.status,
+    }));
+
+  const slots: AvailableTimeSlot[] = blocks.map((b) => {
+    const bStart = timeToMinutes(b.startTime);
+    const bEnd = timeToMinutes(b.endTime);
+
+    let available = true;
+    for (const ab of activeBookings) {
+      // Buchungs-Overlap.
+      if (bStart < ab.endMin && bEnd > ab.startMin) {
+        available = false;
+        break;
+      }
+      // Buffer-Overlap (nur nach CONFIRMED).
+      if (ab.status === 'CONFIRMED' && bufferMinutes > 0) {
+        const bufferEnd = ab.endMin + bufferMinutes;
+        if (bStart < bufferEnd && bEnd > ab.endMin) {
+          available = false;
+          break;
+        }
+      }
+    }
+    return {
+      startTime: b.startTime,
+      endTime: b.endTime,
+      available,
+    };
+  });
 
   return { date, isDayActive: true, slots };
 }

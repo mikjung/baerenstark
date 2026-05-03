@@ -1,6 +1,45 @@
-// Bärenstark Hausservice — Prisma Schema (MVP, v1.4.1 — Iteration 4 Revision)
+// Bärenstark Hausservice — Prisma Schema (MVP, v1.5 — Iteration 5)
 // Single source of truth für das Datenmodell.
 // Live-Schema unter prisma/schema.prisma muss mit dieser Datei synchron bleiben.
+//
+// Änderungen v1.5 (Iteration 5 — US-30 bis US-34):
+//   - **US-31 (OAuth2 für Kunden):** `CustomerUser` erhält drei neue,
+//     optionale Felder:
+//       * `oauthProvider String?`  — 'google' | 'github' | null
+//       * `oauthId       String?`  — Provider-spezifische User-ID
+//       * `avatarUrl     String?`  — Profilbild-URL vom Provider (optional)
+//     `passwordHash` wird damit **nullable**, weil OAuth-only-Konten
+//     kein lokales Passwort besitzen. Bestehende E-Mail/Passwort-Konten
+//     bleiben unverändert (passwordHash gesetzt). Account-Verknüpfung
+//     erfolgt **per E-Mail** (case-insensitive Lookup): meldet sich
+//     ein Kunde mit Google an, dessen E-Mail bereits als E-Mail/Passwort-
+//     Konto existiert, wird das bestehende Konto um `oauthProvider/oauthId`
+//     ergänzt — beide Login-Methoden sind ab dann verknüpft.
+//     Composite-Index `(oauthProvider, oauthId)` für schnelle Provider-
+//     Lookup im Callback (kein UNIQUE — gleicher User kann theoretisch
+//     mehrere Provider haben, aber pro Provider nur einmal vorkommen;
+//     UNIQUE-Pflege erfolgt im App-Layer).
+//   - **US-32 (Adressfeld):** `Booking` erhält drei neue Pflichtfelder
+//     (im Schema nullable für Rückwärtskompatibilität mit IT1–IT4-
+//     Bestandsbuchungen, im API-Layer ab IT5 Pflicht via Zod):
+//       * `addressStreet String?`  — Straße + Hausnummer
+//       * `addressZip    String?`  — 5-stellige PLZ
+//       * `addressCity   String?`  — Ort
+//   - **US-33 (Buchungsdauer):** `Booking.durationMinutes Int @default(60)`
+//     neu. Repräsentiert die vom Kunden gewählte Auftragsdauer in
+//     Minuten. Erlaubte Werte (App-Layer): 60, 120, 180, 240, 300,
+//     360, 480 (= 1h–6h, 8h) sowie ein Sonderwert für „Ganztag"
+//     (siehe ARCHITECTURE.md §18). `endTime = startTime + durationMinutes`
+//     wird beim Insert serverseitig berechnet/validiert.
+//     Bestehende Buchungen aus IT3/IT4 erhalten via Backfill
+//     `durationMinutes = endTimeMin - startTimeMin` (siehe
+//     `prisma/migrations/.../baerenstark_it5.sql`).
+//   - **US-34 (Buffer-Zeit):** Neue Tabelle `BufferConfig` als globaler
+//     Singleton (genau ein Datensatz). Default-Wert 30 Minuten. Wird
+//     bei Slot-Berechnung in `lib/availability.ts` ausgelesen.
+//   - **US-30 (Admin-Passwort-Reset UX):** Kein Schema-Eingriff —
+//     `User.resetToken / resetTokenExpiry` existieren bereits seit IT4.
+//     Fix ist UX-/Konfigurations-seitig (siehe ARCHITECTURE.md §18.1).
 //
 // Änderungen v1.4.1 (Iteration 4 — QA-Revision: BUG-401, BUG-402, MAJOR-403):
 //   - **BUG-401 Fix**: `CustomerUser.verificationTokenExpiry DateTime?` neu —
@@ -153,6 +192,14 @@ model Booking {
   startTime     String?
   endTime       String?
 
+  // --- IT5 (US-33): Buchungsdauer in Minuten. ---
+  /// Ab IT5 Pflicht für neue Buchungen (Default 60 für Backfill).
+  /// `endTime = startTime + durationMinutes` (App-Layer berechnet).
+  /// Erlaubte Werte: 60, 120, 180, 240, 300, 360, 480 (1h–6h, 8h)
+  /// sowie der Sonderwert für „Ganztag" (= Verfügbarkeitsfenster-Dauer
+  /// des jeweiligen Tages, dynamisch im API-Layer berechnet).
+  durationMinutes Int          @default(60)
+
   // --- IT4 (US-25/26): optionale Verknüpfung mit Kundenkonto ---
   /// Null = Gastbuchung. Sonst: Buchung gehört dem registrierten Kunden.
   /// ON DELETE SET NULL: gelöschte Konten verlieren die Verknüpfung,
@@ -166,6 +213,15 @@ model Booking {
   customerEmail String?
   service       String        // Slug aus SERVICES-Konstante (siehe lib/services.ts)
   description   String
+
+  // --- IT5 (US-32): Adresse des Auftragsorts. ---
+  /// Im Schema nullable für Rückwärtskompatibilität mit IT1–IT4-
+  /// Bestandsbuchungen. Im API-Layer (`CreateBookingSchema` ab v1.5)
+  /// sind alle drei Felder Pflicht. Tom sieht in der Admin-UI bei
+  /// Bestandsbuchungen ggf. den Hinweis „Adresse nicht erfasst".
+  addressStreet String?
+  addressZip    String?
+  addressCity   String?
 
   status        BookingStatus @default(PENDING)
 
@@ -314,13 +370,20 @@ model CustomerUser {
   id                String    @id @default(cuid())
   /// Lowercase, UNIQUE. App-Layer normalisiert vor Insert/Lookup.
   email             String    @unique
-  /// bcrypt-Hash, cost 10. Niemals plaintext speichern.
-  passwordHash      String
+  /// bcrypt-Hash, cost 10. **Ab IT5 nullable** (US-31): OAuth-only-Konten
+  /// haben kein lokales Passwort. Bestehende E-Mail/Passwort-Konten haben
+  /// `passwordHash` weiterhin gesetzt.
+  /// **Login-Logik:** Wenn `passwordHash IS NULL` → Credentials-Login
+  /// schlägt mit Code `OAUTH_ONLY_ACCOUNT` fehl (Frontend zeigt Hinweis
+  /// „Bitte melden Sie sich mit Google/GitHub an").
+  passwordHash      String?
   firstName         String
   lastName          String
   /// Optional. Format wie bei Booking.customerPhone (siehe phoneSchema).
   phone             String?
   /// false bis E-Mail-Verifikation abgeschlossen ist.
+  /// **OAuth-Konten (US-31):** Bei OAuth-Login wird `emailVerified = true`
+  /// gesetzt, weil Google/GitHub die E-Mail bereits verifiziert haben.
   emailVerified     Boolean   @default(false)
   /// cuid, gesetzt bei Registrierung. Null nach erfolgreicher Verifikation.
   verificationToken       String?   @unique
@@ -334,6 +397,22 @@ model CustomerUser {
   resetToken              String?   @unique
   /// Ablauf des `resetToken` (1h nach Anfrage).
   resetTokenExpiry        DateTime?
+
+  // --- IT5 / US-31 (OAuth2-Provider-Verknüpfung) -------------------------
+  /// 'google' | 'github' | null. Null = reines E-Mail/Passwort-Konto.
+  /// Bei Erst-OAuth-Login wird der Wert gesetzt; meldet sich der Kunde
+  /// später per E-Mail/Passwort an, bleibt der Wert erhalten (Konto ist
+  /// dann mit beiden Methoden nutzbar).
+  oauthProvider     String?
+  /// Provider-spezifische User-ID (z.B. Google `sub`, GitHub `id`).
+  /// Wird im OAuth-Callback gegen DB geprüft (Lookup vor E-Mail-Lookup).
+  oauthId           String?
+  /// Profilbild-URL vom Provider (Google `picture`, GitHub `avatar_url`).
+  /// Optional, kann beim Profil-Update vom Kunden überschrieben werden
+  /// (Backlog) — im MVP read-only aus Provider übernommen.
+  avatarUrl         String?
+  // -----------------------------------------------------------------------
+
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -341,6 +420,8 @@ model CustomerUser {
   reviews   Review[]
 
   @@index([email])
+  /// IT5 — Index für OAuth-Callback-Lookup (`findFirst` per Provider+ID).
+  @@index([oauthProvider, oauthId])
   @@map("customer_users")
 }
 
@@ -501,4 +582,40 @@ enum PaymentStatus {
   PAID
   FAILED
   REFUNDED
+}
+
+// ============================================================================
+// ITERATION 5 — BufferConfig (US-34)
+// ============================================================================
+
+/// Globale Buffer-Konfiguration (Iteration 5 / US-34).
+///
+/// **Singleton-Pattern:** Genau **ein** Datensatz darf existieren. Tom kann
+/// die Buffer-Zeit in Minuten (0 / 15 / 30 / 45 / 60) global einstellen.
+/// Beim ersten Lesen wird der Datensatz on-the-fly mit Default-Wert (30
+/// Minuten) angelegt (siehe `lib/availability.ts.ensureBufferConfigSeed()`).
+///
+/// **Wirkung in der Slot-Berechnung:**
+///   Für jede CONFIRMED-Buchung an einem Tag wird der Zeitraum
+///   `[bookingEnd, bookingEnd + bufferMinutes]` als blockiert markiert. Ein
+///   neuer Slot ist nur dann verfügbar, wenn er weder mit einer aktiven
+///   Buchung noch mit einem Buffer-Block überlappt. PENDING/COUNTER_PROPOSED
+///   sind ausdrücklich **nicht** mit Buffer belegt — Tom hat noch nicht
+///   zugesagt.
+///
+/// **Begründung Singleton statt ENV:** Tom kann den Wert ohne Deployment
+/// ändern. ENV wäre Engineer-only.
+///
+/// **Begründung enum-Werte 0/15/30/45/60:** Im Schema reicht `Int` mit
+/// Range-Check (siehe Zod `BufferConfigSchema`). Engineering-Hinweis: keine
+/// strikte DB-CHECK-Constraint, weil Tom evtl. später 90/120 ergänzen will
+/// (Forward-kompatibel ohne Migration).
+model BufferConfig {
+  id            String   @id @default(cuid())
+  /// Buffer in Minuten. App-Layer validiert auf [0,15,30,45,60] (Whitelist),
+  /// DB akzeptiert Int >= 0.
+  bufferMinutes Int      @default(30)
+  updatedAt     DateTime @updatedAt
+
+  @@map("buffer_config")
 }

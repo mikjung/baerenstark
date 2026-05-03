@@ -41,7 +41,9 @@ export async function getCustomerFromRequest(
 /**
  * Maps einen DB-`CustomerUser` auf die öffentliche API-Form
  * (`CustomerUserPublicSchema`). Entfernt `passwordHash` und alle
- * Token-Felder.
+ * Token-Felder. Iteration 5 fügt `oauthProvider`, `avatarUrl` und das
+ * abgeleitete `hasPassword` hinzu (US-31 AC6 — Profil-Seite zeigt das
+ * Pw-Feld nur, wenn ein lokales Passwort gesetzt ist).
  */
 export function toCustomerPublic(user: CustomerUser): {
   id: string;
@@ -51,6 +53,9 @@ export function toCustomerPublic(user: CustomerUser): {
   phone: string | null;
   emailVerified: boolean;
   createdAt: string;
+  oauthProvider: string | null;
+  avatarUrl: string | null;
+  hasPassword: boolean;
 } {
   return {
     id: user.id,
@@ -60,5 +65,8 @@ export function toCustomerPublic(user: CustomerUser): {
     phone: user.phone,
     emailVerified: user.emailVerified,
     createdAt: user.createdAt.toISOString(),
+    oauthProvider: user.oauthProvider,
+    avatarUrl: user.avatarUrl,
+    hasPassword: user.passwordHash !== null && user.passwordHash !== undefined,
   };
 }

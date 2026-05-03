@@ -14,6 +14,7 @@ import type {
   AvailableSlotsResponse,
   BookingAdmin,
   BookingStatus,
+  BufferConfig,
   CalendarMonth,
   CreateBookingInput,
   CreateDayOverrideInput,
@@ -427,13 +428,34 @@ export async function postSetup(payload: SetupPayload): Promise<{ id: string; em
 /**
  * Lädt die verfügbaren Zeit-Slots für einen Tag.
  * `date` muss "YYYY-MM-DD" (Berlin-TZ) sein.
+ *
+ * Iteration 5 (US-33): zusätzlicher optionaler `duration`-Parameter (Minuten).
+ * Wenn gesetzt, prüft das Backend, ob ein Slot mit der gewünschten Dauer
+ * verfügbar ist (statt der Default-Slot-Dauer aus dem Template). Akzeptierte
+ * Werte: BOOKING_DURATION_OPTIONS oder BOOKING_DURATION_ALL_DAY (-1).
  */
 export async function fetchAvailableSlots(
   date: string,
-  signal?: AbortSignal,
+  durationOrSignal?: number | AbortSignal,
+  maybeSignal?: AbortSignal,
 ): Promise<AvailableSlotsResponse> {
+  // Backwards-compat: alter Aufruf `fetchAvailableSlots(date, signal)` bleibt
+  // gültig — wir prüfen den Typ des zweiten Arguments.
+  let duration: number | undefined;
+  let signal: AbortSignal | undefined;
+  if (typeof durationOrSignal === 'number') {
+    duration = durationOrSignal;
+    signal = maybeSignal;
+  } else {
+    signal = durationOrSignal;
+  }
+
+  const search = new URLSearchParams({ date });
+  if (typeof duration === 'number') {
+    search.set('duration', String(duration));
+  }
   const res = await request<DataEnvelope<AvailableSlotsResponse>>(
-    `/api/slots/available?date=${encodeURIComponent(date)}`,
+    `/api/slots/available?${search.toString()}`,
     { signal },
   );
   return res.data;
@@ -794,6 +816,42 @@ export async function fetchPaymentSessionStatus(
   const res = await request<DataEnvelope<SessionStatus>>(
     `/api/payments/session-status?session_id=${encodeURIComponent(sessionId)}`,
     { signal },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 5 — Buffer-Config (US-34)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lädt den aktuellen Buffer-Wert (Minuten) aus der globalen Konfiguration.
+ * Backend seedet den Default (30 Min) on-the-fly, falls kein Datensatz
+ * existiert.
+ */
+export async function fetchBufferConfig(
+  signal?: AbortSignal,
+): Promise<BufferConfig> {
+  const res = await request<DataEnvelope<BufferConfig>>(
+    '/api/admin/buffer-config',
+    { signal },
+  );
+  return res.data;
+}
+
+/**
+ * Setzt den Buffer-Wert. Erlaubte Werte: 0, 15, 30, 45, 60 (Whitelist).
+ * Andere Werte werden vom Server mit 400 `VALIDATION_ERROR` abgelehnt.
+ */
+export async function updateBufferConfig(
+  bufferMinutes: number,
+): Promise<BufferConfig> {
+  const res = await request<DataEnvelope<BufferConfig>>(
+    '/api/admin/buffer-config',
+    {
+      method: 'PUT',
+      body: { bufferMinutes },
+    },
   );
   return res.data;
 }

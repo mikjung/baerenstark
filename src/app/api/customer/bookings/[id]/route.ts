@@ -60,8 +60,14 @@ export async function GET(
       date: booking.date,
       startTime: booking.startTime,
       endTime: booking.endTime,
+      // IT5 / US-33: Auftragsdauer in Minuten.
+      durationMinutes: booking.durationMinutes,
       service: booking.service as Service,
       description: booking.description,
+      // IT5 / US-32: Adresse — nullable für Bestandsbuchungen.
+      addressStreet: booking.addressStreet,
+      addressZip: booking.addressZip,
+      addressCity: booking.addressCity,
       status: booking.status,
       cancellableUntilHours: cancellable ? hoursUntil : null,
       isCancellable: cancellable,

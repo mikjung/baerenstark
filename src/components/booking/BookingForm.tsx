@@ -1,21 +1,24 @@
 'use client';
 
 /**
- * BookingForm — Iteration 3 (BUG IT3 Fix + Date/Time + Datei-Upload + Sonstiges).
+ * BookingForm — Iteration 5 (US-32 Adresse + US-33 Dauer).
  *
- * Wichtige Änderungen gegenüber IT2:
+ * Wichtige Änderungen gegenüber IT3:
+ *  - Drei neue Adress-Pflichtfelder (Straße, PLZ, Ort) im Schema und im UI.
+ *  - `durationMinutes` wird programmatisch aus `selectedTimeSlot.durationMinutes`
+ *    in den Payload gemergt (IT5 / US-33).
+ *
+ * Wichtige Änderungen gegenüber IT2 (unverändert seit IT3):
  *  - `slotId` / `date` / `startTime` / `endTime` sind NICHT mehr Teil des
  *    React-Hook-Form-Schemas. Stattdessen verwaltet der Parent (BookingClient)
- *    die Termin-Auswahl via Props (`selectedSlot` legacy ODER `selectedTimeSlot` IT3).
- *    Beim Submit wird der ausgewählte Termin programmatisch in den Payload gemergt.
- *    → Behebt BUG_BOOKING_IT3 (Hidden-Input + register-Konflikt).
+ *    die Termin-Auswahl via Props (`selectedSlot` legacy ODER `selectedTimeSlot` IT5).
  *  - `attachmentIds` werden über die FileUpload-Komponente (US-18) gesammelt.
  *  - Sonstiges-Service zwingt 30+ Zeichen Beschreibung (US-19).
  */
 
 import { zodResolver } from '@hookform/resolvers/zod';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
@@ -51,10 +54,12 @@ type FormStatus =
 interface BookingFormProps {
   /** IT2-Bestand: legacy Slot. */
   selectedSlot: SlotPublic | null;
-  /** IT3-Modus: Datum + Zeit. */
+  /** IT3+IT5-Modus: Datum + Zeit + Dauer. */
   selectedTimeSlot: SelectedTimeSlot | null;
   /** Default-Service aus dem URL-Parameter (?service=slug). Wird in das Form vorausgewählt. */
   defaultService?: string | null;
+  /** Wird bei Service-Wechsel aufgerufen — der Parent kann die Preisschätzung im DurationPicker aktualisieren. */
+  onServiceChange?: (slug: string | null) => void;
   onClearSelection: () => void;
   onSubmitted: () => void;
   rebookToken?: string | null;
@@ -71,6 +76,7 @@ export function BookingForm({
   selectedSlot,
   selectedTimeSlot,
   defaultService,
+  onServiceChange,
   onClearSelection,
   onSubmitted,
   rebookToken = null,
@@ -97,12 +103,24 @@ export function BookingForm({
       customerEmail: '',
       service: initialService,
       description: '',
+      addressStreet: '',
+      addressZip: '',
+      addressCity: '',
+      // IT5 / US-33: durationMinutes wird vom selectedTimeSlot gemergt,
+      // ist aber im Form-Schema Pflicht — Default 60, wird beim Submit
+      // mit dem aktuellen `selectedTimeSlot.durationMinutes` überschrieben.
+      durationMinutes: 60,
       privacyAccepted: undefined as unknown as true,
     },
   });
 
   const watchedService = watch('service');
   const isCustomService = watchedService === 'sonstiges';
+
+  // Service-Wechsel an den Parent kommunizieren (für Preis-Schätzung).
+  useEffect(() => {
+    onServiceChange?.(watchedService ?? null);
+  }, [watchedService, onServiceChange]);
 
   // Genau eine Selektion muss gesetzt sein.
   const hasSelection = Boolean(selectedSlot) || Boolean(selectedTimeSlot);
@@ -111,8 +129,8 @@ export function BookingForm({
     return (
       <Banner tone="info" title="Bitte zuerst einen Termin auswählen">
         <p>
-          Wähle oben einen Tag im Kalender und ein freies Zeitfenster aus, um die
-          Buchungsanfrage auszufüllen.
+          Wähle oben einen Tag im Kalender, eine Auftragsdauer und ein freies
+          Zeitfenster aus, um die Buchungsanfrage auszufüllen.
         </p>
       </Banner>
     );
@@ -167,25 +185,36 @@ export function BookingForm({
 
   /**
    * Standard-Pfad: neue Buchung über POST /api/bookings.
-   * Nutzt entweder IT3-Modus (date/startTime/endTime) ODER Bestand-Modus (slotId).
+   * Nutzt entweder IT3-Modus (date/startTime/endTime/durationMinutes) ODER
+   * Bestand-Modus (slotId).
    */
   const onSubmitNewBooking = handleSubmit(async (values) => {
     setStatus({ kind: 'submitting' });
 
-    // slotId/date/startTime/endTime werden HIER programmatisch in den Payload gemergt
-    // (außerhalb von RHF — siehe BUG IT3-Fix).
+    // slotId/date/startTime/endTime/durationMinutes werden HIER programmatisch
+    // in den Payload gemergt (außerhalb von RHF — siehe BUG IT3-Fix).
     const slotInfo: Partial<CreateBookingInput> = selectedTimeSlot
       ? {
           date: selectedTimeSlot.date,
           startTime: selectedTimeSlot.startTime,
           endTime: selectedTimeSlot.endTime,
+          durationMinutes: selectedTimeSlot.durationMinutes,
         }
       : selectedSlot
         ? { slotId: selectedSlot.id }
         : {};
 
     const payload: CreateBookingInput = {
-      ...values,
+      customerName: values.customerName,
+      customerPhone: values.customerPhone,
+      customerEmail: values.customerEmail,
+      service: values.service,
+      description: values.description,
+      // IT5 / US-32: Adress-Pflicht im IT3/IT5-Modus.
+      addressStreet: values.addressStreet,
+      addressZip: values.addressZip,
+      addressCity: values.addressCity,
+      privacyAccepted: values.privacyAccepted,
       ...slotInfo,
       attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
     };
@@ -250,6 +279,9 @@ export function BookingForm({
           formField === 'customerEmail' ||
           formField === 'service' ||
           formField === 'description' ||
+          formField === 'addressStreet' ||
+          formField === 'addressZip' ||
+          formField === 'addressCity' ||
           formField === 'privacyAccepted'
         ) {
           setError(formField, {
@@ -295,6 +327,11 @@ export function BookingForm({
         <p className="mt-1 font-serif text-lg font-semibold text-baerenstark-bark">
           {selectionLabel}
         </p>
+        {selectedTimeSlot && (
+          <p className="text-sm text-baerenstark-bark/70">
+            Auftragsdauer: {selectedTimeSlot.durationMinutes} Minuten
+          </p>
+        )}
         {selectionDescription && (
           <p className="text-sm text-baerenstark-bark/70">{selectionDescription}</p>
         )}
@@ -400,6 +437,46 @@ export function BookingForm({
             />
           </div>
 
+          {/* IT5 / US-32: Adresse des Auftragsorts */}
+          <div className="mt-5 rounded-xl border border-baerenstark-sand/60 bg-baerenstark-cream/30 p-4 space-y-3">
+            <p className="text-sm font-medium text-baerenstark-bark">
+              <span aria-hidden="true">📍 </span>Adresse des Auftragsorts
+            </p>
+            <Input
+              label="Straße und Hausnummer"
+              required
+              autoComplete="street-address"
+              placeholder="Musterstraße 12"
+              error={errors.addressStreet?.message}
+              {...register('addressStreet')}
+            />
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-1">
+                <Input
+                  label="PLZ"
+                  required
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={5}
+                  autoComplete="postal-code"
+                  placeholder="64283"
+                  error={errors.addressZip?.message}
+                  {...register('addressZip')}
+                />
+              </div>
+              <div className="col-span-2">
+                <Input
+                  label="Ort"
+                  required
+                  autoComplete="address-level2"
+                  placeholder="Darmstadt"
+                  error={errors.addressCity?.message}
+                  {...register('addressCity')}
+                />
+              </div>
+            </div>
+          </div>
+
           <div className="mt-4">
             <Textarea
               label={isCustomService ? 'Beschreibe dein Anliegen' : 'Beschreibung'}
@@ -479,8 +556,8 @@ export function BookingForm({
 }
 
 /**
- * Formatiert eine IT3-Zeit-Auswahl als
- * "Donnerstag, 15. Mai 2026 · 09:00 – 10:00 Uhr".
+ * Formatiert eine IT3/IT5-Zeit-Auswahl als
+ * "Donnerstag, 15. Mai 2026 · 09:00 – 11:00 Uhr".
  */
 function formatTimeSlotLabel(slot: SelectedTimeSlot): string {
   const [y, m, d] = slot.date.split('-').map(Number);

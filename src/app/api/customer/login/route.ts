@@ -67,6 +67,19 @@ export async function POST(req: NextRequest): Promise<Response> {
       });
     }
 
+    // IT5 / US-31: OAuth-only-Konten haben keinen lokalen `passwordHash`.
+    // Wir antworten mit 422 OAUTH_ONLY_ACCOUNT, damit das Frontend dem
+    // Kunden den Hinweis „Bitte mit Google/GitHub anmelden" zeigen kann.
+    // Konstante bcrypt-Last gegen Timing-Side-Channel.
+    if (!user.passwordHash) {
+      await bcrypt.compare(data.password, DUMMY_BCRYPT_HASH);
+      return apiError({
+        code: 'OAUTH_ONLY_ACCOUNT',
+        message:
+          'Dieses Konto wurde mit einem externen Anbieter (Google/GitHub) erstellt. Bitte melden Sie sich darüber an.',
+      });
+    }
+
     const ok = await bcrypt.compare(data.password, user.passwordHash);
     if (!ok) {
       return apiError({

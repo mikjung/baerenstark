@@ -17,7 +17,12 @@ import {
   safeCustomerCallback,
 } from '@/lib/customer-auth';
 
-const PUBLIC_ADMIN_PATHS = ['/admin/login', '/admin/setup'];
+const PUBLIC_ADMIN_PATHS = [
+  '/admin/login',
+  '/admin/setup',
+  '/admin/passwort-vergessen',
+  '/admin/passwort-reset',
+];
 
 const PUBLIC_KONTO_PATHS = [
   '/konto/login',

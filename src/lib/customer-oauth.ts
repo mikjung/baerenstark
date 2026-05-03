@@ -1,0 +1,387 @@
+/**
+ * NextAuth-Customer-Konfiguration für OAuth2-Login (Iteration 5 / US-31).
+ *
+ * Diese Instanz läuft separat vom Admin-NextAuth (siehe `lib/auth.ts`).
+ *
+ *   Pfad:               /api/auth/customer/[...nextauth]
+ *   Provider:           Google + GitHub
+ *   Session-Strategie:  JWT, kurze TTL (60s — Brücke zur Finalize-Route)
+ *
+ * Architektur-Hinweis (§18.2.4 ARCHITECTURE.md):
+ *   Diese Instanz ist NUR der OAuth-Adapter. Die langlebige
+ *   Kunden-Session lebt im Custom-JWT-Cookie `customer-session`
+ *   (siehe `lib/customer-auth.ts`). Die Finalize-Route
+ *   `GET /api/customer/oauth-finalize` setzt das Cookie nach
+ *   erfolgreichem OAuth-Flow.
+ *
+ * Feature-Flag:
+ *   Wenn weder `GOOGLE_CLIENT_ID` noch `GITHUB_CLIENT_ID` gesetzt sind,
+ *   liefert die Konfiguration eine leere Provider-Liste. Die Routen-
+ *   Handler in `app/api/auth/customer/[...nextauth]/route.ts` antworten
+ *   dann mit 503 (siehe dort).
+ */
+
+import NextAuth from 'next-auth';
+import GoogleProvider from 'next-auth/providers/google';
+import GitHubProvider from 'next-auth/providers/github';
+import type { NextAuthConfig } from 'next-auth';
+import { prisma } from './prisma';
+import {
+  CUSTOMER_OAUTH_PROVIDERS,
+  OAuthProfileNormalizedSchema,
+  type CustomerOAuthProvider,
+  type OAuthProfileNormalized,
+} from './schemas';
+import { customerBaseUrl } from './baseUrl';
+
+// ---------------------------------------------------------------------------
+// Feature-Flag
+// ---------------------------------------------------------------------------
+
+/**
+ * `true`, wenn mindestens ein Provider konfiguriert ist UND der Engineer
+ * das Feature nicht explizit per `FEATURE_OAUTH_LOGIN=false` deaktiviert hat.
+ */
+export function isCustomerOAuthEnabled(): boolean {
+  const flag = (process.env.FEATURE_OAUTH_LOGIN ?? '').toLowerCase();
+  if (flag === 'false' || flag === '0') return false;
+
+  const hasGoogle = !!(
+    process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+  );
+  const hasGitHub = !!(
+    process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET
+  );
+  return hasGoogle || hasGitHub;
+}
+
+// ---------------------------------------------------------------------------
+// Profile-Normalisierung
+// ---------------------------------------------------------------------------
+
+interface RawProfileGoogle {
+  email?: string;
+  email_verified?: boolean;
+  given_name?: string;
+  family_name?: string;
+  name?: string;
+  picture?: string;
+  sub?: string;
+}
+
+interface RawProfileGitHub {
+  email?: string | null;
+  name?: string | null;
+  login?: string;
+  avatar_url?: string;
+  id?: number | string;
+}
+
+interface AccountSlim {
+  provider?: string;
+  providerAccountId?: string;
+  // GitHub primary email lookup (Backlog) — placeholder.
+}
+
+function splitName(full: string | null | undefined): {
+  firstName: string;
+  lastName: string;
+} {
+  const trimmed = (full ?? '').trim();
+  if (!trimmed) return { firstName: '', lastName: '' };
+  const parts = trimmed.split(/\s+/);
+  if (parts.length === 1) return { firstName: parts[0], lastName: '—' };
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' '),
+  };
+}
+
+/**
+ * Normalisiert ein Provider-Profil auf `OAuthProfileNormalized`. Liefert
+ * `null`, wenn essentielle Felder fehlen (z.B. keine E-Mail bei GitHub).
+ */
+export function normalizeProfile(
+  provider: string,
+  profile: unknown,
+  account: AccountSlim | null,
+): OAuthProfileNormalized | null {
+  if (!profile || typeof profile !== 'object') return null;
+
+  let candidate: Partial<OAuthProfileNormalized>;
+  if (provider === 'google') {
+    const p = profile as RawProfileGoogle;
+    if (!p.email) return null;
+    candidate = {
+      provider: 'google',
+      oauthId: p.sub ?? account?.providerAccountId ?? '',
+      email: p.email,
+      firstName:
+        p.given_name?.trim() || splitName(p.name).firstName || 'Kunde',
+      lastName:
+        p.family_name?.trim() || splitName(p.name).lastName || '—',
+      avatarUrl: p.picture ?? null,
+    };
+  } else if (provider === 'github') {
+    const p = profile as RawProfileGitHub;
+    if (!p.email) return null;
+    const split = splitName(p.name);
+    candidate = {
+      provider: 'github',
+      oauthId: account?.providerAccountId ?? (p.id != null ? String(p.id) : ''),
+      email: p.email,
+      firstName: split.firstName || p.login || 'Kunde',
+      lastName: split.lastName || '—',
+      avatarUrl: p.avatar_url ?? null,
+    };
+  } else {
+    return null;
+  }
+
+  const parsed = OAuthProfileNormalizedSchema.safeParse(candidate);
+  if (!parsed.success) return null;
+  return parsed.data;
+}
+
+// ---------------------------------------------------------------------------
+// Account-Verknüpfungs-Logik (§18.2.3 + §18.9.2)
+// ---------------------------------------------------------------------------
+
+export type SignInOutcome =
+  | { ok: true; customerId: string; email: string }
+  | {
+      ok: false;
+      error:
+        | 'oauth_unverified_conflict'
+        | 'oauth_no_email'
+        | 'oauth_error';
+    };
+
+/**
+ * Lookup/Create + Linking-Sicherheits-Check. Idempotent (mehrfacher Aufruf
+ * für denselben Profile liefert dasselbe CustomerUser-Tupel).
+ */
+export async function handleCustomerOAuthSignIn(
+  provider: CustomerOAuthProvider,
+  profile: OAuthProfileNormalized,
+): Promise<SignInOutcome> {
+  // 1. Provider-ID-Match (existierender OAuth-Login).
+  let user = await prisma.customerUser.findFirst({
+    where: { oauthProvider: provider, oauthId: profile.oauthId },
+  });
+
+  // 2. E-Mail-Match (existierender Account → potenzielle Verknüpfung).
+  if (!user) {
+    const lcEmail = profile.email.toLowerCase();
+    const existing = await prisma.customerUser.findUnique({
+      where: { email: lcEmail },
+    });
+
+    if (existing) {
+      // SICHERHEIT (BUG-IT5-004): Unverifizierte lokale Konten dürfen NICHT
+      // automatisch verknüpft werden — Hijacking-Schutz.
+      if (!existing.emailVerified) {
+        return { ok: false, error: 'oauth_unverified_conflict' };
+      }
+
+      // Verifiziertes Konto → sichere Verknüpfung. passwordHash bleibt
+      // erhalten (Konto kann mit beiden Methoden weiter genutzt werden).
+      user = await prisma.customerUser.update({
+        where: { id: existing.id },
+        data: {
+          oauthProvider: provider,
+          oauthId: profile.oauthId,
+          avatarUrl: profile.avatarUrl ?? existing.avatarUrl,
+          // emailVerified bleibt true.
+        },
+      });
+    }
+  }
+
+  // 3. Neuer Account (OAuth-only).
+  if (!user) {
+    try {
+      user = await prisma.customerUser.create({
+        data: {
+          email: profile.email.toLowerCase(),
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          phone: null,
+          passwordHash: null,
+          emailVerified: true,
+          oauthProvider: provider,
+          oauthId: profile.oauthId,
+          avatarUrl: profile.avatarUrl ?? null,
+        },
+      });
+    } catch (err) {
+      // P2002 (Race auf email-Unique) → erneuter Lookup.
+      const existing = await prisma.customerUser.findUnique({
+        where: { email: profile.email.toLowerCase() },
+      });
+      if (!existing) {
+        console.error('[customer-oauth] create + race-lookup failed:', err);
+        return { ok: false, error: 'oauth_error' };
+      }
+      if (!existing.emailVerified) {
+        return { ok: false, error: 'oauth_unverified_conflict' };
+      }
+      user = await prisma.customerUser.update({
+        where: { id: existing.id },
+        data: {
+          oauthProvider: provider,
+          oauthId: profile.oauthId,
+          avatarUrl: profile.avatarUrl ?? existing.avatarUrl,
+        },
+      });
+    }
+  }
+
+  return { ok: true, customerId: user.id, email: user.email };
+}
+
+// ---------------------------------------------------------------------------
+// NextAuth-Konfiguration
+// ---------------------------------------------------------------------------
+
+function buildProviders(): NextAuthConfig['providers'] {
+  const providers: NextAuthConfig['providers'] = [];
+  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    providers.push(
+      GoogleProvider({
+        clientId: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        authorization: { params: { scope: 'openid email profile' } },
+      }),
+    );
+  }
+  if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+    providers.push(
+      GitHubProvider({
+        clientId: process.env.GITHUB_CLIENT_ID,
+        clientSecret: process.env.GITHUB_CLIENT_SECRET,
+        authorization: { params: { scope: 'read:user user:email' } },
+      }),
+    );
+  }
+  return providers;
+}
+
+const customerOauthConfig: NextAuthConfig = {
+  providers: buildProviders(),
+  pages: {
+    signIn: '/konto/login',
+    error: '/konto/login',
+  },
+  session: {
+    strategy: 'jwt',
+    maxAge: 60, // Kurzlebige Brücke zur Finalize-Route.
+  },
+  trustHost: true,
+  secret: process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
+  callbacks: {
+    async signIn({ account, profile }) {
+      if (!account || !profile) return false;
+      if (!CUSTOMER_OAUTH_PROVIDERS.includes(account.provider as CustomerOAuthProvider)) {
+        return '/konto/login?error=oauth_error';
+      }
+
+      // GitHub: kein E-Mail freigegeben → spezifische Fehlermeldung.
+      // Wir haben hier nur das Provider-Profile (kein Zugriff auf
+      // /user/emails — Backlog).
+      const provider = account.provider as CustomerOAuthProvider;
+      const normalized = normalizeProfile(provider, profile, {
+        provider: account.provider,
+        providerAccountId: account.providerAccountId,
+      });
+      if (!normalized) {
+        // Häufigster Fall: GitHub mit privater E-Mail.
+        return '/konto/login?error=oauth_no_email';
+      }
+
+      const outcome = await handleCustomerOAuthSignIn(provider, normalized);
+      if (!outcome.ok) {
+        return `/konto/login?error=${outcome.error}`;
+      }
+      return true;
+    },
+    async jwt({ token, account, profile }) {
+      if (account && profile) {
+        const provider = account.provider as CustomerOAuthProvider;
+        const normalized = normalizeProfile(provider, profile, {
+          provider: account.provider,
+          providerAccountId: account.providerAccountId,
+        });
+        if (normalized) {
+          const outcome = await handleCustomerOAuthSignIn(provider, normalized);
+          if (outcome.ok) {
+            token.customerId = outcome.customerId;
+            token.customerEmail = outcome.email;
+            // 60s TTL (vgl. session.maxAge).
+            token.exp = Math.floor(Date.now() / 1000) + 60;
+          } else {
+            token.linkError = outcome.error;
+          }
+        }
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      if (session && token) {
+        // Customer-spezifische Felder in die Session weitergeben.
+        (session as { customerId?: string }).customerId =
+          (token.customerId as string | undefined) ?? undefined;
+        (session as { customerEmail?: string }).customerEmail =
+          (token.customerEmail as string | undefined) ?? undefined;
+      }
+      return session;
+    },
+    async redirect() {
+      // Open-Redirect-Schutz: externe `url`-Werte werden ignoriert.
+      // Jeder erfolgreiche OAuth-Flow geht IMMER über die Finalize-Route.
+      const base = customerBaseUrl();
+      return `${base}/api/customer/oauth-finalize`;
+    },
+  },
+  // Cookie-Pfad-Trennung: NextAuth setzt seine eigenen Cookies. Damit sie
+  // nicht mit dem Admin-NextAuth kollidieren, geben wir einen eigenen
+  // Cookie-Namen vor.
+  cookies: {
+    sessionToken: {
+      name: '__customer-next-auth.session-token',
+      options: {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: process.env.NODE_ENV === 'production',
+      },
+    },
+    callbackUrl: {
+      name: '__customer-next-auth.callback-url',
+      options: {
+        sameSite: 'lax',
+        path: '/',
+        secure: process.env.NODE_ENV === 'production',
+      },
+    },
+    csrfToken: {
+      name: '__customer-next-auth.csrf-token',
+      options: {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: process.env.NODE_ENV === 'production',
+      },
+    },
+  },
+};
+
+export const {
+  handlers: customerOAuthHandlers,
+  auth: customerOAuthAuth,
+  signIn: customerOAuthSignIn,
+  signOut: customerOAuthSignOut,
+} = NextAuth(customerOauthConfig);
+
+// Re-Export für Tests.
+export { customerOauthConfig };

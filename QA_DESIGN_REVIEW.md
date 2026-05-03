@@ -1631,4 +1631,305 @@ Alle Blocker sind sauber und konsistent über die drei Contract-Artefakte und da
    - `safeCustomerCallback`: Pflicht-Unit-Test wie in §17.8 spezifiziert.
 3. **Build-QA** wird die Implementierung gegen genau die in §17.8 gelisteten Pflicht-Tests prüfen.
 
+---
+
+## Iteration 5 Design Review
+
+**Datum:** 2026-05-02
+**Reviewer:** QA Engineer (Design-QA-Mode, vor Code-Start)
+**Scope:** US-30 (Admin-Pw-Reset UX), US-31 (OAuth2 Customer-Login), US-32 (Adressfeld), US-33 (Buchungsdauer), US-34 (Buffer-Zeit)
+**Geprüfte Artefakte:**
+- `PROJECT.md` — Stories US-30 bis US-34 (aktuelle Iteration 5)
+- `ARCHITECTURE.md` v1.5 — §18.1 bis §18.13
+- `contracts/schema.prisma` v1.5 (oauth-Felder, durationMinutes, address fields, BufferConfig)
+- `contracts/api-routes.md` v1.5 — §21.1 bis §21.9
+- `contracts/zod-schemas.ts` v1.5 — BookingAddressSchema, bookingDurationSchema, BufferConfigSchema, OAuthProfileNormalizedSchema, neue Fehlercodes
+
+### Verdict (Kurzfassung)
+
+| Größe                       | Wert         |
+| --------------------------- | ------------ |
+| Stories in Scope            | 5 (US-30–US-34) |
+| Akzeptanzkriterien geprüft  | 31           |
+| Spec deckt AC vollständig   | 28 / 31 (90%) |
+| Critical Issues             | 1            |
+| Major Issues                | 4            |
+| Minor Issues                | 5            |
+
+**Verdict:** ⚠️ **Design freigegeben mit Auflagen** — der Build kann starten, der einzige Critical-Befund (BUG-IT5-001 Race-Condition bei variabler Dauer) MUSS aber von Engineers während der Implementierung adressiert werden, sonst entstehen Doppelbuchungen. Major-Befunde sollen Engineers während der Implementierung mitberücksichtigen, sind aber nicht alleinstehend Build-blockierend, weil der Architekt die Lücken per Engineering-Notes schließen kann.
+
+### 1. Test-Matrix (Akzeptanzkriterien gegen Spec)
+
+| Story | AC | Test Case (Design-Sicht) | Layer | Status |
+| ----- | -- | ----------------------- | ----- | ------ |
+| US-30 | AC1 | Reset-Link prominent unter Pw-Feld | Frontend | Pass |
+| US-30 | AC2 | Reset-Mail nutzt korrekte Umgebungs-URL (lokal vs. Prod) | Backend/Config | Pass |
+| US-30 | AC3 | Reset-Link öffnet Formular mit zwei Feldern, gültig 1h | Backend | Pass |
+| US-30 | AC4 | Pw-Min-Länge auf 8 Zeichen reduziert | Backend | Pass |
+| US-30 | AC5 | Inline-Validierung leeres / nicht-übereinstimmendes Pw | Frontend | Pass |
+| US-30 | AC6 | Abgelaufener / verbrauchter Token zeigt verständliche Meldung | Backend | Pass |
+| US-30 | AC7 | Unbekannte Mail → neutrale Meldung (Enumeration-Schutz) | Backend | Pass |
+| US-31 | AC1 | OAuth-Buttons unter Pw-Form sichtbar | Frontend | Pass |
+| US-31 | AC2 | Google-Flow → Konto angelegt + Redirect /konto + Name in Nav | Backend/Frontend | **Major** (siehe BUG-IT5-002) |
+| US-31 | AC3 | GitHub-Flow analog | Backend | **Major** (siehe BUG-IT5-003 GitHub-Email) |
+| US-31 | AC4 | Erst-OAuth-Login → emailVerified true automatisch | Backend | Pass |
+| US-31 | AC5 | Mail-Match → bestehendes Konto verknüpft, beide Methoden nutzbar | Backend | **Major** (siehe BUG-IT5-004 Hijacking-Vektor) |
+| US-31 | AC6 | OAuth-Profil → kein Pw-Feld | Frontend | Pass |
+| US-31 | AC7 | Pw-Login bleibt unverändert | Backend | Pass |
+| US-31 | AC8 | OAuth-Fehler/Abbruch → deutsche Meldung auf /konto/login | Backend/Frontend | Partial (Fehlertext wird gerendert, aber Mapping-Tabelle fehlt) |
+| US-32 | AC1 | Drei Pflichtfelder im Form, klar markiert | Frontend | Pass |
+| US-32 | AC2 | Inline-Validierung leerer Felder | Frontend | Pass |
+| US-32 | AC3 | PLZ ≠ 5 Ziffern → Fehler | Frontend/Backend | Pass |
+| US-32 | AC4 | Daten persistiert | Backend | Pass |
+| US-32 | AC5 | Admin-Detail zeigt Adresse als eigenen Abschnitt | Frontend | Pass |
+| US-32 | AC6 | Admin-Liste zeigt PLZ + Ort | Frontend | Pass |
+| US-32 | AC7 | Kunden-Portal-Detail zeigt Adresse | Frontend | Pass |
+| US-33 | AC1 | 8 Kacheln (1h–6h, 8h, Ganztag) | Frontend | Pass |
+| US-33 | AC2 | Preisschätzung pro Kachel | Frontend | Pass |
+| US-33 | AC3 | Aktive Kachel hervorgehoben | Frontend | Pass |
+| US-33 | AC4 | Verfügbarkeit prüft Zeitfenster — Kacheln ggf. ausgegraut | Frontend/Backend | Pass |
+| US-33 | AC5 | Ganztag → reserviert gesamtes Verfügbarkeitsfenster | Backend | Pass |
+| US-33 | AC6 | Tom sieht Dauer im Admin-Detail | Frontend | Pass |
+| US-33 | AC7 | Tom sieht Dauer in Termin-Liste | Frontend | Pass |
+| US-33 | AC8 | Fehlende Dauer → Inline-Fehler | Frontend | Pass |
+| US-33 | (impl. AC) | **Konkurrente Buchungen mit überlappender Dauer werden verhindert** | Backend/DB | **Critical** (BUG-IT5-001) |
+| US-34 | AC1 | Konfigurations-Bereich mit Auswahl 0/15/30/45/60 | Frontend | Pass |
+| US-34 | AC2 | Speichern → Bestätigungstoast, Wert dauerhaft aktiv | Backend/Frontend | Pass |
+| US-34 | AC3 | Buffer 30min nach 14:00 → 14:00–14:30 nicht buchbar | Backend | Pass |
+| US-34 | AC4 | Beispiel mit konkreten Zeiten | Backend | Pass |
+| US-34 | AC5 | Admin-Kalender zeigt Buffer als grauen Block | Frontend | Pass |
+| US-34 | AC6 | Default 30min wenn kein Wert gesetzt | Backend | Pass |
+| US-34 | AC7 | Buffer = 0 → keine Blockaden | Backend | Pass |
+
+### 2. Critical Defects (Build-Blocker — vor / während Code-Start adressieren)
+
+#### BUG-IT5-001 — Partial Unique Index schützt nicht gegen überlappende Dauern
+
+- **Story:** US-33 (Buchungsdauer) — und implizit US-34 (weil Buffer zusätzlich an überlappende aktive Buchungen anknüpft).
+- **Severity:** Critical
+- **Layer:** Backend / DB-Constraint
+- **Befund:** Der seit IT3 bestehende Partial Unique Index (siehe `ARCHITECTURE.md` §16.2 / §16.10) lautet:
+  ```sql
+  CREATE UNIQUE INDEX uniq_active_booking_per_timeslot
+    ON bookings(date, start_time, end_time)
+    WHERE date IS NOT NULL
+      AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
+  ```
+  Er verhindert nur den **exakten** Tupel-Duplikat. Mit US-33 wählt jeder Kunde frei eine Dauer; das Tupel ist nicht mehr aus einer fixen Slot-Granularität. Konkretes Race-Szenario:
+  1. Kunde A POST /api/bookings mit `09:00–11:00` (`durationMinutes: 120`) → application-level overlap-Check sieht keine Konflikte → Insert läuft → DB-Insert OK.
+  2. Parallel Kunde B POST /api/bookings mit `10:00–11:00` (`durationMinutes: 60`) → application-level overlap-Check (vor dem Insert von A committed?) sieht keine Konflikte → Insert läuft → DB-Insert OK, weil `(date, '10:00', '11:00')` ≠ `(date, '09:00', '11:00')`.
+
+  Resultat: Zwei aktive Buchungen, die im Slot-API als "blocked" angezeigt würden, aber simultan eingefügt wurden. ARCHITECTURE.md §16.2 dokumentiert das Limit ("Wenn das Frontend NUR die vom Backend angebotenen Blöcke wählen darf …"), in IT5 ist die zugrundeliegende Annahme aber nicht mehr gültig.
+- **Erwartet:** DB-Garantie gegen überlappende aktive Buchungen pro Tag, ODER eine serialisierende Sperre auf Application-Layer (z.B. `BEGIN IMMEDIATE` in SQLite + Re-Check in Transaktion + Insert), die zwischen Overlap-Check und Insert keine zweite Buchung zulässt.
+- **Empfohlener Fix (eine der drei Varianten — Engineers + Architekt entscheiden vor Build):**
+  1. **SQLite-Transaktion mit `BEGIN IMMEDIATE`** um den Block "Overlap-Check + Buffer-Check + Insert". SQLite serialisiert Writer; zwei parallele Anfragen werden sequentialisiert.
+  2. **Advisory-Lock** auf `date` (z.B. via `SELECT ... FOR UPDATE` auf einen Tages-Datensatz oder einen synthetischen Lock-Datensatz). In SQLite: über die globale Schreib-Sperre kombiniert mit einem Re-Check.
+  3. **Range-Check als zusätzliche DB-Constraint** via `BEFORE INSERT`-Trigger: Trigger prüft `EXISTS (SELECT 1 FROM bookings WHERE date = NEW.date AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED') AND NEW.start_time < end_time AND NEW.end_time > start_time)` und wirft bei Treffer einen Fehler. Sauberere Lösung als Variante 1 + 2, aber zusätzlicher Migrationsaufwand.
+- **Routing-Hinweis:** **solution-architect** (Konzept-Klärung im Architektur-Doc), dann **backend-engineer** (Implementierung).
+- **Begründung der Critical-Einstufung:** Doppelbuchungen sind für Tom direkt wirtschaftlich schädlich (zwei zugesagte Termine zur gleichen Zeit, einer muss abgesagt werden) und untergraben die ganze Verfügbarkeits-Logik. Die TOCTOU-Lücke ist mit gleichzeitigen mobilen POSTs in der Praxis keine Hypothese, sondern ein erwarteter Edge-Case (gerade mit US-22 / Beworben durch Online-Marketing).
+
+### 3. Major Defects (Spec-Klärung empfohlen — nicht alleinstehend Build-blockierend)
+
+#### BUG-IT5-002 — `signIn`-Callback hat keinen `Response`-Zugriff für `Set-Cookie`
+
+- **Story:** US-31
+- **Severity:** Major
+- **Layer:** Backend / Auth-Architektur
+- **Befund:** §18.2.4 ARCHITECTURE.md sagt "Variante 1, weil weniger Hops" und merkt gleichzeitig in §18.2.4 an: "Nicht direkt im signIn-Callback (kein Response-Zugriff)". NextAuth v5 erlaubt zwar das Setzen eigener Cookies in der `cookies`-Config, aber **nicht dynamisch** mit Werten, die erst im `signIn`-Callback berechnet werden (CustomerId aus DB). Die "Inline-Variante" funktioniert in NextAuth v5 also nicht ohne Workaround. §18.2.4 räumt die "Finalize-Route" als Alternative ein, lehnt sie aber nicht-zwingend ab.
+- **Erwartet:** Ein eindeutiger, technisch tragfähiger Mechanismus für das Setzen des `customer-session`-Cookies nach dem OAuth-Callback. **Empfehlung QA:** Variante 2 (Finalize-Route `/api/auth/customer/finalize`) als Default festlegen — das ist robust, debug-bar (eigener Endpoint), und vermeidet undokumentierte NextAuth-internals. Die Finalize-Route bekommt einen kurzlebigen, signierten One-Time-Token (60s, HMAC) als Query-Param und tauscht ihn gegen das `customer-session`-Cookie.
+- **Routing-Hinweis:** **solution-architect** — eine konkrete, als verbindlich markierte Variante in §18.2.4 verankern, bevor der Build startet.
+
+#### BUG-IT5-003 — GitHub-„private email"-Pfad ist im AC nicht spezifiziert, im signIn-Callback aber notwendig
+
+- **Story:** US-31 AC3 (GitHub-OAuth)
+- **Severity:** Major
+- **Layer:** Backend / OAuth-Integration
+- **Befund:** ARCHITECTURE.md §18.2.7 + §18.12 + api-routes.md §21.2 erwähnen das `users/emails`-Endpoint-Fallback und den Redirect `/konto/login?error=oauth_no_email`. AC3 selber sagt nur „GitHub bestätigt meine Identität → eingeloggt". Spec-Lücke: Was passiert, wenn der GitHub-User keine **verifizierte** primäre E-Mail hat (z.B. Account ist `email-noreply@github.com`)? Architecture sagt: Redirect mit Fehlercode. Schema fordert in `OAuthProfileNormalizedSchema` aber `email: z.string().email()` — Schema-Validation würde an leerer / nicht vorhandener E-Mail vorher scheitern, bevor der Redirect-Pfad griffe.
+- **Erwartet:** Klarer Flow im Code: Wenn GitHub-API keine `verified && primary` E-Mail liefert → bevor `OAuthProfileNormalizedSchema` aufgerufen wird, Redirect mit `error=oauth_no_email` setzen. AC um diese Edge-Case-Handhabung ergänzen (Hinweis: "Bitte E-Mail-Sichtbarkeit im GitHub-Account aktivieren").
+- **Routing-Hinweis:** **solution-architect** — AC im Architektur-Doc erweitern, **frontend-engineer** — Fehlertext-Mapping (`oauth_no_email` → deutsche Erläuterung).
+
+#### BUG-IT5-004 — Account-Verknüpfung über E-Mail ist potentieller Hijacking-Vektor
+
+- **Story:** US-31 AC5
+- **Severity:** Major
+- **Layer:** Sicherheit / Backend
+- **Befund:** §18.2.3 spezifiziert: bei Mail-Match wird das bestehende Konto erkannt, `oauthProvider/oauthId` werden gesetzt, **`emailVerified: true` wird gesetzt** (auch wenn es vorher false war). §18.9.1 verlangt zwar `email_verified === true` vom Provider. Aber: ein Angreifer registriert lokal `victim@example.com` per E-Mail/Pw (verifiziert nie), wartet, und meldet sich später mit Google-Konto `victim@example.com` an. Das System verknüpft beide. Wenn das Opfer später denselben Account erstellen will, scheitert die Registrierung (E-Mail bereits belegt) — der Account ist faktisch gekapert. **Mitigations sind nicht spezifiziert:**
+  1. Wenn das vorhandene lokale Konto `emailVerified: false` ist: die Verknüpfung ist akzeptabel (Opfer war nie der Inhaber).
+  2. Wenn `emailVerified: true` ist: Verknüpfung ist ebenfalls akzeptabel, weil das Opfer zur fraglichen E-Mail-Inbox verifizierten Zugriff hatte und Google ebenfalls den E-Mail-Owner verifiziert.
+  Aber: Beide Pfade sind im Architektur-Doc nicht explizit unterschieden. Die §18.2.3 Pseudo-Code-Update setzt `emailVerified: true` immer.
+- **Erwartet:** Im Code:
+  - Wenn lokales Konto `emailVerified: false` UND `oauthProvider === null` → Verknüpfung OK (mit `emailVerified: true`-Setzung), weil das lokale Konto faktisch unbenutzt ist.
+  - Wenn lokales Konto `emailVerified: true` → Verknüpfung OK (Provider-Verifikation deckt sich mit lokaler Verifikation).
+  - Beide Wege müssen im Architektur-Doc explizit dokumentiert werden, damit Engineers nicht unbeabsichtigt den falschen Pfad aktivieren.
+- **Routing-Hinweis:** **solution-architect** — §18.2.3 + §18.9.2 um diese Differenzierung erweitern.
+
+#### BUG-IT5-005 — Buffer-Berechnung ignoriert Vortage-Buchungen über Mitternacht
+
+- **Story:** US-34
+- **Severity:** Major (Edge-Case, im MVP unwahrscheinlich)
+- **Layer:** Backend / Slot-Berechnung
+- **Befund:** §21.4 Algorithmus berechnet Slots pro Tag und holt `activeBookings` für `where: { date }`. Eine CONFIRMED-Buchung am Vortag, die kurz vor Mitternacht endet (z.B. „Ganztag" Sa 08:00–22:00, oder ein händisch in DB gepflegter Sonderfall mit `endTime: '23:30'` und Buffer 60min), reicht in den Folgetag (00:30) — wird aber im Algorithmus für den Folgetag nicht berücksichtigt, weil Buffer nur gegen `activeBookings` desselben `date` geprüft wird.
+- **Erwartet:** Entweder explizite Annahme im Architektur-Doc, dass Buchungen tagesweise enden müssen (und das Verfügbarkeitsfenster des Templates < 24h ist), ODER eine Erweiterung: lese auch Buchungen mit `date = previous day` und prüfe, ob `endTime + bufferMinutes` über Mitternacht reicht.
+- **Routing-Hinweis:** **solution-architect** — entweder dokumentieren, dass dieser Fall im MVP nicht auftreten kann (Hinweis im §18.5.2), oder Algorithmus erweitern.
+
+### 4. Minor Defects (nicht-blocking, aber im Build-Plan mitnehmen)
+
+#### MIN-IT5-001 — `BufferConfigSchema` lässt 0–240 zu, `UpdateBufferConfigSchema` whitelistet 0/15/30/45/60
+
+- **Story:** US-34
+- **Severity:** Minor
+- **Befund:** `zod-schemas.ts` Zeile 1441–1448: `BufferConfigSchema.bufferMinutes` validiert `min(0).max(240)`. `UpdateBufferConfigSchema` (PUT-Body) prüft Whitelist [0,15,30,45,60]. Wenn die DB jemals einen Wert außerhalb der Whitelist enthält (z.B. manuell via Prisma Studio von Tom auf 90 gesetzt), liefert `GET /api/admin/buffer-config` ihn aus und das Admin-UI muss damit umgehen können. Das Architecture-Doc dokumentiert diese „Forward-Kompatibilität" zwar (§Schema-Kommentar), aber das `<select>` in §18.5.3 hat nur 5 Optionen — der Drift ist nicht abgefangen.
+- **Empfehlung:** Frontend `<select>` rendert bei Drift einen zusätzlichen, deaktivierten `<option>` mit dem Live-Wert, damit der gespeicherte Wert lesbar bleibt.
+- **Routing-Hinweis:** **frontend-engineer** (Engineering-Notes).
+
+#### MIN-IT5-002 — Schema sagt `passwordHash: String?` (nullable), API-Login-Pfad meldet `OAUTH_ONLY_ACCOUNT` — aber Mail-Existenz-Leak möglich
+
+- **Story:** US-31
+- **Severity:** Minor (Sicherheit)
+- **Befund:** Wenn `POST /api/customer/login` mit einer existierenden OAuth-only-E-Mail aufgerufen wird, antwortet das Backend mit 422 `OAUTH_ONLY_ACCOUNT`. Bei einer **nicht existierenden** E-Mail sollte aus Sicherheitsgründen die generische "E-Mail oder Passwort ungültig"-Antwort kommen (keine Auskunft über Account-Existenz). Wenn `OAUTH_ONLY_ACCOUNT` vor dem generischen Fehler greift, leakt das Backend implizit, dass die E-Mail-Adresse als OAuth-Konto existiert. Der Architekt erwähnt das Pattern „generische Login-Fehler" (§17.7 IT4) — IT5 muss explizit klarstellen, dass `OAUTH_ONLY_ACCOUNT` ein anderes UX-Trade-off ist (Hilfe für legitime User vs. Enumeration-Risk).
+- **Empfehlung:** Architektur dokumentiert die Entscheidung: „Wir akzeptieren das schwache Enumeration-Leak im Tausch gegen UX-Klarheit für OAuth-only-User." ODER: nur generischen Fehler liefern und im Frontend einen Hinweis-Link „Mit Google/GitHub anmelden?" als sichtbare Alternative ausgeben.
+- **Routing-Hinweis:** **solution-architect** — Trade-off in §18.9.x dokumentieren.
+
+#### MIN-IT5-003 — Adress-PLZ-Regex deckt nur deutsche PLZ — kein expliziter Hinweis im Form
+
+- **Story:** US-32
+- **Severity:** Minor (DSGVO/UX)
+- **Befund:** `ZipCodeSchema = /^\d{5}$/` akzeptiert exakt 5 Ziffern. Tom betreut „Darmstadt und Umgebung" — ein österreichischer Kunde mit 4-stelliger PLZ würde abgewiesen, ohne im UI eine Begründung zu bekommen. AC sagt nur „PLZ muss 5 Ziffern enthalten" — Annahme ist OK für Bärenstark-Region, aber das UI sollte einen kleinen Hinweis „(Deutschland)" zeigen, sonst ist die Fehlermeldung verwirrend.
+- **Empfehlung:** `BookingForm` Label „PLZ (Deutschland)" oder Placeholder „z.B. 64283" verwenden.
+- **Routing-Hinweis:** **frontend-engineer** (kosmetisch).
+
+#### MIN-IT5-004 — Bestandsbuchungen ohne Adresse: UI-Verhalten teilweise unspezifiziert
+
+- **Story:** US-32 AC5/AC6/AC7
+- **Severity:** Minor
+- **Befund:** §18.11 Test-Plan listet einen Fall „Bestandsbuchung → Detail-Page rendert Hinweis 'Adresse nicht erfasst' (kein Crash)". §18.3.4 sagt aber nicht, was die **Liste** im Admin-Bereich oder die Kunden-Portal-Detail-Seite tun sollen, wenn `addressZip / addressCity` null sind. Frontend-Engineer könnte:
+  1. die Zeile leer lassen,
+  2. „—" rendern,
+  3. „Adresse nicht erfasst" rendern,
+  4. die ganze Adresszeile auslassen.
+- **Empfehlung:** Architektur-Doc gibt einen Default vor („—" für Listen, Hinweistext für Detail).
+- **Routing-Hinweis:** **solution-architect** (Engineering-Note in §18.3.4).
+
+#### MIN-IT5-005 — Fehlertext-Mapping für `oauth_*`-Codes nicht im Doc
+
+- **Story:** US-31 AC8
+- **Severity:** Minor
+- **Befund:** Architecture nennt Fehlercodes (`oauth_error`, `oauth_no_email`, `oauth_unverified`, `oauth_email_conflict`), aber das genaue UI-Mapping (deutscher Text pro Code) ist nicht im Architektur-Doc oder in einem zentralen i18n-File definiert.
+- **Empfehlung:** Eine Mapping-Tabelle in §18.2 oder in `app/konto/login/page.tsx`-Pseudo-Code dokumentieren.
+- **Routing-Hinweis:** **solution-architect** + **frontend-engineer**.
+
+### 5. Vertrags-Konsistenz (FE/BE)
+
+| Prüfung | Ergebnis |
+| ------- | -------- |
+| `Booking.durationMinutes` Typ konsistent (int, Schema + Zod + API) | Pass |
+| `addressStreet/Zip/City` nullable konsistent (Schema nullable, API-Zod im IT5-Modus pflicht) | Pass |
+| `BufferConfigSchema` GET-Response-Form == `UpdateBufferConfigSchema` Body-Form | Pass (beide nutzen `bufferMinutes: int`) |
+| `OAuthProfileNormalizedSchema` Felder decken Provider-Mapping (Google `given_name/family_name`, GitHub `name` split) | Pass |
+| Fehlercodes in `ApiErrorSchema.error.code` enum erweitert um `OAUTH_ONLY_ACCOUNT`, `OAUTH_ERROR` | Pass |
+| `CustomerUserPublicSchema.oauthProvider` Enum enthält genau `'google' | 'github'` (synchron mit `CUSTOMER_OAUTH_PROVIDERS`) | Pass |
+| `BOOKING_DURATION_OPTIONS` (60..480) entspricht Architektur-Tabelle in §18.4.1 | Pass |
+| `BUFFER_MINUTES_OPTIONS [0,15,30,45,60]` deckt sich mit AC1 von US-34 | Pass |
+| `GET /api/slots/available?duration=...` Query-Schema akzeptiert `BOOKING_DURATION_ALL_DAY` (-1) | Pass |
+| Middleware-Whitelist `/api/auth/customer/[...nextauth]` (NextAuth-Customer-Pfad) — die `/konto/*`-Middleware matcht das nicht (anderer Pfad), `/admin/*`-Middleware ebenfalls nicht. Public-Access OK. | Pass |
+
+Keine Vertrags-Mismatches gefunden.
+
+### 6. Anforderungs-Lücken / Out-of-Scope
+
+| Befund | Bewertung |
+| ------ | --------- |
+| Kein Endpoint für „OAuth-Provider entkoppeln" (Kunde will Google-Verknüpfung wieder lösen) | Out-of-Scope für IT5 — Backlog-Kandidat. Tom sollte das per Prisma Studio händisch machen können bis dahin. Architektur-Doc nennt es nicht. |
+| Kein Pre-Buffer (Anfahrt VOR dem Termin) | §18.12 dokumentiert das als Backlog. OK. |
+| Kein Service-spezifischer Buffer | §18.12 dokumentiert das als Backlog. OK. |
+| Adress-Geocoding / Karten-Darstellung | Out-of-Scope. OK. |
+| Strikte Pflichtgrenze für `durationMinutes >= 15` (DB-CHECK) | Spec sagt es, Schema setzt es nicht hart durch. Akzeptabel weil App-Layer-Whitelist greift. |
+
+### 7. Non-Functional Findings
+
+| Bereich | Befund |
+| ------- | ------ |
+| **Sicherheit** | OAuth-Setup mit PKCE + State-Param = OK. CSRF wird von NextAuth gehandhabt. Open-Redirect-Schutz via `safeCustomerCallback` ist verbindlich, aber das `redirect`-Callback in §21.2 ignoriert den `url`-Parameter komplett und liefert immer `${baseUrl}/konto`. Damit funktioniert auch der intern gewünschte `callbackUrl: '/konto'`. Annehmbar, aber Engineers müssen das akzeptieren, dass beliebige `callbackUrl`-Werte schweigend verworfen werden. |
+| **Datenschutz** | Adresse nur eingeloggt sichtbar — OK. Logging-Hinweis fehlt: Beim Booking-Insert sollte die Adresse nicht ungekürzt in Application-Logs landen. Engineering-Note empfehlen. |
+| **Performance** | Slot-API-Algorithmus: O(blocks × bookings) — mit 30-Min-Schritt + 9h-Fenster + 5 Buchungen/Tag = 18 × 5 = 90 Operationen. Vernachlässigbar. |
+| **Accessibility** | Buffer-Block im Admin-Kalender als „graue Schraffur" — ARIA-Label fehlt im Doc. Engineering-Note: `aria-label="Pufferzeit nach Buchung"` ergänzen. |
+| **Observability** | Keine Mention von Logs für OAuth-Callback-Fehler (Provider-Auth-Fehler, `oauth_no_email`). Engineering-Note: Strukturiertes Logging per `console.warn` mit Provider-Name + Fehlertyp (kein PII!). |
+| **Rate-Limiting** | OAuth-Endpoints sind nicht eigen-limited (NextAuth/Provider drosseln). Akzeptabel. `PUT /api/admin/buffer-config` 30/60min/Admin — angemessen. |
+
+### 8. Antworten auf die expliziten QA-Schwerpunkte
+
+#### US-31 OAuth2 (Schwerpunkt 1)
+
+| Frage | Antwort der Spec |
+| ----- | ---------------- |
+| OAuth + bestehendes E-Mail/Pw-Konto: Merge oder 409? | **Merge** (§18.2.3 + AC5). Beide Methoden sind anschließend nutzbar, `passwordHash` bleibt erhalten. Siehe BUG-IT5-004 für die Hijacking-Frage. |
+| GitHub liefert keine E-Mail (private)? | Server fragt `https://api.github.com/user/emails` ab, nimmt `primary && verified`. Wenn keine vorhanden → Redirect `oauth_no_email`. Siehe BUG-IT5-003 (AC-Lücke). |
+| Account-Übernahme via OAuth möglich? | **Teilweise** — Hijacking eines unverifizierten lokalen Kontos ist technisch möglich. BUG-IT5-004 verlangt explizite Differenzierung im Doc. Real-World-Risiko ist gering (Opfer hatte lokale Reg ohne Verify), MVP-akzeptabel mit dokumentierter Mitigation. |
+| Wann/wie wird `customer-session`-Cookie nach OAuth gesetzt? | **Architektur-konflikt**: §18.2.4 nennt zwei Varianten (Inline vs. Finalize-Route), bevorzugt Variante 1, die in NextAuth v5 aber nicht direkt funktioniert (kein Response-Zugriff im signIn-Callback). BUG-IT5-002 fordert verbindliche Festlegung auf Variante 2. |
+
+#### US-33 Buchungsdauer (Schwerpunkt 2)
+
+| Frage | Antwort |
+| ----- | ------- |
+| Race-Condition zwei Kunden mit überlappenden Dauern? | **NICHT abgedeckt.** BUG-IT5-001 (Critical). Partial Unique Index schützt nur exakte Tupel. |
+| `durationMinutes` länger als Template-Fenster? | Spec OK: §21.3 Schritt 3 prüft `endTimeMin <= templateEndTimeMin`, antwortet 409 mit `field: 'durationMinutes'`. |
+| Partial Unique Index deckt Überlappungen ab? | **Nein** (§16.2 dokumentiert das Limit explizit). Die §16.2-Annahme „Frontend wählt nur Backend-angebotene Blöcke" gilt in IT5 nicht mehr automatisch — siehe BUG-IT5-001. |
+
+#### US-34 Buffer-Zeit (Schwerpunkt 3)
+
+| Frage | Antwort |
+| ----- | ------- |
+| `BufferConfig`-Tabelle leer → Default 30min? | **Pass.** §18.5.1 `getBufferConfig()` legt Datensatz on-the-fly an. AC6 erfüllt. |
+| Buffer nur nach CONFIRMED korrekt für UX? | **Pass mit Begründung.** §18.5.2 begründet: PENDING blockt nur eigenen Slot, weil Tom noch nicht zugesagt hat — andere Kunden sollen parallel anfragen können. Realistisch und akzeptabel. |
+| Buffer + Dauer kombiniert (09:00–11:00 + 30min → 09:00–11:30 blockiert)? | **Pass.** §21.4 Algorithmus prüft `block ∩ [bookingEnd, bookingEnd + bufferMinutes)`, also wird der 11:00–11:30-Bereich nach einer 09:00–11:00 CONFIRMED-Buchung als blocked markiert. Korrekt. |
+
+#### US-32 Adressfeld (Schwerpunkt 4)
+
+| Frage | Antwort |
+| ----- | ------- |
+| Bestandsbuchungen ohne Adresse — UI-Verhalten? | **Teilweise spec'd.** Detail-Page hat Hinweis „Adresse nicht erfasst" (§18.11 Test). Liste / Card-Verhalten ist offen → MIN-IT5-004. |
+| PLZ-Regex nur deutsche PLZ (5 Ziffern)? | **Pass mit kleiner UX-Anmerkung MIN-IT5-003** (Label „PLZ (Deutschland)" empfehlen). |
+
+### 9. Sign-off Checklist (Iteration 5)
+
+- [x] Alle 5 Stories haben mindestens eine konkrete Spec-Sektion in §18.
+- [x] Alle 31 ACs haben einen erkennbaren Implementierungs-Anker in der Architektur (Datenmodell-Feld, Endpoint, oder UI-Komponente).
+- [x] Schema-Migration ist additiv und ohne Daten-Verlust-Risiko (alle neuen Felder nullable oder mit Default).
+- [x] Vertrags-Artefakte (schema.prisma, api-routes.md, zod-schemas.ts) sind konsistent (keine Mismatches).
+- [x] Test-Plan §18.11 deckt die wichtigsten ACs ab (mit kleinen Lücken für die Race-Condition).
+- [x] ENV-Variablen + OAuth-Setup-Anleitung für Tom dokumentiert (§18.10 + §18.2.7).
+- [ ] **Race-Condition-Schutz für variable Dauer in §18.4 / §18.6 verankert.** ⚠️ **OFFEN** — siehe BUG-IT5-001.
+- [ ] **Verbindliche Cookie-Strategie nach OAuth-Callback** (Variante 1 vs. 2) in §18.2.4. ⚠️ **OFFEN** — BUG-IT5-002.
+- [ ] **Account-Verknüpfungs-Sicherheits-Differenzierung** (verifiziertes vs. unverifiziertes lokales Konto) in §18.9.2. ⚠️ **OFFEN** — BUG-IT5-004.
+
+### Finales Urteil (Iteration 5)
+
+**Design freigegeben — mit verbindlicher Auflage zur Schließung von BUG-IT5-001.**
+
+Der Build kann starten, weil:
+- Vertrags-Artefakte (Schema, Zod, API) sind konsistent.
+- Schema-Migration ist sicher (additiv).
+- 28 / 31 ACs sind klar testbar gegen die Spec.
+- US-30 (UX-Fix) ist trivial-bereit — kein Architektur-Risiko.
+- US-32 (Adressfeld), US-34 (Buffer) sind sauber spezifiziert.
+
+**Verbindliche Engineering-Notes vor Build-Start (Architekt-Loop nicht zwingend, aber dringend empfohlen):**
+
+1. **BUG-IT5-001 (Critical):** Race-Condition-Schutz für überlappende Dauern. Engineers müssen vor dem Insert in `POST /api/bookings` einen serialisierenden Mechanismus einsetzen (SQLite `BEGIN IMMEDIATE` + Re-Check Overlap + Insert in einer Transaktion, ODER ein DB-Trigger). Ohne diese Maßnahme entstehen unter Last Doppelbuchungen — Tom kann manuell moderieren, aber die Code-Logik darf das nicht zulassen.
+2. **BUG-IT5-002 (Major):** Cookie-Setzen nach OAuth — Engineers wählen die **Finalize-Route**-Variante (kurzlebiger HMAC-Token, eigener Endpoint). Die "Inline-Variante" funktioniert in NextAuth v5 nicht ohne Hacks. Architekt soll §18.2.4 entsprechend nachschärfen.
+3. **BUG-IT5-003 (Major):** GitHub-`oauth_no_email`-Flow als expliziter Code-Pfad **vor** der Schema-Validation in `lib/customer-oauth.ts` implementieren.
+4. **BUG-IT5-004 (Major):** Account-Verknüpfung per E-Mail nur dann durchführen, wenn entweder das lokale Konto `emailVerified === true` ist oder `emailVerified === false` ist und keine Buchungs-Historie existiert. Architekt soll §18.9.2 nachschärfen.
+5. **BUG-IT5-005 (Major):** Buffer-Berechnung ist tagesweise — Architekt soll explizit dokumentieren, dass Verfügbarkeitsfenster nicht über Mitternacht reichen dürfen, ODER den Algorithmus auf Vortag erweitern.
+6. **MIN-IT5-001 bis MIN-IT5-005:** Engineers nehmen die Punkte in den Build-Plan auf (siehe oben).
+
+**Build-QA wird die Implementierung gegen genau diese sechs Punkte plus die Test-Tabelle aus §18.11 prüfen.**
+
+Empfohlene Implementierungs-Reihenfolge:
+1. Schema-Migration (alle neuen Felder + BufferConfig-Tabelle).
+2. US-30 (Pw-Reset UX-Fix) — niedriges Risiko, schneller Win.
+3. US-32 (Adressfeld) — additiv, kein Risiko.
+4. US-34 (Buffer) — Slot-API-Erweiterung, zentral.
+5. US-33 (Dauer) — Slot-API-Erweiterung + Race-Condition-Schutz (BUG-IT5-001).
+6. US-31 (OAuth) — Komplexeste Story, isoliert vom Rest, am Ende.
+
 

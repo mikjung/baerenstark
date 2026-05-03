@@ -6,7 +6,8 @@ import { apiSuccess, apiError } from '@/lib/api';
 
 const Schema = z.object({
   token: z.string().min(1),
-  password: z.string().min(12, 'Mindestens 12 Zeichen.'),
+  // IT5 / US-30 AC4: Mindestlänge 8 Zeichen.
+  password: z.string().min(8, 'Mindestens 8 Zeichen.'),
 });
 
 export async function POST(req: NextRequest) {

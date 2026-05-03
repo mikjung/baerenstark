@@ -1,8 +1,63 @@
 # Architektur — Bärenstark Hausservice Website
 
-**Version:** 1.4.1 (Iteration 4 Revision — QA-Fixes BUG-401/402, MAJOR-401–405)
+**Version:** 1.5.1 (Iteration 5 — Design-Revision nach QA, US-30 bis US-34)
 **Stand:** 2026-05-02
 **Autor:** Solution Architect
+
+---
+
+## Änderungslog v1.5.1 (Iteration 5 — Design-Revision nach QA)
+
+Auslöser: `QA_DESIGN_REVIEW.md` Abschnitt „Iteration 5 Design Review" mit
+1 Critical und 3 zu fixierenden Major-Befunden. Diese Revision schließt
+die offenen Architektur-Entscheidungen verbindlich, **bevor der Build
+startet**. Es gibt **keine Schema-Änderungen**; der Fix ist rein
+spezifikatorisch.
+
+| ID            | Severity | Bereich         | Fix-Strategie                                                                                                                                                                                                                                                                                                                                                                |
+| ------------- | -------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| BUG-IT5-001   | Critical | Backend / DB    | §18.5.5 NEU: **Race-Condition-Schutz für variable Buchungsdauer** verbindlich festgelegt. SQLite-Transaktion mit `BEGIN IMMEDIATE` serialisiert schreibende Transaktionen; im Block: Overlap-Check (`start < requestedEnd AND end > requestedStart`) gegen aktive Buchungen + Buffer-Check + Insert. Der Partial Unique Index bleibt als zweite Verteidigungslinie bestehen. |
+| BUG-IT5-002   | Major    | Auth-Architektur| §18.2.4 NACHGESCHÄRFT: **Cookie-Setzen nach OAuth-Callback ist verbindlich Variante 2 (Redirect-basiert via Custom Finalize-Route)**. Neuer öffentlicher Endpoint `GET /api/customer/oauth-finalize` setzt das `customer-session`-Cookie nach erfolgreichem OAuth-Flow. NextAuth-`redirect`-Callback leitet dorthin um.                                                       |
+| BUG-IT5-004   | Major    | Sicherheit      | §18.9.2 NACHGESCHÄRFT: **Account-Linking-Sicherheit differenziert** zwischen verifiziertem und unverifiziertem lokalen Konto. Unverifiziertes lokales Konto → KEINE automatische OAuth-Verknüpfung; neuer Fehlercode `OAUTH_UNVERIFIED_CONFLICT` (422). Verifiziertes Konto → automatische Verknüpfung wie bisher.                                                            |
+| Deployment-URL| —        | Operational     | Produktions-Domain wechselt von `baerenstark.vercel.app` auf `https://www.baerenstark-hausservice.app`. ENV-Variable `NEXTAUTH_URL` und alle OAuth-Callback-URLs (Google + GitHub) müssen entsprechend aktualisiert werden. Tom muss die Callback-URLs in den Developer-Konsolen aktualisieren.                                                                              |
+| Neuer Code    | API      | Fehlercode      | `OAUTH_UNVERIFIED_CONFLICT` (HTTP 422) — OAuth-Login schlägt fehl, weil ein lokales Konto mit gleicher E-Mail existiert, das nicht verifiziert ist.                                                                                                                                                                                                                          |
+
+Begleitende Updates in `contracts/api-routes.md` (neuer Endpoint
+`/api/customer/oauth-finalize` + neuer Fehlercode) und `.env.example`
+(neue Produktions-URL als Kommentar, OAuth-Callback-URL-Hinweise).
+
+Nicht enthalten in dieser Revision: BUG-IT5-003, BUG-IT5-005,
+MIN-IT5-001…MIN-IT5-005 — diese bleiben auf der Engineering-Notes-Liste
+des Build-Plans und werden während der Implementierung adressiert (siehe
+QA-Review).
+
+---
+
+## Änderungslog v1.5 (Iteration 5 — US-30 bis US-34)
+
+Auslöser: Iteration-5-Stories US-30 bis US-34. Diese Version
+dokumentiert den Admin-Passwort-Reset-UX-Fix, OAuth2-Login für Kunden
+(Google + GitHub), das Adressfeld in der Buchung, die Multi-Stunden-
+Auftragsdauer und den globalen Buffer-Zeit-Mechanismus.
+
+| ID                | Bereich       | Erweiterung / Fix                                                                                |
+| ----------------- | ------------- | ------------------------------------------------------------------------------------------------ |
+| US-30 UX          | Admin-Auth    | Reset-Link-URL strikt aus `NEXTAUTH_URL` (Helper `adminBaseUrl()` mit Vercel-/Localhost-Fallback). Mindest-Pw-Länge im Reset auf 8 Zeichen. Login-Page-Link „Passwort vergessen?" wird sichtbar unter dem Passwort-Feld platziert. Middleware-Whitelist verifiziert. |
+| US-31 Datenmodell | Schema        | `CustomerUser.passwordHash` wird **nullable**. Drei neue Felder: `oauthProvider`, `oauthId`, `avatarUrl`. Composite-Index `(oauthProvider, oauthId)`. |
+| US-31 API         | Endpunkte     | **Neuer NextAuth-Customer-Handler** unter `/api/auth/customer/[...nextauth]` (separater Pfad — kollidiert NICHT mit Admin-NextAuth). Nach OAuth-Callback: CustomerUser via E-Mail finden/anlegen, dann Custom-JWT-Cookie `customer-session` setzen → einheitlicher Auth-Flow für eingeloggten Kunden. Bestehender `POST /api/customer/login` unverändert. |
+| US-31 Auth-Logic  | App-Layer     | Account-Verknüpfung via E-Mail (case-insensitive). OAuth-Login auf bestehendes Pw-Konto setzt nur `oauthProvider/oauthId/avatarUrl` — `passwordHash` bleibt erhalten (Konto unterstützt beide Methoden). Pw-Login gegen OAuth-only-Konto → 422 `OAUTH_ONLY_ACCOUNT`. |
+| US-31 ENV         | Operational   | Neue ENV: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`. Tom muss OAuth-Apps in Google Cloud Console + GitHub Developer Settings anlegen und Callback-URLs eintragen. |
+| US-32 Datenmodell | Schema        | `Booking.addressStreet`, `addressZip`, `addressCity` neu (DB-nullable für Bestand, API-Pflicht für neue Buchungen). |
+| US-32 API         | Endpunkte     | `POST /api/bookings` Body um drei Pflichtfelder erweitert. Alle Listing- und Detail-Endpoints geben Adressfelder im Response zurück (nullable für Bestand). |
+| US-33 Datenmodell | Schema        | `Booking.durationMinutes Int @default(60)` neu. Default-Wert ermöglicht Backfill ohne Migration-Daten-Verlust. |
+| US-33 API         | Endpunkte     | `POST /api/bookings` Body erhält `durationMinutes` (Whitelist 60..480 oder Sonderwert -1 = Ganztag). Backend berechnet `endTime` aus `startTime + durationMinutes` (durationMinutes ist Authority). `GET /api/slots/available` erhält optionalen `?duration=NNN`-Param und prüft Verfügbarkeit für gewünschte Dauer. |
+| US-33 Frontend    | UI            | `<DurationPicker>` neu — 7 Kacheln (1h/2h/3h/4h/5h/6h/8h) + „Ganztag". Pro Kachel Preisschätzung „ca. min–max €" via `lib/services.ts.priceFrom × durationHours`. Disabled-State, wenn Fenster nicht ausreicht. Disclaimer (US-20). |
+| US-34 Datenmodell | Schema        | NEUE Tabelle `BufferConfig` (Singleton, ein Datensatz). Default 30 Minuten. Whitelist [0,15,30,45,60] im App-Layer; DB lässt Forward-Kompatibilität. |
+| US-34 API         | Endpunkte     | `GET /api/admin/buffer-config`, `PUT /api/admin/buffer-config`. `GET /api/slots/available` berücksichtigt Buffer-Blöcke nach **CONFIRMED**-Buchungen (NICHT nach PENDING/COUNTER_PROPOSED). |
+| US-34 Frontend    | UI            | Neuer Konfigurationsabschnitt in `app/admin/availability/page.tsx`: Dropdown mit den 5 Buffer-Werten + Speichern-Button. Sichtbare Buffer-Blöcke in Admin-Kalenderansicht (graue Kacheln direkt nach Buchung). |
+| Neue Fehlercodes  | API           | `OAUTH_ONLY_ACCOUNT` (422), `OAUTH_ERROR` (502).                                                  |
+
+Detaillierte Iteration-5-Spezifikation: siehe **§18** in diesem Dokument.
 
 ---
 
@@ -166,7 +221,7 @@ Gewählter Stack: **Next.js 14 (App Router) + SQLite + Prisma + NextAuth + Resen
 | Forms            | React Hook Form + Zod Resolver             | Inline-Validierung ohne Page-Reload (US-04 AC2).                                                            |
 | Rate-Limit       | **Upstash Redis (Free Tier)** + `@upstash/ratelimit` | Shared Counter über alle Vercel-Instanzen. 10.000 cmds/Tag reichen für MVP. Fallback siehe §5. |
 | Hosting          | Vercel (Hobby Plan, kostenlos)             | Automatisches Deployment via Git-Push, integrierte Edge-Functions, kein Server-Management.                  |
-| Domain           | Über Vercel oder externer Registrar         | Tom registriert eine Domain (z.B. baerenstark-hausservice.de) und verbindet sie via DNS mit Vercel.         |
+| Domain           | Über Vercel oder externer Registrar         | Aktive Domain (v1.5.1): `https://www.baerenstark-hausservice.app` (verbunden via DNS mit Vercel).            |
 
 ### Warum nicht alternative Stacks?
 
@@ -485,7 +540,7 @@ callbacks: {
 ```
 
 Damit wird ein Angreifer-Link wie
-`https://baerenstark-hausservice.de/admin/login?callbackUrl=https://evil.com/phish`
+`https://www.baerenstark-hausservice.app/admin/login?callbackUrl=https://evil.com/phish`
 auf `/admin` umgeleitet — keine externe Weiterleitung möglich.
 
 ### Sicherheits-Praktiken
@@ -741,14 +796,14 @@ Alle in `.env.local` (lokal) und Vercel-Dashboard (Production) zu setzen.
 | ------------------------------ | ------- | ---------------------------------------------------- | ------------------------------------------- |
 | `DATABASE_URL`                 | ja      | `libsql://baerenstark-...turso.io?authToken=...`     | Turso-Connection-String                     |
 | `DIRECT_DATABASE_URL`          | ja      | gleiche URL ohne Pooling                             | Für Prisma-Migrations                       |
-| `NEXTAUTH_URL`                 | ja      | `https://baerenstark-hausservice.de`                 | Basis-URL für NextAuth                      |
+| `NEXTAUTH_URL`                 | ja      | `https://www.baerenstark-hausservice.app` (Prod, v1.5.1) | Basis-URL für NextAuth                      |
 | `NEXTAUTH_SECRET`              | ja      | 32+ Zeichen Zufallsstring (`openssl rand -base64 32`)| JWT-Signaturschlüssel                       |
 | `RESEND_API_KEY`               | ja      | `re_xxxxxxxxxxxx`                                    | Resend-API-Auth                             |
-| `MAIL_FROM`                    | ja      | `noreply@baerenstark-hausservice.de`                 | Absender-Adresse                            |
+| `MAIL_FROM`                    | ja      | `noreply@baerenstark-hausservice.app`                | Absender-Adresse                            |
 | `MAIL_TO_ADMIN`                | ja      | `hausservice-baerenstark@outlook.com`                | Empfänger der Buchungs-Mails (US-08)        |
 | `UPSTASH_REDIS_REST_URL`       | empfohlen | `https://...upstash.io`                            | Rate-Limit-Store (siehe §5)                 |
 | `UPSTASH_REDIS_REST_TOKEN`     | empfohlen | `AX...`                                            | Rate-Limit-Auth                              |
-| `NEXT_PUBLIC_BASE_URL`         | empfohlen | `https://baerenstark-hausservice.de`               | Iteration 2: Public Base-URL für Mail-Aktionslinks. Fallback auf `NEXTAUTH_URL`. |
+| `NEXT_PUBLIC_BASE_URL`         | empfohlen | `https://www.baerenstark-hausservice.app` (Prod, v1.5.1) | Iteration 2: Public Base-URL für Mail-Aktionslinks. Fallback auf `NEXTAUTH_URL`. |
 
 **Entfernt** gegenüber v1.0: `SEED_ADMIN_EMAIL` und `SEED_ADMIN_PASSWORD`.
 Stattdessen wird `/admin/setup` verwendet.
@@ -923,7 +978,7 @@ Jede dynamische Page hat dokumentierte Loading-, Error-, Empty- und Conflict-Sta
   funktionieren. Idempotenz wird über Status-Check (Token verbraucht → 410)
   garantiert.
 - **Annahme:** Tom liefert Impressum-/Datenschutz-Texte als Fließtext.
-- **Annahme:** Eine Domain ist verfügbar oder Tom registriert sie. Bis dahin läuft die Site auf `*.vercel.app`.
+- **Annahme:** Eine Domain ist verfügbar oder Tom registriert sie. Aktive Produktions-Domain (v1.5.1): `https://www.baerenstark-hausservice.app`.
 - **Annahme:** Resend-Domain wird einmalig DNS-verifiziert; bis dahin nutzen wir `onboarding@resend.dev` als Absender. **Hinweis Iteration 2:** Mit `onboarding@resend.dev` als Absender erlaubt Resend nur Mail-Versand an die Resend-Account-E-Mail. Für US-13/US-14 (Mail an beliebige Kunden) ist eine DNS-verifizierte Absender-Domain Pflicht.
 - **Annahme:** Single-Admin-Setup (kein User-Management-UI im MVP).
 - **Annahme:** Tom ruft direkt nach dem ersten Deploy `/admin/setup` auf und legt sein Passwort fest, bevor jemand anderes die Seite findet.
@@ -932,7 +987,7 @@ Jede dynamische Page hat dokumentierte Loading-, Error-, Empty- und Conflict-Sta
 ### Offene Entscheidungen (für Tom / Orchestrator)
 
 - [NEEDS INPUT] **DNS-verifizierte Absender-Domain für Resend.** Wenn die
-  Domain `baerenstark-hausservice.de` (oder ähnlich) noch nicht bei Resend
+  Domain `baerenstark-hausservice.app` (v1.5.1) noch nicht bei Resend
   verifiziert ist, kann Iteration 2 nicht produktiv gehen — Mails an Kunden
   werden sonst von Resend abgewiesen. Tom muss DNS-Records (DKIM, SPF) bei
   seinem Registrar setzen. Engineers liefern die Records.
@@ -2802,3 +2857,1119 @@ Test-Mode (`sk_test_...`).
 | US-27 | `POST /api/customer/bookings/:id/cancel` mit serverseitigem 24h-Frist-Check und Status-Whitelist. `<CancelBookingButton>` mit Confirm-Dialog. Disabled-State + Hinweistext bei < 24h. |
 | US-28 | `Payment`-Modell, Stripe-Integration via `lib/stripe.ts`, `POST /api/admin/bookings/:id/payment` (Tom hinterlegt Betrag), `POST /api/payments/create-session` (Stripe Checkout mit card/paypal/wallets), `POST /api/payments/webhook` (Status-Update + Mails), `/konto/zahlung/:id` Page, Status-Badge "Bezahlt". |
 | US-29 | `Review`-Modell mit Admin-Freigabe, `POST /api/customer/reviews` (nur bei COMPLETED + ohne bestehende Review), `GET /api/reviews` (öffentlich, kürzt Namen, sortiert), `GET/PATCH /api/admin/reviews/:id` (Moderation), `/admin/reviews`-UI, `<ReviewSection>` umgebaut. `BookingStatus.COMPLETED` neu. |
+
+---
+
+## 18. Iteration 5 — Detail-Spec (US-30 bis US-34)
+
+### 18.1 Admin-Passwort-Reset (US-30) — UX & Konfigurations-Fix
+
+**Problem-Analyse:**
+Der bestehende Reset-Flow funktioniert prinzipiell (siehe IT4-Vorarbeit
+`src/app/api/admin/forgot-password/route.ts`), hat aber drei UX-Mängel:
+
+1. **Mehrdeutige BASE_URL-Auflösung.** Der bisherige Code priorisiert
+   `NEXT_PUBLIC_BASE_URL` über `VERCEL_URL` über `localhost:3000`.
+   Wenn jemand `NEXT_PUBLIC_BASE_URL` lokal mit einer Vercel-Preview-
+   URL setzt, schickt der Reset-Mailer auf der Production-Maschine
+   evtl. einen Localhost-Link — Tom kann dann nicht klicken.
+2. **Reset-Link-Sichtbarkeit auf der Login-Seite.** Aktuell ist der
+   Link an einer Stelle versteckt; muss prominent unter dem
+   Passwort-Feld erscheinen (US-30 AC1).
+3. **Mindest-Passwort-Länge.** Schema verlangt 12 Zeichen, US-30 AC4
+   verlangt 8. Anpassen auf 8.
+
+**Fix-Strategie:**
+
+#### 18.1.1 BASE_URL-Resolver (`lib/baseUrl.ts.adminBaseUrl()`)
+
+```ts
+/**
+ * Liefert die korrekte Basis-URL für Reset-/Verifikations-Links im
+ * Admin-Kontext.
+ *
+ * Priorität (von zuverlässig zu fallback):
+ *   1. NEXTAUTH_URL — Single source of truth für NextAuth-Routes,
+ *      ist auf Vercel auto-injected.
+ *   2. NEXT_PUBLIC_BASE_URL — wenn Engineers explizit gesetzt haben.
+ *   3. VERCEL_URL — Vercel injected, ohne Schema → wir präfixen `https://`.
+ *   4. http://localhost:3000 — Dev-Fallback.
+ *
+ * Garantiert ohne trailing slash.
+ */
+export function adminBaseUrl(): string {
+  const candidates = [
+    process.env.NEXTAUTH_URL,
+    process.env.NEXT_PUBLIC_BASE_URL,
+    process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
+    'http://localhost:3000',
+  ];
+  const first = candidates.find((c) => typeof c === 'string' && c.length > 0)!;
+  return first.replace(/\/+$/, '');
+}
+```
+
+Engineers ersetzen den inline-Resolver in
+`src/app/api/admin/forgot-password/route.ts` durch diesen Helper.
+Ergebnis: Reset-URL ist immer korrekt, egal ob localhost oder Vercel.
+
+#### 18.1.2 Login-Page UX
+
+`app/admin/login/page.tsx` muss:
+- **Sichtbaren Link** „Passwort vergessen?" direkt unter dem
+  Passwort-Feld rendern (Schriftgröße ≥ 14px, Padding ausreichend
+  klickbar, Tab-Reihenfolge nach Pw, Farbe nicht heller als
+  `#7B5E3C` für Kontrast).
+- Kein zweiter „Zurück"-Link (Doppel-Navigation vermeiden).
+
+#### 18.1.3 Reset-Schema
+
+`src/app/api/admin/reset-password/route.ts` Schema:
+- `password.min(8)` (vorher 12). Erfüllt US-30 AC4.
+
+#### 18.1.4 Middleware-Whitelist (verifizieren)
+
+Bereits in `src/middleware.ts` enthalten:
+```ts
+const PUBLIC_ADMIN_PATHS = [
+  '/admin/login',
+  '/admin/setup',
+  '/admin/passwort-vergessen',
+  '/admin/passwort-reset',
+];
+```
+
+Engineers MÜSSEN sicherstellen, dass diese Liste unverändert bleibt.
+QA-Test: anonyme HTTP-GET auf `/admin/passwort-vergessen` muss 200
+liefern (kein Redirect).
+
+#### 18.1.5 Mail-Template
+
+`sendPasswordResetEmail(to, resetUrl)` aus `lib/mail.ts` ist bereits
+für Admin-Kontext korrekt (Subject „Passwort zurücksetzen — Bärenstark
+Hausservice"). Keine Änderung nötig. Engineers prüfen, ob der
+Resend-Key in der Production-Env korrekt ist (war historisch eine
+Stolperfalle, siehe BUG-002).
+
+---
+
+### 18.2 OAuth2-Login für Kunden (US-31)
+
+#### 18.2.1 Architektur-Entscheidung: NextAuth als zweiter Layer
+
+**Ausgangslage:** Das bestehende Kunden-Auth-System (IT4) nutzt ein
+Custom-JWT-Cookie (`customer-session`) ohne NextAuth. OAuth2-Provider
+direkt auf Custom-JWT zu setzen wäre aufwendig (Token-Exchange,
+PKCE-Flow, State-Verwaltung — alles selbst implementieren).
+
+**Strategie:** NextAuth als **OAuth-Adapter** verwenden, **aber nicht
+als Session-Layer**. Konkret:
+
+1. Wir installieren NextAuth (bereits via Admin-Auth in der App
+   verfügbar) mit Google + GitHub Providers, **separater Pfad**:
+   `/api/auth/customer/[...nextauth]` (statt
+   `/api/auth/[...nextauth]`).
+2. Im `signIn`-Callback nach erfolgreichem OAuth-Flow:
+   a. Profile via `OAuthProfileNormalizedSchema` normalisieren.
+   b. CustomerUser per `(oauthProvider, oauthId)` lookup, fallback
+      auf E-Mail.
+   c. Anlegen / Verknüpfen / Updaten.
+   d. **Custom-JWT-Cookie** (`customer-session`) setzen via bestehender
+      `createCustomerSession(customerId, email)`-Funktion.
+   e. NextAuth-eigene Session ist **redundant** — wir ignorieren sie;
+      sie expired automatisch. (Engineers können sie in der Config
+      auf `strategy: 'jwt'` mit kurzer `maxAge: 60` setzen, um den
+      Speicherbedarf zu minimieren.)
+3. Bestehende `/api/customer/*`-Endpunkte und Middleware lesen
+   weiterhin nur das `customer-session`-Cookie — kein Branching
+   nach Auth-Methode.
+
+**Vorteile:**
+- Single source of truth für Kunden-Identität: `customer-session`-
+  JWT. Backend-Code in `/api/customer/*` muss nicht zwischen
+  „OAuth" und „E-Mail/Pw" unterscheiden.
+- E-Mail/Pw-Login bleibt 100% intakt — kein Risiko für Bestandskunden.
+- OAuth-Provider können erweitert werden, ohne Custom-JWT-Logik zu
+  verändern.
+
+**Nachteile:**
+- Zwei NextAuth-Konfigurationen (Admin + Customer). Engineers müssen
+  die Pfade strikt trennen — Helper-Modul `lib/customer-oauth.ts`
+  (Customer-Config), getrennt von `lib/auth.ts` (Admin-Config) und
+  `lib/auth.config.ts` (Edge-shared).
+
+#### 18.2.2 Datei-Struktur
+
+```
+src/
+├── lib/
+│   ├── auth.ts                       # Admin (Bestand, IT1)
+│   ├── auth.config.ts                # Edge-shared (Bestand)
+│   ├── customer-auth.ts              # Custom-JWT (Bestand IT4)
+│   ├── customer-auth-server.ts       # Bestand IT4
+│   └── customer-oauth.ts             # NEU IT5 — NextAuth-Customer-Config
+├── app/
+│   └── api/
+│       └── auth/
+│           ├── [...nextauth]/        # Bestand — Admin
+│           │   └── route.ts
+│           └── customer/             # NEU IT5 — Kunden-OAuth
+│               └── [...nextauth]/
+│                   └── route.ts
+```
+
+#### 18.2.3 Account-Verknüpfungs-Logik (Pseudo-Code)
+
+```ts
+// In customer-oauth.ts → signIn callback
+async function handleCustomerOAuthSignIn(
+  provider: 'google' | 'github',
+  profile: OAuthProfileNormalized,
+): Promise<{ customerId: string; email: string }> {
+  // 1. Provider-ID-Match (existierender OAuth-Login).
+  let user = await prisma.customerUser.findFirst({
+    where: { oauthProvider: provider, oauthId: profile.oauthId },
+  });
+
+  // 2. E-Mail-Match (existierender Account → Verknüpfung).
+  if (!user) {
+    user = await prisma.customerUser.findUnique({
+      where: { email: profile.email },
+    });
+
+    if (user) {
+      // Verknüpfen — passwordHash bleibt erhalten.
+      user = await prisma.customerUser.update({
+        where: { id: user.id },
+        data: {
+          oauthProvider: provider,
+          oauthId: profile.oauthId,
+          avatarUrl: profile.avatarUrl ?? user.avatarUrl,
+          // Provider-Identitäts-Trust: emailVerified auf true setzen,
+          // falls noch nicht.
+          emailVerified: true,
+        },
+      });
+    }
+  }
+
+  // 3. Neu anlegen.
+  if (!user) {
+    user = await prisma.customerUser.create({
+      data: {
+        email: profile.email,
+        firstName: profile.firstName,
+        lastName: profile.lastName,
+        avatarUrl: profile.avatarUrl ?? null,
+        passwordHash: null,           // OAuth-only
+        emailVerified: true,
+        oauthProvider: provider,
+        oauthId: profile.oauthId,
+      },
+    });
+  }
+
+  return { customerId: user.id, email: user.email };
+}
+```
+
+**Race-Condition-Hinweis:** Zwei gleichzeitige OAuth-Erst-Logins für
+dieselbe E-Mail könnten zwei `create()` triggern. Engineers nutzen
+entweder einen Datenbank-Mutex (Postgres `SELECT ... FOR UPDATE` —
+in SQLite nicht relevant, da single-writer) oder den UNIQUE-Constraint
+auf `email` als Race-Schutz (zweiter Insert schlägt mit P2002 fehl,
+Helper ruft sich rekursiv mit `findUnique(email)` neu auf). Auf
+SQLite ist die Wahrscheinlichkeit minimal.
+
+#### 18.2.4 Cookie-Setzen nach OAuth-Callback (verbindlich, v1.5.1 Fix BUG-IT5-002)
+
+**Problem:** NextAuth v5's `signIn`-Callback hat **keinen Response-
+Zugriff** — wir können dort kein `Set-Cookie` für unser Custom-JWT
+`customer-session` anhängen. Die `cookies`-Config in NextAuth setzt
+zwar Cookies in der Response, aber **nicht dynamisch mit Werten, die
+erst aus der DB ermittelt werden** (CustomerId nach Lookup/Create).
+
+**Verbindliche Strategie: Redirect-basiert via Custom Finalize-Route.**
+(Variante 1 — „Inline im Callback" — ist verworfen, weil sie in
+NextAuth v5 ohne undokumentierte Internals nicht funktioniert.)
+
+**Flow im Detail:**
+
+1. Frontend: User klickt „Mit Google anmelden" →
+   `signIn('google', { callbackUrl: '/konto' })` (NextAuth-Helper aus
+   `next-auth/react`, mit `basePath: '/api/auth/customer'`).
+2. NextAuth leitet zum Provider, übernimmt OAuth-Flow (state, PKCE).
+3. Provider-Callback: `GET /api/auth/customer/callback/[provider]`
+   (NextAuth-Handler).
+4. NextAuth ruft den **`signIn`-Callback** auf (siehe §18.2.3):
+   - Profile via `OAuthProfileNormalizedSchema` normalisieren.
+   - CustomerUser per `(oauthProvider, oauthId)` lookup, sonst
+     E-Mail-Lookup, sonst `create()`.
+   - Account-Linking-Sicherheits-Check (siehe §18.9.2): bei
+     `emailVerified: false` auf dem lokalen Konto → return `false`
+     mit Error-URL `?error=oauth_unverified_conflict`.
+   - **Wichtig:** Hier wird **kein** Cookie gesetzt. Die
+     CustomerId wird stattdessen in die NextAuth-Session geschrieben
+     (`token.customerId = user.id` im `jwt`-Callback) — sie steht
+     nach dem Callback per `auth()` zur Verfügung.
+5. NextAuth ruft den **`redirect`-Callback** auf — der leitet
+   verbindlich auf
+   `/api/customer/oauth-finalize?provider=<google|github>`.
+   (NextAuth-eigene Session bleibt kurz aktiv, NICHT als Authority
+   benutzt — sie expired automatisch nach 60s, siehe `maxAge`.)
+6. **`GET /api/customer/oauth-finalize`** (neuer Route-Handler, siehe
+   §18.2.4.1 unten und `contracts/api-routes.md` §21.2.1):
+   - Liest die NextAuth-Session via `auth()` (Server-Side).
+   - Extrahiert `customerId` aus `session.token.customerId`.
+   - Liest CustomerUser aus DB (`prisma.customerUser.findUnique`).
+   - Setzt das `customer-session`-JWT-Cookie via
+     `setCustomerSession(customerId, email)` (Bestand IT4).
+   - Antwortet 302 Redirect auf `/konto?oauth=success`.
+7. Frontend (`/konto`-Page) erkennt `?oauth=success` und kann
+   optional einen Toast „Erfolgreich angemeldet" anzeigen.
+
+**`redirect`-Callback in `lib/customer-oauth.ts`:**
+
+```ts
+async redirect({ url, baseUrl }) {
+  // Wir ignorieren externe `url`-Werte (Open-Redirect-Schutz);
+  // jeder erfolgreiche OAuth-Flow geht IMMER über die Finalize-Route.
+  // Die Finalize-Route liest die Session selbst und entscheidet, wohin
+  // sie redirectet (Default: /konto).
+  return `${baseUrl}/api/customer/oauth-finalize`;
+},
+```
+
+**`jwt`-Callback (zur Übergabe der CustomerId in die NextAuth-Session):**
+
+```ts
+async jwt({ token, user, account, profile }) {
+  if (account && profile) {
+    // Erst-Login: Profile-Lookup/Create durchführen, customerId speichern.
+    const result = await handleCustomerOAuthSignIn(
+      account.provider as 'google' | 'github',
+      normalizeProfile(account.provider, profile, account),
+    );
+    if (!result.ok) {
+      // Sicherheits-Block (siehe §18.9.2). NextAuth-Session bleibt leer.
+      // signIn-Callback gibt im Anschluss false zurück mit Error-URL.
+      token.linkError = result.error;  // z.B. 'oauth_unverified_conflict'
+    } else {
+      token.customerId = result.customerId;
+      token.customerEmail = result.email;
+    }
+  }
+  return token;
+},
+```
+
+**`signIn`-Callback:**
+
+```ts
+async signIn({ user, account, profile }) {
+  // Pre-Check: GitHub kein E-Mail? -> Redirect oauth_no_email (BUG-IT5-003).
+  if (!profile?.email) {
+    return '/konto/login?error=oauth_no_email';
+  }
+  // Lookup/Create + Linking-Check passiert im jwt-Callback.
+  // Hier prüfen wir nur, ob jwt einen Linking-Fehler gesetzt hat.
+  // Da signIn vor jwt läuft, machen wir den Lookup ZUSÄTZLICH hier
+  // (der Doppel-Aufruf ist günstig, da idempotent).
+  const result = await handleCustomerOAuthSignIn(
+    account!.provider as 'google' | 'github',
+    normalizeProfile(account!.provider, profile, account!),
+  );
+  if (!result.ok) {
+    return `/konto/login?error=${result.error}`;  // 'oauth_unverified_conflict' etc.
+  }
+  return true;
+},
+```
+
+##### 18.2.4.1 Endpoint `GET /api/customer/oauth-finalize`
+
+**Auth:** öffentlich (liest NextAuth-Customer-Session via `auth()`).
+**Story:** US-31, Fix BUG-IT5-002.
+
+**Verhalten:**
+
+```ts
+// app/api/customer/oauth-finalize/route.ts
+import { auth } from '@/lib/customer-oauth'; // NextAuth v5 helper
+import { setCustomerSession } from '@/lib/customer-auth-server';
+import { NextResponse } from 'next/server';
+
+export async function GET(req: Request) {
+  const session = await auth();
+  if (!session?.user || !session.token?.customerId) {
+    // Kein gültiger OAuth-Flow durchlaufen → zurück auf Login.
+    return NextResponse.redirect(
+      new URL('/konto/login?error=oauth_finalize_failed', req.url),
+    );
+  }
+
+  const customerId = session.token.customerId as string;
+  const email = session.token.customerEmail as string;
+
+  // Custom-JWT setzen (HttpOnly, Secure, SameSite=Lax, 7d).
+  const response = NextResponse.redirect(
+    new URL('/konto?oauth=success', req.url),
+  );
+  await setCustomerSession(response, customerId, email);
+  return response;
+}
+```
+
+**Wichtige Eigenschaften:**
+
+- **Idempotent** — mehrfacher Aufruf ist OK; setzt einfach erneut das
+  Cookie. Kein One-Time-Token nötig, weil die NextAuth-Session selbst
+  schon auth-getrust ist (HMAC-signiert mit `AUTH_SECRET`).
+- **Nicht direkt callbar** ohne vorherigen OAuth-Flow — wenn keine
+  NextAuth-Customer-Session existiert, redirect zu `/konto/login` mit
+  Fehler.
+- **Kein Body, keine Query-Pflichtparams** — alle Daten kommen aus der
+  NextAuth-Session.
+- **Cache-Control:** `no-store`.
+- **Kein Rate-Limit** nötig (NextAuth-Session ist Authority + nur
+  Cookie-Set, keine teure Operation).
+
+**Logout:** Nach `POST /api/customer/logout` (Bestand IT4) muss
+ZUSÄTZLICH die NextAuth-Customer-Session gelöscht werden. Engineers
+ergänzen den Logout-Handler um `signOut({ basePath:
+'/api/auth/customer', redirect: false })`-Call (oder löschen die
+NextAuth-Cookies manuell: `next-auth.session-token`,
+`next-auth.csrf-token` mit Customer-Prefix-Path).
+
+#### 18.2.5 Frontend-UI
+
+`app/konto/login/page.tsx` erhält unter dem Pw-Formular eine zweite
+Sektion mit den OAuth-Buttons:
+
+```tsx
+<button onClick={() => signIn('google', { callbackUrl: '/konto' })}>
+  Mit Google anmelden
+</button>
+<button onClick={() => signIn('github', { callbackUrl: '/konto' })}>
+  Mit GitHub anmelden
+</button>
+```
+
+`signIn()` ist der NextAuth-Helper aus `next-auth/react`. **Wichtig:**
+Engineers müssen den **Customer-NextAuth-Provider** registrieren —
+nicht den Admin. Konkret in `app/konto/layout.tsx` einen
+`<SessionProvider basePath="/api/auth/customer">` setzen, oder
+clientseitig den Helper mit `basePath: '/api/auth/customer'`
+aufrufen.
+
+#### 18.2.6 Profil-Seite (US-31 AC6)
+
+`app/konto/profil/page.tsx`:
+- Wenn `me.oauthProvider !== null` → Passwortfeld **nicht** anzeigen
+  (Hinweis: „Sie sind mit <Provider> angemeldet — kein lokales Passwort
+  hinterlegt.").
+- Wenn `me.oauthProvider !== null && me.hasPassword === true` (gemischt
+  durch Account-Verknüpfung): Passwortfeld zeigen, mit Hinweis
+  „Sie können auch mit <Provider> anmelden."
+- Wenn `me.oauthProvider === null` → Verhalten wie IT4 (Pw-Feld lesbar,
+  Änderung nur via Pw-Reset-Flow).
+
+#### 18.2.7 ENV-Setup für Tom
+
+Tom muss zwei OAuth-Apps anlegen:
+
+**Google (Google Cloud Console):**
+1. Projekt erstellen → APIs & Services → Credentials.
+2. „OAuth 2.0 Client ID" → Web application.
+3. Authorized redirect URIs hinzufügen:
+   - `http://localhost:3000/api/auth/customer/callback/google` (Dev)
+   - `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google` (Prod, v1.5.1)
+4. Client-ID + Client-Secret kopieren → an Engineers für
+   `.env.local` und Vercel-Environment.
+
+**GitHub (Settings → Developer settings → OAuth Apps):**
+1. „Register a new application".
+2. Authorization callback URL:
+   - Dev: `http://localhost:3000/api/auth/customer/callback/github`
+   - Prod: `https://www.baerenstark-hausservice.app/api/auth/customer/callback/github` (v1.5.1)
+   (GitHub erlaubt nur eine; Engineers können zwei Apps registrieren —
+   eine für Dev, eine für Prod.)
+3. Client-ID + Generated Client-Secret an Engineers liefern.
+
+**Hinweis zur URL-Migration (v1.5.1):** Die Produktions-URL hat sich
+von `https://baerenstark.vercel.app` auf
+`https://www.baerenstark-hausservice.app` geändert. Tom muss die
+Authorized Redirect URIs in beiden Provider-Konsolen entsprechend
+aktualisieren. Bestehende Dev-URLs bleiben unverändert.
+
+---
+
+### 18.3 Adressfeld in der Buchung (US-32)
+
+#### 18.3.1 Datenmodell
+
+`Booking` erhält drei nullable String-Felder. **DB-nullable**, weil
+Bestandsbuchungen aus IT1–IT4 keine Adresse haben — Migration ohne
+Backfill möglich. **API-Pflicht** ab IT5: `CreateBookingSchema` zwingt
+alle drei Felder im IT3/IT5-Modus (mit `date`/`startTime`).
+
+```prisma
+addressStreet String?    // "Musterstraße 12"
+addressZip    String?    // "64283"
+addressCity   String?    // "Darmstadt"
+```
+
+#### 18.3.2 Validierung (Zod)
+
+```ts
+addressStreet: z.string().trim().min(3).max(100),
+addressZip:    z.string().trim().regex(/^\d{5}$/, 'PLZ muss 5 Ziffern enthalten'),
+addressCity:   z.string().trim().min(2).max(100),
+```
+
+Engineers nutzen das wiederverwendbare `BookingAddressSchema` und
+`ZipCodeSchema` aus `lib/schemas.ts` (synchron mit
+`contracts/zod-schemas.ts`).
+
+#### 18.3.3 Frontend
+
+`components/booking/BookingForm.tsx`:
+- Drei neue `<Input>`-Felder zwischen „Telefon" und
+  „Beschreibung", mit Pflicht-Markierung.
+- Inline-Validierung (RHF + Zod) — analog zum bestehenden
+  Phone-Feld.
+- PLZ-Feld: `inputMode="numeric"`, `pattern="[0-9]*"`, `maxLength={5}`.
+- Mobile-First: drei Felder untereinander auf <640px, Straße full-width
+  + (PLZ | Ort) zwei-spaltig auf ≥640px.
+
+#### 18.3.4 Admin-Anzeige
+
+- `app/admin/bookings/page.tsx` (Liste): kurze Anzeige `{addressZip} {addressCity}`
+  pro Zeile (z.B. „64283 Darmstadt").
+- `app/admin/bookings/[id]/page.tsx` (Detail): eigener Abschnitt
+  „Auftragsadresse" mit allen drei Feldern.
+- `app/admin/page.tsx` (Dashboard, „bevorstehende Termine"): PLZ + Ort
+  kompakt pro Card.
+
+#### 18.3.5 Kunden-Portal-Anzeige
+
+- `app/konto/auftrag/[id]/page.tsx`: Adresse im Detail-Bereich
+  (read-only — Änderung erfordert neue Anfrage).
+
+---
+
+### 18.4 Buchungsdauer (US-33)
+
+#### 18.4.1 Konzept
+
+Kunde wählt **Startzeit** + **Dauer**. Backend berechnet
+`endTime = startTime + durationMinutes` (Authority).
+
+**Dauer-Optionen (Whitelist):**
+| Wert (Minuten) | Anzeige | Hinweis                          |
+| -------------- | ------- | -------------------------------- |
+| 60             | „1 h"   |                                  |
+| 120            | „2 h"   |                                  |
+| 180            | „3 h"   |                                  |
+| 240            | „4 h"   |                                  |
+| 300            | „5 h"   |                                  |
+| 360            | „6 h"   |                                  |
+| 480            | „8 h"   |                                  |
+| -1 (Sonderwert)| „Ganztag" | Reserviert das gesamte Verfügbarkeitsfenster |
+
+Engineers definieren die Werte als `BOOKING_DURATION_OPTIONS` und
+`BOOKING_DURATION_ALL_DAY` in `lib/schemas.ts`.
+
+#### 18.4.2 Slot-Berechnung-Änderung
+
+`GET /api/slots/available?date=...&duration=NNN` (Detail siehe
+api-routes.md §21.4):
+- Schrittweite bleibt `slotDurationMinutes` aus dem Template (z.B.
+  alle 30 Min).
+- Block-Größe = `effectiveDuration` (vom Kunden gewählt).
+- Verfügbarkeit pro Block: keine Überlappung mit aktiven Buchungen
+  UND keine Überlappung mit Buffer (siehe §18.5).
+- Bei `duration === -1` (Ganztag): genau **ein** Block über das
+  gesamte Fenster.
+
+#### 18.4.3 Preisschätzung (Frontend)
+
+`lib/services.ts.priceFrom` × `durationHours` → Min-Schätzung.
+Range = Min × 1.0 bis Min × 2.0 (Engineering: Faktor 2 ist
+konservativer Buffer für „Aufwand variiert"). Beispiel:
+
+```
+Service: Entrümpelung (priceFrom: 35 €/h)
+Dauer: 3 h
+Range: ca. 105–210 €
+```
+
+Bei Service `'sonstiges'` (`priceFrom: null`) → „Auf Anfrage" statt
+Range. Disclaimer aus US-20 bleibt sichtbar.
+
+#### 18.4.4 Backend-Authority bei Konflikt
+
+Wenn Frontend `endTime: '12:00'` und `durationMinutes: 240` sendet,
+aber `startTime: '09:00'` (also `09 + 240min = 13:00`, Mismatch):
+**Backend nimmt durationMinutes als Authority** und berechnet
+`endTime = '13:00'`. Kein Validation-Fehler — Frontend hat sich
+verzählt, die Logik ist deterministisch.
+
+**Engineers-Hinweis:** Im API-Layer-Code unbedingt **keine**
+`addIssue()`-Validation auf `endTime`-Konsistenz, sonst werden
+legitime Buchungen abgewiesen. Stattdessen: silent-overwrite +
+Log-Eintrag „endTime corrected from X to Y based on durationMinutes".
+
+#### 18.4.5 Ganztag-Auflösung
+
+Bei `durationMinutes === -1`:
+1. `getAvailabilityForDate(date)` aufrufen.
+2. Wenn Tag inaktiv → 409 `CONFLICT`.
+3. Wenn aktiv: `startTime = template.startTime`,
+   `endTime = template.endTime`,
+   `durationMinutes = endTimeMin - startTimeMin`.
+4. Persistieren als reguläre Buchung.
+
+**Side-Effect:** Andere Buchungen am gleichen Tag sind nicht mehr
+möglich (aktive Buchung belegt das gesamte Fenster, der Partial
+Unique Index `uniq_active_booking_per_timeslot` schützt mit).
+
+---
+
+### 18.5 Buffer-Zeit (US-34)
+
+#### 18.5.1 Datenmodell
+
+```prisma
+model BufferConfig {
+  id            String   @id @default(cuid())
+  bufferMinutes Int      @default(30)
+  updatedAt     DateTime @updatedAt
+}
+```
+
+**Singleton-Pattern:** Engineers stellen sicher, dass max. 1 Datensatz
+existiert. Helper:
+
+```ts
+async function getBufferConfig(): Promise<{ bufferMinutes: number; updatedAt: Date }> {
+  let cfg = await prisma.bufferConfig.findFirst();
+  if (!cfg) {
+    cfg = await prisma.bufferConfig.create({ data: { bufferMinutes: 30 } });
+  }
+  return cfg;
+}
+
+async function setBufferConfig(value: number): Promise<{ bufferMinutes: number; updatedAt: Date }> {
+  const cfg = await prisma.bufferConfig.findFirst();
+  if (!cfg) {
+    return prisma.bufferConfig.create({ data: { bufferMinutes: value } });
+  }
+  return prisma.bufferConfig.update({
+    where: { id: cfg.id },
+    data: { bufferMinutes: value },
+  });
+}
+```
+
+#### 18.5.2 Slot-Berechnungs-Erweiterung
+
+In `lib/availability.ts.computeAvailableSlots()`:
+
+1. Lade alle aktiven Buchungen für `date` (PENDING/CONFIRMED/COUNTER_PROPOSED).
+2. Lade `bufferMinutes` aus `BufferConfig`.
+3. Pro generiertem Block prüfen:
+   ```
+   blockOverlapsBookingOrBuffer(block, bookings) {
+     for each booking b:
+       if block ∩ [b.start, b.end) → blocked
+       if b.status === 'CONFIRMED'
+          AND block ∩ [b.end, b.end + bufferMinutes) → blocked
+     return false
+   }
+   ```
+
+**Wichtig — Buffer NUR nach CONFIRMED:**
+- PENDING-Buchung blockiert nur ihren eigenen Slot, nicht den Buffer.
+  Begründung: Tom hat noch nicht zugesagt — andere Kunden sollen
+  parallel anfragen können.
+- COUNTER_PROPOSED gleich.
+- CONFIRMED triggert den Buffer (Fahrtzeit-Reservierung).
+
+#### 18.5.3 Admin-UI
+
+Neuer Abschnitt in `app/admin/availability/page.tsx`:
+- Section-Header: „Buffer-Zeit nach Buchungen".
+- Erklärungs-Text: „Reservierte Zeit nach jeder bestätigten Buchung
+  (für Fahrt + Pause). Wirkt sich nur auf bestätigte Buchungen aus."
+- `<select>` mit 5 Optionen (0/15/30/45/60 Min).
+- Speichern-Button → `PUT /api/admin/buffer-config`.
+- Bestätigung „Einstellung gespeichert" via Toast.
+
+In der Admin-Kalenderansicht (`components/admin/CalendarView.tsx`):
+- Buffer-Block visuell als graue Kachel direkt nach der Buchung
+  (z.B. `bg-baerenstark-stone/30` mit „Buffer"-Label).
+
+#### 18.5.4 Frontend-Sichtbarkeit
+
+Kunden sehen den Buffer **nicht** explizit — die betroffenen Slots
+werden einfach als „nicht verfügbar" angezeigt. Hinweis-Text auf der
+Buchungsseite unverändert.
+
+#### 18.5.5 Race-Condition-Schutz für variable Dauer (v1.5.1 Fix BUG-IT5-001) — verbindlich
+
+**Problem (Critical):** Mit US-33 wählen Kunden frei eine Dauer. Der
+seit IT3 bestehende Partial Unique Index
+`uniq_active_booking_per_timeslot` schützt nur **exakte Tupel**
+`(date, start_time, end_time)`. Überlappende Tupel passieren ihn
+ungehindert:
+
+| Booking A             | Booking B             | Konflikt? | Index fängt? |
+| --------------------- | --------------------- | --------- | ------------ |
+| 09:00–11:00 (120 min) | 09:00–11:00 (120 min) | ja        | **ja** (exakt-Match) |
+| 09:00–11:00 (120 min) | 10:00–12:00 (120 min) | ja        | **NEIN** (Index sieht andere Tupel) |
+| 09:00–11:00 (120 min) | 10:00–11:00 (60 min)  | ja        | **NEIN** |
+| 09:00–13:00 (-1, Ganztag) | 10:00–11:00 (60 min) | ja        | **NEIN** |
+
+Ohne zusätzliche Vorkehrung können zwei parallele POST-Requests beide
+ein Insert durchführen → Doppelbuchung.
+
+**Verbindliche Strategie:** Der `POST /api/bookings`-Handler für den
+IT3/IT5-Modus (mit `date`/`startTime`/`durationMinutes`) führt
+**Overlap-Check, Buffer-Check und Insert in einer einzigen
+SQLite-Transaktion mit `BEGIN IMMEDIATE`** aus. SQLite serialisiert
+schreibende Transaktionen — zwei parallele Requests werden
+sequentiell abgearbeitet, der zweite sieht das `INSERT` des ersten,
+sein Overlap-Check schlägt aus, er antwortet mit 409 `CONFLICT`.
+
+**Pseudo-Code (Backend, in `lib/booking-create.ts`):**
+
+```ts
+import { prisma } from '@/lib/prisma';
+
+async function createBookingWithOverlapCheck(input: CreateBookingInput) {
+  // Resolve duration → endTime (Authority = durationMinutes).
+  const startMin = timeToMinutes(input.startTime);
+  const endMin =
+    input.durationMinutes === BOOKING_DURATION_ALL_DAY
+      ? templateEndMin                     // Ganztag → Template-Fenster
+      : startMin + input.durationMinutes;
+  const endTime = minutesToTime(endMin);
+
+  // SQLite-Transaktion mit BEGIN IMMEDIATE (Prisma: $transaction
+  // mit isolationLevel "Serializable" auf SQLite ≈ BEGIN IMMEDIATE).
+  return await prisma.$transaction(async (tx) => {
+    // 1. Overlap-Check gegen aktive Buchungen am gleichen Tag.
+    //    SQL-equivalent:
+    //    SELECT id FROM bookings
+    //     WHERE date = ?
+    //       AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED')
+    //       AND start_time < ?   -- requestedEnd
+    //       AND end_time   > ?   -- requestedStart
+    //     LIMIT 1;
+    const overlapping = await tx.booking.findFirst({
+      where: {
+        date: input.date,
+        status: { in: ['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED'] },
+        AND: [
+          { startTime: { lt: endTime } },
+          { endTime:   { gt: input.startTime } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (overlapping) {
+      throw new ConflictError('Zeitraum bereits belegt.');
+    }
+
+    // 2. Buffer-Check: gibt es eine CONFIRMED-Buchung, deren
+    //    [endTime, endTime + bufferMinutes) mit
+    //    [requestedStart, requestedEnd) überlappt?
+    const { bufferMinutes } = await getBufferConfig();
+    if (bufferMinutes > 0) {
+      const buffered = await tx.booking.findFirst({
+        where: {
+          date: input.date,
+          status: 'CONFIRMED',
+          // App-Layer-Filter (SQLite kann Minuten-Arithmetik auf
+          // 'HH:MM' nicht direkt; wir prüfen in JS):
+        },
+        select: { startTime: true, endTime: true },
+      });
+      // Iterativ prüfen (kleine N, max ~5/Tag):
+      const candidates = await tx.booking.findMany({
+        where: { date: input.date, status: 'CONFIRMED' },
+        select: { startTime: true, endTime: true },
+      });
+      for (const c of candidates) {
+        if (!c.startTime || !c.endTime) continue;
+        const cEnd = timeToMinutes(c.endTime);
+        const bufferEnd = cEnd + bufferMinutes;
+        if (startMin < bufferEnd && endMin > cEnd) {
+          throw new ConflictError(
+            'Pufferzeit nach bestehender Buchung kollidiert.',
+            { code: 'CONFLICT', detail: 'BUFFER_BLOCKED' },
+          );
+        }
+      }
+    }
+
+    // 3. Insert. Falls trotz aller Vorkehrungen ein
+    //    P2002-Unique-Violation auftritt (Race auf
+    //    uniq_active_booking_per_timeslot), wandelt der Catch-Block
+    //    außerhalb in 409 um.
+    return await tx.booking.create({
+      data: {
+        ...input,
+        endTime,
+        status: 'PENDING',
+      },
+    });
+  }, {
+    // SQLite: Serializable = BEGIN IMMEDIATE intern.
+    isolationLevel: 'Serializable',
+    timeout: 5000,  // ms
+    maxWait: 2000,  // ms
+  });
+}
+```
+
+**Engineering-Notes:**
+
+1. Prisma's `$transaction` mit `isolationLevel: 'Serializable'`
+   triggert auf SQLite das Verhalten von `BEGIN IMMEDIATE` — der
+   Writer wird sofort exklusiv-serialisiert. Kein zweiter Writer kann
+   die Transaktion betreten, bis der erste committet/rollbackt.
+2. Auf Postgres (Backlog-Migration) ist `Serializable` ebenfalls
+   ausreichend, weil Postgres SSI nutzt — alternativ `SELECT ... FOR
+   UPDATE` auf einen Day-Lock-Datensatz. **MVP läuft auf SQLite —
+   diese Detail-Frage ist offen, sobald wir auf Turso/Postgres
+   migrieren.**
+3. **Der bestehende Partial Unique Index bleibt** als zweite
+   Verteidigungslinie. Bei Race auf Application-Layer (vor
+   Transaction-Start) fängt er den Fall ab (P2002 → 409).
+4. **Ganztag (`durationMinutes === -1`)** wird in der Transaktion
+   wie reguläre Buchung behandelt — `startTime`/`endTime` werden
+   vorher auf das Template-Fenster aufgelöst (siehe §18.4.5), der
+   Overlap-Check sieht dann ein 09:00–17:00-Tupel und erkennt jede
+   andere Buchung an dem Tag als Overlap.
+5. **Re-Booking-Modus (Slot-basiert, ohne `date`):** Bestand IT2-
+   Verhalten — Insert mit Slot-FK. Hier greift der Slot-Unique-Index
+   (Bestand). Kein zusätzlicher Overlap-Check nötig.
+6. **Performance:** Overlap-Query über Index `(date, status)`
+   (Bestand seit IT3) — O(1) lookup. Buffer-Query auf max ~5
+   CONFIRMED-Bookings/Tag — vernachlässigbar.
+7. **Tests (zusätzlich zu §18.11):** Concurrency-Test mit
+   `Promise.all([POST_A, POST_B])` für überlappende Dauern → genau 1
+   × 201, 1 × 409.
+
+**Begründung gegen Trigger-Variante:** Ein `BEFORE INSERT`-Trigger
+mit Range-Check wäre eleganter (DB-garantiert), aber:
+- SQLite-Trigger werden in Prisma nicht erstgenerative gemanagt
+  (manueller `prisma db execute`-Schritt nötig).
+- Der Trigger müsste die Buffer-Logik kennen — das verteilt die
+  Business-Logik auf zwei Schichten.
+- Forward-Migration auf Postgres würde den Trigger neu schreiben
+  müssen.
+
+Die Transaction-Variante hält die Business-Logik in einer Schicht
+(`lib/booking-create.ts`), ist DB-portabel und MVP-tauglich.
+
+---
+
+### 18.6 Datenmodell-Migration Iteration 5
+
+**Schema-Änderungen (eine Migration):**
+
+1. `customer_users`:
+   - `password_hash` → NULLABLE (ALTER COLUMN).
+   - Neue Spalten: `oauth_provider`, `oauth_id`, `avatar_url` (alle NULL).
+   - Neuer Index `idx_customer_users_oauth (oauth_provider, oauth_id)`.
+
+2. `bookings`:
+   - Neue Spalte `duration_minutes INTEGER NOT NULL DEFAULT 60`.
+     Default-Wert ist Backfill — Bestandsbuchungen erhalten 60 Min.
+     Engineers setzen optional pro Bestandsbuchung
+     `duration_minutes = endTimeMin - startTimeMin` per Skript:
+     ```sql
+     UPDATE bookings
+        SET duration_minutes = (
+          (CAST(substr(end_time,1,2) AS INTEGER) * 60 + CAST(substr(end_time,4,2) AS INTEGER))
+          - (CAST(substr(start_time,1,2) AS INTEGER) * 60 + CAST(substr(start_time,4,2) AS INTEGER))
+        )
+      WHERE start_time IS NOT NULL
+        AND end_time IS NOT NULL
+        AND duration_minutes = 60;
+     ```
+   - Neue Spalten: `address_street`, `address_zip`, `address_city`
+     (alle NULL — Bestand hat sie nicht).
+
+3. **NEUE Tabelle** `buffer_config` (Singleton, Default 30).
+
+**Reihenfolge der Migration:**
+1. ALTER TABLE customer_users + bookings.
+2. Optionale Backfill-Updates (duration_minutes für alte Buchungen).
+3. CREATE TABLE buffer_config + Initial-Insert (`{ bufferMinutes: 30 }`).
+4. Engineers-Hinweis: Initial-Insert kann auch on-the-fly im Helper
+   passieren (siehe 18.5.1).
+
+**Keine Daten-Verlust-Risiken** — alle neuen Felder sind nullable
+oder haben Default-Werte.
+
+---
+
+### 18.7 Frontend-Architektur Iteration 5
+
+**Neue/geänderte Komponenten:**
+
+| Komponente                                      | Status     | Zweck                                                              |
+| ----------------------------------------------- | ---------- | ------------------------------------------------------------------ |
+| `components/booking/BookingForm.tsx`            | UMGEBAUT   | Adressfelder + Dauer-Picker integrieren.                            |
+| `components/booking/AddressFields.tsx`          | NEU IT5    | Drei Pflichtfelder Straße/PLZ/Ort, mobile-first Layout.             |
+| `components/booking/DurationPicker.tsx`         | NEU IT5    | 8 Kacheln (1h–6h, 8h, Ganztag) mit Preisschätzung + Disabled-State. |
+| `components/booking/TimeSlotPicker.tsx`         | UMGEBAUT   | Ruft `/api/slots/available?duration=` mit aktuell gewählter Dauer.  |
+| `app/konto/login/page.tsx`                      | UMGEBAUT   | Drei Buttons: Pw, Google, GitHub.                                    |
+| `app/konto/profil/page.tsx`                     | UMGEBAUT   | Pw-Feld nur für non-OAuth-Konten zeigen (siehe 18.2.6).              |
+| `components/customer/OAuthButtons.tsx`          | NEU IT5    | Wiederverwendbare Google/GitHub-Buttons (CSR, ruft `signIn`).       |
+| `app/admin/availability/page.tsx`               | UMGEBAUT   | Buffer-Section neu (Dropdown + Save).                                |
+| `components/admin/BufferConfigForm.tsx`         | NEU IT5    | Standalone-Form für Buffer-Einstellung.                              |
+| `app/admin/bookings/page.tsx` + `[id]/page.tsx` | UMGEBAUT   | Adresse + Dauer in Liste/Detail anzeigen.                            |
+| `components/admin/CalendarView.tsx`             | UMGEBAUT   | Buffer-Blöcke visualisieren (graue Kacheln).                          |
+| `app/admin/login/page.tsx`                      | UMGEBAUT   | „Passwort vergessen?"-Link prominent.                                |
+| `lib/customer-oauth.ts`                         | NEU IT5    | NextAuth-Customer-Config (Google + GitHub Provider).                  |
+| `lib/baseUrl.ts`                                | NEU IT5    | `adminBaseUrl()` Helper (US-30 Fix).                                  |
+
+---
+
+### 18.8 UI-States Iteration 5
+
+| Page                                  | States                                                                                                   |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `/admin/login`                        | Idle / Loading / Error / „Passwort vergessen?"-Link sichtbar (statisch).                                  |
+| `/admin/passwort-vergessen`           | Idle / Submitting / Sent (neutrale Meldung, kein Existenz-Leak).                                          |
+| `/admin/passwort-reset?token=...`     | Idle / Submitting / Success (Redirect 3s) / Error (ungültig/abgelaufen → Link zu Forgot).                  |
+| `/konto/login`                        | Pw-Form (idle/loading/error) PLUS OAuth-Buttons (idle/loading) PLUS optional Fehler-Banner (`?error=...`). |
+| `/konto/profil`                       | OAuth-only: Pw-Feld nicht gerendert. Mixed: Pw-Feld + Hinweis. Pw-only: wie IT4.                          |
+| `/buchung` (Form)                     | Bestand + Adressfelder (idle/error) + Dauer-Picker (idle/disabled-tile/selected) + Slot-Picker (loading/disabled-tile). |
+| `/admin/availability`                 | Bestand + Buffer-Section (idle/saving/saved-toast/error).                                                  |
+| Admin-Kalender                        | Buchungen farbig + Buffer als graue Schraffur direkt anschließend.                                         |
+
+---
+
+### 18.9 Sicherheit Iteration 5
+
+#### 18.9.1 OAuth-Flow
+
+- **State-Parameter:** NextAuth handhabt state automatisch (CSRF-Schutz).
+- **PKCE:** wird von NextAuth für Google + GitHub aktiviert.
+- **Open-Redirect:** `redirect`-Callback in `customer-oauth.ts` muss
+  `safeCustomerCallback()` (siehe `lib/customer-auth.ts`)
+  wiederverwenden — Engineers dürfen externe `callbackUrl`-Werte
+  NICHT durchreichen.
+- **E-Mail-Verifikation:** Engineers SOLLEN nur Provider-Profile mit
+  `email_verified === true` (Google) bzw. einer `verified primary
+  email` (GitHub) akzeptieren. Sonst: Redirect zu
+  `/konto/login?error=oauth_unverified`.
+
+#### 18.9.2 Account-Verknüpfung (v1.5.1 nachgeschärft, Fix BUG-IT5-004)
+
+- E-Mail-Match wird **case-insensitive** durchgeführt
+  (Schema persistiert lowercase). Schutz vor „account hijacking via
+  case-mismatch".
+- Auf einem bestehenden E-Mail/Pw-Konto **bleibt** `passwordHash`
+  erhalten, wenn ein OAuth-Provider verknüpft wird. Der Pw-Inhaber
+  kann sich weiterhin per Pw einloggen — Verknüpfung ist additiv,
+  nicht zerstörend.
+
+**Account-Linking-Sicherheits-Differenzierung (verbindlich):**
+
+Bei E-Mail-Match zwischen einem OAuth-Login und einem bestehenden
+lokalen Konto **muss** `handleCustomerOAuthSignIn()` zwischen
+verifiziertem und unverifiziertem lokalem Konto unterscheiden:
+
+| Lokales Konto Status                                        | OAuth-Aktion                                                 | Begründung                                                                                                                       |
+| ----------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `emailVerified: true`                                       | **Verknüpfung OK** — `oauthProvider/oauthId/avatarUrl` setzen, `passwordHash` unangetastet. | Der lokale User hatte verifizierten Zugriff auf die Inbox; Provider hat E-Mail ebenfalls verifiziert → beide vertrauen der Identität. |
+| `emailVerified: false` (unbestätigte E-Mail-Registrierung) | **Verknüpfung VERBOTEN.** Return `{ ok: false, error: 'oauth_unverified_conflict' }`. NextAuth-Callback redirectet zu `/konto/login?error=oauth_unverified_conflict`. | Hijacking-Vektor: Angreifer registriert lokal `victim@example.com` ohne Verify, wartet, das echte Opfer meldet sich später per OAuth an. Würde sonst den Angreifer-Account übernehmen. |
+
+**Pseudo-Code-Erweiterung in `handleCustomerOAuthSignIn()`:**
+
+```ts
+// 2. E-Mail-Match (existierender Account → Verknüpfung).
+if (!user) {
+  const existing = await prisma.customerUser.findUnique({
+    where: { email: profile.email.toLowerCase() },
+  });
+
+  if (existing) {
+    // SICHERHEIT: Unverifizierte lokale Konten dürfen NICHT
+    // automatisch verknüpft werden (Hijacking-Schutz, BUG-IT5-004).
+    if (!existing.emailVerified) {
+      return {
+        ok: false,
+        error: 'oauth_unverified_conflict',
+      };
+    }
+
+    // Verifiziertes Konto → sichere Verknüpfung.
+    user = await prisma.customerUser.update({
+      where: { id: existing.id },
+      data: {
+        oauthProvider: provider,
+        oauthId: profile.oauthId,
+        avatarUrl: profile.avatarUrl ?? existing.avatarUrl,
+        // emailVerified bleibt true; nicht überschreiben.
+      },
+    });
+  }
+}
+```
+
+**UX-Flow im Konflikt-Fall:**
+
+1. User klickt „Mit Google anmelden" → Google-OAuth erfolgreich.
+2. `signIn`-Callback erkennt unverifiziertes lokales Konto mit
+   gleicher E-Mail.
+3. Callback gibt Redirect-String zurück:
+   `/konto/login?error=oauth_unverified_conflict`.
+4. Frontend (`app/konto/login/page.tsx`) zeigt deutsche Meldung:
+   > „Es existiert bereits ein Konto mit dieser E-Mail-Adresse, das
+   > noch nicht bestätigt wurde. Bitte bestätigen Sie zuerst Ihre
+   > E-Mail über den Link in der Registrierungs-Mail oder nutzen
+   > Sie ‚Passwort vergessen?', um Zugriff wiederherzustellen.
+   > Anschließend können Sie sich mit Google anmelden."
+5. Zwei Auflösungs-Pfade für den User:
+   - E-Mail-Verify-Mail erneut anfordern (`/konto/verify-resend`),
+     Mail bestätigen → emailVerified: true → OAuth-Login klappt.
+   - Passwort-Reset-Flow (`/konto/passwort-vergessen`) → setzt
+     emailVerified implizit auf true (Mail-Zugriff bewiesen).
+
+**Neuer Fehlercode:** `OAUTH_UNVERIFIED_CONFLICT` (HTTP 422). Wird
+NICHT von einem API-Endpoint zurückgeliefert (OAuth-Flow läuft als
+Redirect), sondern als Query-Param `?error=oauth_unverified_conflict`
+auf der Login-Page geschickt. Im Frontend-Mapping (`lib/oauth-
+errors.ts`) wird der Code zu obigem deutschen Text aufgelöst.
+
+**Test-Anker (zusätzlich zu §18.11):**
+- Lokales Konto unverifiziert → OAuth mit gleicher E-Mail → kein
+  Update am Konto, Redirect mit `error=oauth_unverified_conflict`.
+- Lokales Konto verifiziert (e.g. nach Pw-Reset) → OAuth mit gleicher
+  E-Mail → Verknüpfung wie bisher (passwordHash erhalten).
+
+#### 18.9.3 Adress-Daten DSGVO
+
+- Adresse ist personenbezogenes Datum (Auftragsort).
+- Aufbewahrung: gleich wie Bestandsfelder (2 Jahre, siehe §11).
+- Frontend zeigt Adresse nur dem eingeloggten Kunden + Tom.
+- Admin-Kunden-Listen-Anzeige (PLZ+Ort) ist akzeptabel — kein voller
+  Straßenname in Übersichten ohne Klick.
+
+#### 18.9.4 Buffer-Config
+
+- Endpunkte sind Admin-only (Middleware schützt `/api/admin/*`).
+- Kein Rate-Limit nötig (Bestands-Schutz via Auth ausreichend).
+
+---
+
+### 18.10 ENV-Variablen Iteration 5
+
+| Variable                | Pflicht                  | Wert / Beispiel                | Zweck                                                    |
+| ----------------------- | ------------------------ | ------------------------------ | -------------------------------------------------------- |
+| `GOOGLE_CLIENT_ID`      | Wenn Google-Login aktiv  | `<Google OAuth Client-ID>`     | NextAuth Google-Provider (US-31).                         |
+| `GOOGLE_CLIENT_SECRET`  | Wenn Google-Login aktiv  | `<Google OAuth Secret>`        | NextAuth Google-Provider (US-31).                         |
+| `GITHUB_CLIENT_ID`      | Wenn GitHub-Login aktiv  | `<GitHub OAuth App ID>`        | NextAuth GitHub-Provider (US-31).                         |
+| `GITHUB_CLIENT_SECRET`  | Wenn GitHub-Login aktiv  | `<GitHub OAuth App Secret>`    | NextAuth GitHub-Provider (US-31).                         |
+| `NEXTAUTH_URL`          | ja (bereits)             | `https://www.baerenstark-hausservice.app` (Prod, v1.5.1) bzw. `http://localhost:3000` (Dev) | Reset-Mail-Links + OAuth-Callback-Basis (US-30 + US-31).  |
+
+`.env.example` wird mit Hinweis-Kommentaren ergänzt:
+```
+# IT5 / US-31 — OAuth2-Customer-Login (optional, falls aktiv)
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+```
+
+Engineers erweitern beim Implementieren die `.env.example`.
+
+---
+
+### 18.11 Test-Plan Iteration 5
+
+| Bereich                | Test                                                                                          |
+| ---------------------- | --------------------------------------------------------------------------------------------- |
+| **US-30 BASE_URL**     | `NEXTAUTH_URL=https://www.baerenstark-hausservice.app` → Reset-Mail-Link enthält genau diese URL. Lokal: `http://localhost:3000/admin/passwort-reset?token=...`. |
+| **US-30 Pw-Min**       | Reset mit 7 Zeichen → 400. Mit 8 Zeichen → 200.                                                |
+| **US-30 Middleware**   | Anonym `GET /admin/passwort-vergessen` → 200 (kein Redirect).                                  |
+| **US-30 Login-Link**   | Visual: „Passwort vergessen?" sichtbar in 360px Viewport, klickbar mit Tastatur-Tab.            |
+| **US-31 Google First-Login** | Klick „Mit Google anmelden", Provider-Flow durchlaufen → CustomerUser angelegt, Cookie gesetzt, Redirect zu `/konto`. |
+| **US-31 GitHub First-Login** | Idem für GitHub.                                                                          |
+| **US-31 Account-Verknüpfung** | Existierender E-Mail/Pw-Account `maria@example.com` (mit Pw). Per Google einloggen mit derselben E-Mail → bestehendes Konto wird ergänzt um `oauthProvider: 'google'`, `passwordHash` bleibt. |
+| **US-31 OAuth-only Login mit Pw** | OAuth-only-Konto (passwordHash = null). `POST /api/customer/login` → 422 `OAUTH_ONLY_ACCOUNT`. |
+| **US-31 Pw-only weiterhin** | Pw-Login mit Bestandskonto (kein OAuth) → unverändert OK.                                  |
+| **US-31 Provider-Abbruch** | OAuth-Flow im Provider abbrechen → Redirect `/konto/login?error=oauth_error` mit deutscher Meldung. |
+| **US-31 Profil OAuth-only** | `/konto/profil` zeigt KEIN Pw-Feld bei OAuth-only-Konto.                                    |
+| **US-31 Open-Redirect** | OAuth-Redirect mit `callbackUrl: 'https://evil.example/'` → Fallback `/konto`.                 |
+| **US-32 Pflichtfelder**| `POST /api/bookings` ohne `addressStreet` → 400 `VALIDATION_ERROR` mit `field: 'addressStreet'`. |
+| **US-32 PLZ-Format**   | `addressZip: '1234'` → 400. `'12345'` → 200.                                                   |
+| **US-32 Anzeige Admin**| Buchung mit Adresse → in Liste „64283 Darmstadt", in Detail „Musterstraße 12 / 64283 Darmstadt". |
+| **US-32 Bestand**      | Buchung aus IT4 (ohne Adresse) → Detail-Page rendert Hinweis „Adresse nicht erfasst" (kein Crash). |
+| **US-33 Dauer-Wahl**   | Form ohne `durationMinutes` absenden → Inline-Fehler „Bitte wählen Sie eine Auftragsdauer.".    |
+| **US-33 endTime-Override** | POST mit `startTime: '09:00'`, `endTime: '12:00'`, `durationMinutes: 240` → DB-Eintrag hat `endTime: '13:00'` (Authority = duration). |
+| **US-33 Ganztag**      | POST mit `durationMinutes: -1` an einem aktiven Tag → DB-Eintrag deckt Template-Fenster ab; Tag belegt für andere. |
+| **US-33 Slot-API mit Dauer** | `GET /api/slots/available?date=...&duration=240` → Liefert nur Blöcke, in die 4h passen.    |
+| **US-34 Admin-Read**   | `GET /api/admin/buffer-config` ohne Datensatz → seedet 30, liefert `{ bufferMinutes: 30 }`.    |
+| **US-34 Admin-Write**  | `PUT /api/admin/buffer-config { bufferMinutes: 45 }` → 200, nächster GET liefert 45.            |
+| **US-34 Whitelist**    | `PUT { bufferMinutes: 17 }` → 400 `VALIDATION_ERROR`.                                          |
+| **US-34 Buffer-Wirkung**| CONFIRMED-Buchung 13:00–14:00, buffer=30. Slot 14:00–15:00 → unavailable. Slot 14:30–15:30 → available. |
+| **US-34 PENDING kein Buffer** | PENDING-Buchung 13:00–14:00, buffer=30. Slot 14:00–15:00 → available (PENDING blockiert nur eigenen Slot). |
+| **US-34 buffer=0**     | `PUT { bufferMinutes: 0 }`. CONFIRMED 13:00–14:00. Slot 14:00–15:00 → available.                |
+
+---
+
+### 18.12 Offene Punkte / Annahmen Iteration 5
+
+- **Annahme (US-30):** `NEXTAUTH_URL` ist in der Production-Env gepflegt
+  und zeigt auf die korrekte Vercel-Domain. Engineers verifizieren das
+  vor dem ersten Reset-Mail-Test.
+- **Annahme (US-31):** Tom liefert die OAuth-Client-IDs/Secrets. Bis
+  dahin können Engineers die OAuth-Buttons mit einem Feature-Flag
+  (`FEATURE_OAUTH_LOGIN=false`) ausblenden — Pw-Login funktioniert
+  weiterhin.
+- **Annahme (US-31):** Für GitHub mit Privacy-Setting („private email")
+  fragt der Server zusätzlich `https://api.github.com/user/emails` ab
+  und nimmt die `primary && verified` Adresse. Falls keine vorhanden:
+  Redirect zu `/konto/login?error=oauth_no_email`.
+- **Annahme (US-32):** Adressen werden nicht gegen eine PLZ-Datenbank
+  validiert (Backlog). 5-stellige PLZ-Form-Validierung reicht für MVP.
+- **Annahme (US-33):** Preisschätzung verwendet Faktor 2 als Range-
+  Obergrenze (z.B. 35€/h × 3h × 2 = 210€). Engineers können das anpassen,
+  wenn Tom andere Wünsche hat (alternativ: nur Min anzeigen, „ca. 105 €").
+- **Annahme (US-33 Ganztag):** „Ganztag" reserviert das volle
+  Verfügbarkeitsfenster des Tages. Wenn Tom keine 6+ Stunden am Stück
+  arbeiten will, soll er das Verfügbarkeitsfenster im Template
+  einschränken.
+- **Annahme (US-34):** Buffer-Wert ist global. Service-spezifische
+  Buffer (z.B. 60min nach Entrümpelung, 15min nach Mülltonnenservice)
+  sind Backlog.
+- **Annahme (US-34):** Buffer wird nur **nach** der Buchung
+  reserviert, **nicht davor**. Pre-Buffer (Anfahrt VOR dem Termin)
+  ist Backlog.
+- [NEEDS INPUT] **Tom:** OAuth-Provider-Credentials (Google + GitHub
+  Client-IDs/Secrets). Ohne diese Werte können Engineers den OAuth-Flow
+  nicht testen — Feature-Flag-Workaround siehe oben.
+- [NEEDS INPUT] **Tom:** Buffer-Default-Wert. Aktuell 30 Min — soll
+  Tom einen anderen Anfangswert? (Kann Tom aber selbst über die
+  Admin-UI ändern — kein Blocker.)
+
+---
+
+### 18.13 Akzeptanzkriterien-Mapping IT5
+
+| Story | Erfüllt durch                                                                                                                        |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| US-30 | `adminBaseUrl()` Helper härtet URL-Auflösung. Pw-Min auf 8 Zeichen. Login-Page-Link prominent unter Pw-Feld. Middleware-Whitelist verifiziert. Reset-Mail-Template (Bestand) wiederverwendet. |
+| US-31 | Neuer NextAuth-Customer-Handler unter `/api/auth/customer/[...nextauth]` mit Google + GitHub. Account-Verknüpfung per E-Mail. Custom-JWT-Cookie weiterhin Authority. `CustomerUser.passwordHash` nullable + neue OAuth-Felder. Login-Page mit OAuth-Buttons. Profil-Page versteckt Pw-Feld bei OAuth-only. Fehlercode `OAUTH_ONLY_ACCOUNT`. |
+| US-32 | Drei neue Adressfelder im Booking-Modell + Schema. `BookingForm` mit Pflicht-Inputs + 5-stellige PLZ-Validierung. Admin-Liste/Detail + Kunden-Detail zeigen Adresse. |
+| US-33 | `Booking.durationMinutes` neu. `<DurationPicker>` mit 8 Kacheln + Preisschätzung. Slot-API erweitert um `?duration=`. Backend berechnet `endTime` (Authority). Ganztag-Sonderwert reserviert volles Fenster. Admin-Liste/Detail zeigt Dauer. |
+| US-34 | `BufferConfig`-Singleton, Default 30. `GET/PUT /api/admin/buffer-config`. Slot-Berechnung berücksichtigt Buffer nur nach CONFIRMED. Admin-UI mit Dropdown. Buffer-Visualisierung im Admin-Kalender. Whitelist [0,15,30,45,60]. |

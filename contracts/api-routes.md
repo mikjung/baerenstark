@@ -3,6 +3,66 @@
 **Verbindliche Spezifikation für Frontend & Backend.**
 Alle Endpunkte sind Next.js Route Handlers unter `src/app/api/`.
 
+**Version:** 1.5.1 (Iteration 5 — Design-Revision nach QA, US-30 bis US-34)
+
+**Änderungen v1.5.1 gegenüber v1.5 (Design-Revision, kein Code-Bruch
+— nur Spec-Schärfung + 1 neuer öffentlicher Endpoint):**
+
+- **BUG-IT5-001 (Critical):** `POST /api/bookings` IT3/IT5-Modus
+  führt jetzt verbindlich Overlap-Check + Buffer-Check + Insert in
+  einer SQLite-Transaktion mit `BEGIN IMMEDIATE`-Semantik aus
+  (Prisma `$transaction` mit `isolationLevel: 'Serializable'`).
+  Schutz gegen Race-Condition bei überlappenden Dauern. Siehe
+  ARCHITECTURE.md §18.5.5.
+- **BUG-IT5-002 (Major):** **NEUER öffentlicher Endpoint**
+  `GET /api/customer/oauth-finalize` — Brücke zwischen
+  NextAuth-OAuth-Callback und unserem `customer-session`-JWT-Cookie
+  (siehe §21.2.1 unten).
+- **BUG-IT5-004 (Major):** Account-Linking-Sicherheit
+  differenziert. `OAUTH_UNVERIFIED_CONFLICT` (422) als neuer
+  Fehlercode (Redirect-Query-Param). Siehe ARCHITECTURE.md §18.9.2.
+- **Deployment-URL:** Produktions-Domain wechselt von
+  `baerenstark.vercel.app` auf `https://www.baerenstark-hausservice.app`.
+  Alle OAuth-Callback-URLs (Google + GitHub) und ENV-Variablen
+  entsprechend aktualisiert.
+
+**Änderungen v1.5 gegenüber v1.4.1:**
+
+- **US-30 (Admin-Pw-Reset UX-Fix):** kein neuer Endpoint; bestehende
+  `POST /api/admin/forgot-password` und `POST /api/admin/reset-password`
+  bleiben funktional. Fix ist UX/Routing-Layer (Middleware-Whitelist
+  verifizieren, BASE_URL-Resolver härten — siehe ARCHITECTURE.md §18.1).
+- **US-31 (OAuth2 Customer-Login):** **Neuer NextAuth-Handler** für
+  Kunden mit Google + GitHub:
+  - `GET/POST /api/auth/customer/[...nextauth]` — NextAuth-Routes für
+    Customer-OAuth (separater Handler-Pfad, kollidiert NICHT mit dem
+    Admin-NextAuth unter `/api/auth/[...nextauth]`).
+  - Nach erfolgreichem OAuth-Callback: Backend findet/erstellt einen
+    `CustomerUser` (Lookup via E-Mail, dann Provider-ID), setzt das
+    bestehende `customer-session`-JWT-Cookie und redirect zu `/konto`.
+  - Bestehender `POST /api/customer/login` bleibt **unverändert** —
+    OAuth ist additiv. Versucht ein Kunde sich per Pw gegen ein
+    OAuth-only-Konto einzuloggen → 422 `OAUTH_ONLY_ACCOUNT`.
+- **US-32 (Adressfeld):** `POST /api/bookings` Body um drei Pflichtfelder
+  erweitert (`addressStreet`, `addressZip`, `addressCity`). Response von
+  `GET /api/bookings`, `GET /api/customer/bookings(/:id)`,
+  `GET /api/admin/upcoming-bookings` enthält die Felder (nullable für
+  Bestand).
+- **US-33 (Buchungsdauer):** `POST /api/bookings` Body um `durationMinutes`
+  erweitert (Pflicht im IT3/IT5-Modus). `GET /api/slots/available` erhält
+  optionalen Query-Param `?duration=NNN` und prüft Verfügbarkeit für die
+  gewünschte Dauer (Default = `slotDurationMinutes` aus dem Template,
+  IT3-rückwärtskompatibel).
+- **US-34 (Buffer-Zeit):** Zwei neue Admin-Endpunkte:
+  - `GET  /api/admin/buffer-config` — aktuellen Wert lesen.
+  - `PUT  /api/admin/buffer-config` — neuen Wert setzen (Whitelist).
+  - `GET /api/slots/available` berücksichtigt Buffer-Blöcke nach
+    CONFIRMED-Buchungen automatisch.
+- **Neue Fehlercodes:** `OAUTH_ONLY_ACCOUNT` (422), `OAUTH_ERROR` (502),
+  `OAUTH_UNVERIFIED_CONFLICT` (422, v1.5.1 Fix BUG-IT5-004 — wird als
+  Redirect-Query-Param `?error=oauth_unverified_conflict` ausgeliefert,
+  nicht als API-Response).
+
 **Version:** 1.4.1 (Iteration 4 Revision — QA-Fixes BUG-401/402, MAJOR-401/402/403/404/405)
 
 **Änderungen v1.4.1 gegenüber v1.4 (QA-Revision, kein Code-Bruch — nur Spec-Klarstellung + 1 neuer öffentlicher Endpoint):**
@@ -105,7 +165,7 @@ Alle Endpunkte sind Next.js Route Handlers unter `src/app/api/`.
 
 | Aspekt          | Wert                                                                       |
 | --------------- | -------------------------------------------------------------------------- |
-| Base-URL (Prod) | `https://baerenstark-hausservice.de`                                       |
+| Base-URL (Prod) | `https://www.baerenstark-hausservice.app` (v1.5.1, vorher `baerenstark.vercel.app`) |
 | Base-URL (Dev)  | `http://localhost:3000`                                                    |
 | Content-Type    | `application/json` (Request & Response) — Ausnahme: `POST /api/upload` `multipart/form-data` |
 | Datumsformat    | ISO 8601 mit Offset (Bestand IT1/IT2). **Iteration 3 zusätzlich**: "YYYY-MM-DD" + "HH:MM" als Berlin-TZ-Strings (kein Offset). |
@@ -2016,3 +2076,620 @@ So bekommt eine eingeloggte Kundin ihre Buchung automatisch zugeordnet
 | `GET /api/payments/session-status`        | 60 / 5 min / IP (sanity-cap; FE-Poll macht max 5 in 5s)    |
 | `POST /api/payments/webhook`              | Kein Limit (Stripe-IPs trusted, Signatur-Check ist Authority). |
 
+
+---
+
+## 21. Iteration 5 — Endpoints (US-30 bis US-34)
+
+### 21.1 Admin-Passwort-Reset (US-30) — UX-Fix, keine API-Änderung
+
+Bestehende Endpoints bleiben unverändert:
+
+- `POST /api/admin/forgot-password` — Body `{ email }`, antwortet
+  immer 200 (Enumeration-Schutz). **Fix v1.5:** BASE_URL wird strikt
+  aus `NEXTAUTH_URL` (mit Fallback `NEXT_PUBLIC_BASE_URL` und
+  zuletzt `VERCEL_URL`) abgeleitet — damit funktioniert der Reset-
+  Link in lokaler Entwicklung (`http://localhost:3000`) UND auf
+  Vercel-Produktion. Reihenfolge der Auswertung ist im Helper
+  `lib/baseUrl.ts.adminBaseUrl()` festgelegt (siehe
+  ARCHITECTURE.md §18.1).
+- `POST /api/admin/reset-password` — Body `{ token, password }`,
+  Mindestlänge 8 Zeichen (war vorher 12; angepasst auf US-30 AC4).
+  Bei abgelaufenem/verbrauchtem Token: 410 `GONE`.
+
+**Mail-Template:** `sendPasswordResetEmail(to, resetUrl)` (Bestand IT4)
+wird wiederverwendet. Engineers müssen sicherstellen, dass die Mail-
+Variante für den Admin-Kontext den korrekten Subject und Sender-Namen
+nutzt — falls Tom das Template optisch trennen möchte, ist
+`sendAdminPasswordResetEmail()` als Alias-Wrapper erlaubt (gleiche
+Implementation, anderer Subject).
+
+**Middleware-Whitelist (verifiziert):**
+```
+PUBLIC_ADMIN_PATHS = [
+  '/admin/login',
+  '/admin/setup',
+  '/admin/passwort-vergessen',  // bereits vorhanden, nicht ändern
+  '/admin/passwort-reset',      // bereits vorhanden, nicht ändern
+];
+```
+
+---
+
+### 21.2 OAuth2 Customer-Login (US-31)
+
+#### `GET/POST /api/auth/customer/[...nextauth]`
+
+**Auth:** öffentlich (NextAuth verwaltet Sessions selbst)
+**Story:** US-31
+
+NextAuth-Handler **speziell für Kunden-OAuth**. Liegt unter dem
+separaten Pfad `/api/auth/customer/...`, damit er nicht mit dem
+bestehenden Admin-NextAuth-Handler unter `/api/auth/[...nextauth]`
+kollidiert.
+
+**Provider-Konfiguration** (in `lib/customer-oauth.ts`):
+
+```ts
+import GoogleProvider from 'next-auth/providers/google';
+import GitHubProvider from 'next-auth/providers/github';
+
+export const customerOauthConfig = {
+  providers: [
+    GoogleProvider({
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      // E-Mail-Scope ist Default; explizit für Klarheit:
+      authorization: { params: { scope: 'openid email profile' } },
+    }),
+    GitHubProvider({
+      clientId: process.env.GITHUB_CLIENT_ID!,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET!,
+      // GitHub liefert E-Mail nicht standardmäßig — Scope erweitern:
+      authorization: { params: { scope: 'read:user user:email' } },
+    }),
+  ],
+  pages: {
+    signIn: '/konto/login',
+    error: '/konto/login',
+  },
+  callbacks: {
+    async signIn({ user, account, profile }) {
+      // v1.5.1 Fix BUG-IT5-002: Cookie-Setzen passiert NICHT hier
+      // (kein Response-Zugriff im signIn-Callback). Stattdessen:
+      // 1. GitHub kein E-Mail? → return '/konto/login?error=oauth_no_email'
+      //    (BUG-IT5-003).
+      // 2. Profile via OAuthProfileNormalizedSchema normalisieren.
+      // 3. handleCustomerOAuthSignIn() → CustomerUser lookup/create
+      //    inkl. Account-Linking-Sicherheits-Check (BUG-IT5-004,
+      //    siehe ARCHITECTURE.md §18.9.2):
+      //      - Lokales Konto verifiziert → Verknüpfung OK.
+      //      - Lokales Konto unverifiziert + gleiche E-Mail
+      //        → return '/konto/login?error=oauth_unverified_conflict'.
+      // 4. Erfolgsfall: customerId in jwt-Callback-Token schreiben
+      //    (s.u.) und return true.
+      return true;
+    },
+    async jwt({ token, user, account, profile }) {
+      // v1.5.1 Fix BUG-IT5-002: customerId für oauth-finalize-Route
+      // hier in den Session-Token schreiben.
+      if (account && profile) {
+        const result = await handleCustomerOAuthSignIn(...);
+        if (result.ok) {
+          token.customerId = result.customerId;
+          token.customerEmail = result.email;
+        }
+      }
+      return token;
+    },
+    async redirect({ url, baseUrl }) {
+      // v1.5.1 Fix BUG-IT5-002: IMMER zur Finalize-Route umleiten.
+      // Open-Redirect-Schutz: externe `url`-Werte werden ignoriert.
+      return `${baseUrl}/api/customer/oauth-finalize`;
+    },
+  },
+  session: {
+    strategy: 'jwt',
+    maxAge: 60,  // NextAuth-eigene Session ist Kurzzeit-Brücke
+                 // bis zum customer-session-Cookie.
+  },
+};
+```
+
+**Verhalten im Detail (v1.5.1, Redirect-basierte Finalize-Route):**
+
+1. Frontend: User klickt „Mit Google anmelden" → `signIn('google',
+   { callbackUrl: '/konto' })` (NextAuth-Helper, mit
+   `basePath: '/api/auth/customer'`).
+2. NextAuth leitet zum Provider, übernimmt Auth-Flow (state, PKCE).
+3. Provider-Callback: `GET /api/auth/customer/callback/google?code=...`
+   (oder `.../callback/github?code=...`).
+4. Im `signIn`-Callback (siehe Code oben):
+   - GitHub-Spezialfall: kein E-Mail → return-String
+     `/konto/login?error=oauth_no_email`.
+   - `profile` wird via `OAuthProfileNormalizedSchema` normalisiert
+     (siehe `lib/customer-oauth.ts.normalizeProfile()`).
+   - **Lookup-Reihenfolge:**
+     a. `findFirst({ where: { oauthProvider, oauthId } })` —
+        Provider-ID-Match (existierender OAuth-Login).
+     b. Wenn nicht gefunden: `findUnique({ where: { email: lc(email) } })`
+        — E-Mail-Match (case-insensitive).
+        - **v1.5.1 Sicherheit (Fix BUG-IT5-004):** Wenn das gefundene
+          Konto `emailVerified: false` hat → return-String
+          `/konto/login?error=oauth_unverified_conflict` (KEINE
+          automatische Verknüpfung). Siehe ARCHITECTURE.md §18.9.2.
+        - Wenn `emailVerified: true` → `update` setzt
+          `oauthProvider`, `oauthId`, `avatarUrl`. `passwordHash`
+          bleibt **unangetastet** (Konto behält Pw + OAuth parallel).
+     c. Wenn nicht gefunden: `create(...)` — neuer Account, mit
+        `emailVerified: true`, `passwordHash: null`,
+        `oauthProvider/oauthId/avatarUrl` aus Profile.
+5. `jwt`-Callback schreibt `customerId` und `customerEmail` in den
+   NextAuth-Session-Token (HMAC-signiert mit `AUTH_SECRET`).
+6. `redirect`-Callback liefert
+   `${baseUrl}/api/customer/oauth-finalize` zurück.
+7. Browser folgt 302 zu `GET /api/customer/oauth-finalize`
+   (siehe §21.2.1 unten):
+   - Liest NextAuth-Session via `auth()`.
+   - Setzt `customer-session`-Cookie (HttpOnly, Secure, SameSite=Lax,
+     7 Tage) via `setCustomerSession(customerId, email)`.
+   - 302 Redirect zu `/konto?oauth=success`.
+8. Frontend (`/konto`) erkennt `?oauth=success`-Param und kann
+   optional einen Erfolgs-Toast anzeigen.
+
+**Fehler-Behandlung:**
+- Provider-Fehler / Flow-Abbruch → Redirect zu
+  `/konto/login?error=oauth_error`. Frontend zeigt deutsche Meldung
+  „Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut."
+- Wenn Provider keine E-Mail liefert (GitHub mit Privacy-Setting) →
+  Redirect zu `/konto/login?error=oauth_no_email` mit Hinweis „Bitte
+  E-Mail-Sichtbarkeit im Provider freigeben."
+- Wenn lokales Konto mit gleicher E-Mail existiert und unverifiziert
+  ist (v1.5.1) → Redirect zu
+  `/konto/login?error=oauth_unverified_conflict` mit Hinweis „Bitte
+  E-Mail bestätigen oder Passwort-Reset nutzen."
+- Wenn `email` von einem **bestätigten anderen Account** mit anderer
+  Provider-ID belegt ist (theoretisch unmöglich, da unsere Logik den
+  E-Mail-Lookup zur Verknüpfung nutzt) → Redirect zu
+  `/konto/login?error=oauth_email_conflict`.
+- Wenn `oauth-finalize` ohne aktive NextAuth-Session aufgerufen wird
+  → Redirect zu `/konto/login?error=oauth_finalize_failed`.
+
+**Logout:** Bestehender `POST /api/customer/logout` löscht das
+`customer-session`-Cookie. **v1.5.1:** Engineers ergänzen den Logout-
+Handler um einen zusätzlichen `signOut({ basePath:
+'/api/auth/customer', redirect: false })`-Call, damit die kurzlebige
+NextAuth-Customer-Session ebenfalls invalidiert wird (alternativ:
+Cookies `next-auth.session-token` mit Path `/api/auth/customer`
+manuell löschen).
+
+**Provider-Profile-Mapping:**
+
+| Provider | E-Mail            | Vorname        | Nachname                        | Avatar       |
+| -------- | ----------------- | -------------- | ------------------------------- | ------------ |
+| Google   | `profile.email`   | `given_name`   | `family_name`                   | `picture`    |
+| GitHub   | `profile.email`*  | split(`name`)[0] | split(`name`).slice(1).join(' ')| `avatar_url` |
+
+*GitHub liefert `email` nur wenn der User eine öffentliche oder
+verifizierte primäre E-Mail hat. Engineers müssen ggf. den `emails`-
+Endpoint zusätzlich abfragen (`https://api.github.com/user/emails`)
+und die `primary && verified` Adresse nehmen.
+
+**Rate-Limiting:** keine eigenen Limits (NextAuth/Provider handhaben
+das). Schutz gegen Bot-Abuse durch CAPTCHA ist Backlog.
+
+---
+
+### 21.2.1 OAuth-Finalize-Route (US-31, v1.5.1 Fix BUG-IT5-002)
+
+#### `GET /api/customer/oauth-finalize`
+
+**Auth:** öffentlich (liest die NextAuth-Customer-Session via
+`auth()`-Helper aus `lib/customer-oauth.ts`).
+**Story:** US-31, Architektur-Fix BUG-IT5-002.
+
+Brücken-Endpoint zwischen NextAuth-OAuth-Callback und unserer
+Custom-Auth-Schicht (`customer-session`-JWT-Cookie). Setzt nach
+erfolgreichem OAuth-Flow das langlebige (7d) `customer-session`-
+Cookie und leitet auf `/konto` weiter.
+
+**Hintergrund:** NextAuth v5's `signIn`-Callback hat keinen
+Response-Zugriff — wir können dort kein Set-Cookie an die Antwort
+hängen, das auf einer DB-ermittelten CustomerId basiert. Lösung:
+NextAuth schreibt die CustomerId in seinen eigenen Session-Token
+(im `jwt`-Callback), redirectet zu dieser Finalize-Route, und die
+Route liest die NextAuth-Session und setzt unser Custom-Cookie.
+
+**Query-Parameter:**
+
+| Name       | Pflicht | Validierung                                                                          |
+| ---------- | ------- | ------------------------------------------------------------------------------------ |
+| —          | —       | Keine. Alle Daten kommen aus der NextAuth-Customer-Session (HMAC-signiert).          |
+
+**Verhalten:**
+
+1. `auth()` aus `lib/customer-oauth.ts` aufrufen — liefert die
+   NextAuth-Customer-Session mit `token.customerId` und
+   `token.customerEmail` (vom `jwt`-Callback gesetzt).
+2. Wenn keine Session oder `customerId` fehlt:
+   - 302 Redirect zu
+     `/konto/login?error=oauth_finalize_failed`.
+3. Sonst:
+   - Optional: CustomerUser via `prisma.customerUser.findUnique({
+     where: { id: customerId } })` validieren (defense-in-depth —
+     verhindert verwaiste Sessions, falls Konto inzwischen gelöscht
+     wurde).
+   - `setCustomerSession(response, customerId, email)` (Bestand IT4,
+     `lib/customer-auth-server.ts`) → setzt
+     `customer-session`-Cookie (HttpOnly, Secure in Prod,
+     SameSite=Lax, 7 Tage TTL).
+   - 302 Redirect zu `/konto?oauth=success`.
+
+**Response 302** (immer Redirect, kein JSON-Body):
+
+| Header           | Wert                                              |
+| ---------------- | ------------------------------------------------- |
+| `Location`       | `/konto?oauth=success` (Erfolg) oder `/konto/login?error=oauth_finalize_failed` |
+| `Set-Cookie`     | `customer-session=<jwt>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800` (nur bei Erfolg) |
+| `Cache-Control`  | `no-store`                                        |
+
+**Beispiel-Flow:**
+
+```
+1. Browser: GET /api/auth/customer/callback/google?code=abc&state=xyz
+   ← NextAuth-Handler verarbeitet OAuth-Response, setzt
+     `next-auth.session-token` (60s)
+   ← redirect-Callback returns "https://www.baerenstark-hausservice.app/api/customer/oauth-finalize"
+   → 302 Location: /api/customer/oauth-finalize
+
+2. Browser: GET /api/customer/oauth-finalize
+   (mit Cookie next-auth.session-token=...)
+   ← auth() decodiert Token, liefert { customerId: 'cuid123', email: 'user@example.com' }
+   ← setCustomerSession() setzt customer-session-Cookie
+   → 302 Location: /konto?oauth=success
+   → Set-Cookie: customer-session=<7d-jwt>
+
+3. Browser: GET /konto?oauth=success
+   (mit Cookie customer-session=...)
+   ← Page-Handler liest Cookie via getCustomerFromSession()
+   → 200 Render Kundenkonto-Übersicht
+```
+
+**Fehler:**
+
+| Status | Code                       | Wann?                                                                  |
+| ------ | -------------------------- | ---------------------------------------------------------------------- |
+| 302    | (Redirect mit Error-Param) | Keine NextAuth-Session vorhanden → `/konto/login?error=oauth_finalize_failed`. |
+| 302    | (Redirect mit Error-Param) | CustomerUser nicht in DB (gelöscht zwischen jwt-Callback und Finalize) → `/konto/login?error=oauth_finalize_failed`. |
+
+**Sicherheits-Eigenschaften:**
+
+- Idempotent — mehrfacher Aufruf während gültiger NextAuth-Session
+  setzt einfach erneut das Cookie. Kein One-Time-Token nötig, weil
+  NextAuth-Session selbst HMAC-signiert ist.
+- Kein User-kontrollierter Input wird vertraut — `customerId` kommt
+  ausschließlich aus dem signierten NextAuth-Token.
+- Open-Redirect-sicher — Ziel ist hardcoded `/konto?oauth=success`
+  (keine `?next=`-Param-Verarbeitung).
+- Kein Rate-Limit nötig (NextAuth-Auth + günstige Cookie-Set-
+  Operation).
+
+**Cache-Control:** `no-store` (jede Antwort ist user-spezifisch).
+
+**Engineering-Hinweis:** Die NextAuth-Customer-Session-Cookie hat
+einen kurzen `maxAge: 60` (Session-Konfiguration in
+`lib/customer-oauth.ts`) — d.h. sie ist nur als Brücke zwischen
+Provider-Callback und Finalize-Route gedacht. Nach 60s expired sie;
+unser `customer-session`-Cookie ist dann die alleinige Authority.
+
+---
+
+### 21.3 Buchungs-Endpoint-Erweiterung (US-32 + US-33)
+
+#### `POST /api/bookings` — Body-Erweiterung
+
+**Auth:** öffentlich (mit optionalem Customer-Session-Cookie)
+**Story:** US-04, US-32, US-33
+
+Body **erweitert um:**
+
+```json
+{
+  "date": "2026-05-15",
+  "startTime": "09:00",
+  "endTime": "13:00",
+  "durationMinutes": 240,
+  "customerName": "Maria Müller",
+  "customerPhone": "0157-12345678",
+  "customerEmail": "maria@example.com",
+  "service": "entruempelung",
+  "description": "Keller entrümpeln, ca. 30 m³",
+  "addressStreet": "Musterstraße 12",
+  "addressZip": "64283",
+  "addressCity": "Darmstadt",
+  "attachmentIds": ["clatt1..."],
+  "privacyAccepted": true
+}
+```
+
+**Neue Felder:**
+
+| Feld              | Typ    | Pflicht | Validierung                                                                   |
+| ----------------- | ------ | ------- | ----------------------------------------------------------------------------- |
+| `durationMinutes` | number | ja*     | One of `[60, 120, 180, 240, 300, 360, 480]` ODER `-1` (Ganztag).              |
+| `addressStreet`   | string | ja*     | 3–100 Zeichen, getrimmt.                                                      |
+| `addressZip`      | string | ja*     | Genau 5 Ziffern.                                                              |
+| `addressCity`     | string | ja*     | 2–100 Zeichen, getrimmt.                                                      |
+
+*Pflicht im IT3/IT5-Modus (mit `date`/`startTime`); im Slot-Bestand-Modus
+optional / ignoriert (Re-Booking-Flow).
+
+**Server-Verhalten (IT5-Modus):**
+
+1. Validierung wie IT3.
+2. **Ganztag-Auflösung:** Wenn `durationMinutes === -1`:
+   - `getAvailabilityForDate(date)` aufrufen.
+   - Wenn Tag inaktiv → 409 `CONFLICT`.
+   - `endTime` = `startTime` ist NICHT relevant — Backend setzt
+     `startTime = template.startTime` und `endTime = template.endTime`
+     (Termin reserviert das gesamte Verfügbarkeitsfenster).
+   - `durationMinutes = endTimeMin - startTimeMin` wird persistiert.
+3. **Standard-Dauer:** Wenn `durationMinutes ∈ [60..480]`:
+   - Backend berechnet `endTime = startTime + durationMinutes`.
+   - Wenn das vom Frontend mitgesendete `endTime` abweicht → BE
+     überschreibt es (durationMinutes ist Authority).
+   - Prüfen: `endTimeMin <= templateEndTimeMin` (Fenster reicht aus).
+     Wenn nicht → 409 `CONFLICT` mit `field: 'durationMinutes'`,
+     Message „Die gewählte Dauer passt nicht in den verfügbaren
+     Zeitraum."
+4. **Buffer-Berücksichtigung:** Bei Insert wird der `uniq_active_booking_per_timeslot`-
+   Index gegen Doppelbuchung schützen. Buffer-Konflikte werden vom
+   Slot-API (nicht vom Insert-Endpoint) gefiltert — wenn Frontend
+   einen Buffer-konfliktbehafteten Slot trotzdem postet, ist das
+   ein Bug auf FE-Seite, das BE würde dennoch akzeptieren.
+   **Engineers-Hinweis:** ZUSÄTZLICH zur Index-Prüfung führt das BE
+   einen expliziten Buffer-Check durch (siehe §21.5) und antwortet
+   bei Verletzung mit 409 `CONFLICT`.
+5. Persistenz inkl. Adresse + Dauer + (berechneter) `endTime`.
+
+**Fehler:** unverändert (siehe §2), zusätzlich:
+- 409 `CONFLICT` mit `field: 'durationMinutes'` — Dauer passt nicht.
+- 409 `CONFLICT` mit Code-Hinweis „BUFFER_BLOCKED" in `message` —
+  Buffer eines bestehenden CONFIRMED-Termins überlappt.
+
+---
+
+### 21.4 Slot-Verfügbarkeit (US-33 + US-34)
+
+#### `GET /api/slots/available?date=YYYY-MM-DD&duration=NNN`
+
+**Auth:** öffentlich
+**Story:** US-17, US-33, US-34
+
+**Query (erweitert):**
+
+| Name       | Typ    | Pflicht | Validierung                                                                                |
+| ---------- | ------ | ------- | ------------------------------------------------------------------------------------------ |
+| `date`     | string | ja      | "YYYY-MM-DD".                                                                              |
+| `duration` | number | nein    | One of `[60, 120, 180, 240, 300, 360, 480]` oder `-1` (Ganztag). Default = Template-Dauer. |
+
+**Algorithmus (erweitert für US-33 + US-34):**
+
+```ts
+async function computeAvailableSlots(date: string, duration?: number):
+  Promise<{ date, isDayActive, slots: AvailableTimeSlot[], overrideReason? }>
+{
+  // 1. Vergangenheit / inaktiver Tag → leer (wie IT3).
+  // 2. Resolver liefert (startTime, endTime, slotDurationMinutes).
+  // 3. Effektive Dauer:
+  const effectiveDuration =
+    duration === BOOKING_DURATION_ALL_DAY
+      ? endMin - startMin               // Ganztag → gesamtes Fenster
+      : duration ?? day.slotDurationMinutes;
+
+  // 4. Slots im Fenster generieren — Schritt = Template-Slot-Dauer
+  //    (z.B. 30 Min), Block-Größe = effectiveDuration:
+  const blocks = [];
+  let cur = startMin;
+  while (cur + effectiveDuration <= endMin) {
+    blocks.push({
+      startTime: minutesToTime(cur),
+      endTime: minutesToTime(cur + effectiveDuration),
+    });
+    cur += day.slotDurationMinutes;     // Schrittweite
+  }
+
+  // 5. Belegte Zeiträume aus aktiven Buchungen ermitteln:
+  const activeBookings = await prisma.booking.findMany({
+    where: { date, status: { in: ACTIVE_BOOKING_STATUSES } },
+    select: { startTime: true, endTime: true, status: true },
+  });
+
+  // 6. US-34: Buffer aus BufferConfig laden (Singleton).
+  const { bufferMinutes } = await getBufferConfig();
+
+  // 7. Pro Block prüfen:
+  //    - Überlappung mit aktiver Buchung [bookingStart, bookingEnd) → blocked.
+  //    - Überlappung mit Buffer [bookingEnd, bookingEnd + bufferMinutes)
+  //      EINER CONFIRMED-Buchung → blocked.
+  for (const block of blocks) {
+    const bStart = timeToMinutes(block.startTime);
+    const bEnd   = timeToMinutes(block.endTime);
+
+    let available = true;
+    for (const b of activeBookings) {
+      if (!b.startTime || !b.endTime) continue;
+      const aStart = timeToMinutes(b.startTime);
+      const aEnd   = timeToMinutes(b.endTime);
+
+      // Buchungs-Overlap
+      if (bStart < aEnd && bEnd > aStart) { available = false; break; }
+
+      // Buffer-Overlap (nur nach CONFIRMED)
+      if (b.status === 'CONFIRMED') {
+        const bufferEnd = aEnd + bufferMinutes;
+        if (bStart < bufferEnd && bEnd > aEnd) { available = false; break; }
+      }
+    }
+    block.available = available;
+  }
+
+  return { date, isDayActive: true, slots: blocks };
+}
+```
+
+**Wichtige Eigenschaften:**
+
+- **Schrittweite (`cur += day.slotDurationMinutes`)** ist die Template-
+  Standard-Dauer (typ. 30 oder 60 Min) — nicht die effektive Dauer.
+  So sieht der Kunde Start-Optionen alle 30 Min, auch wenn er 4h
+  buchen möchte (z.B. 08:00–12:00, 08:30–12:30, 09:00–13:00 …).
+- **Buffer wirkt nur nach CONFIRMED.** PENDING und COUNTER_PROPOSED
+  blockieren ihren eigenen Slot (Doppelbuchung), aber **keinen
+  Buffer**, weil Tom den Termin noch nicht bestätigt hat.
+- **Kein Buffer am Tag-Ende:** Wenn eine CONFIRMED-Buchung um
+  16:30 endet und das Fenster um 17:00 schließt, wird der Buffer
+  (z.B. 30 Min) nominell bis 17:00 reichen — es können ohnehin
+  keine Slots mehr generiert werden (Block würde über 17:00
+  hinausgehen). Kein Sonderfall nötig.
+
+**Response (unverändert):** `AvailableSlotsResponseSchema`.
+
+`Cache-Control: no-store`.
+
+---
+
+### 21.5 Buffer-Config-Verwaltung (US-34 Admin)
+
+#### `GET /api/admin/buffer-config`
+
+**Auth:** Admin
+**Story:** US-34
+
+Liefert den aktuellen Buffer-Wert. Seedet on-the-fly mit Default 30,
+falls noch kein Datensatz existiert.
+
+**Response 200** (`BufferConfigSchema`):
+
+```json
+{
+  "data": {
+    "bufferMinutes": 30,
+    "updatedAt": "2026-05-02T13:42:00.000Z"
+  }
+}
+```
+
+`Cache-Control: no-store`.
+
+**Fehler:**
+- 401 `UNAUTHORIZED`.
+
+---
+
+#### `PUT /api/admin/buffer-config`
+
+**Auth:** Admin
+**Story:** US-34
+
+Setzt einen neuen Buffer-Wert. Whitelist-validiert auf [0, 15, 30, 45, 60].
+
+**Request Body** (`UpdateBufferConfigSchema`):
+
+```json
+{
+  "bufferMinutes": 45
+}
+```
+
+**Verhalten:**
+
+1. Auth-Check (Admin-Session).
+2. Whitelist prüfen.
+3. Singleton via `prisma.bufferConfig.upsert(...)` aktualisieren
+   (Engineering: feste ID `'global'` ODER ersten Datensatz updaten —
+   beides ist akzeptabel; im Helper `getBufferConfig()` festlegen).
+4. `revalidateTag('available-slots')` (damit Slot-API frische Werte
+   liefert).
+5. 200 OK mit aktualisiertem Wert.
+
+**Response 200:** `BufferConfigSchema`.
+
+**Fehler:**
+- 400 `VALIDATION_ERROR` (Wert nicht in Whitelist).
+- 401 `UNAUTHORIZED`.
+
+---
+
+### 21.6 Endpoint-zu-Story-Matrix (Iteration 5)
+
+| Endpoint                                       | US-30 | US-31 | US-32 | US-33 | US-34 |
+| ---------------------------------------------- | :---: | :---: | :---: | :---: | :---: |
+| `POST /api/admin/forgot-password` (UX-Fix)     |   ✓   |       |       |       |       |
+| `POST /api/admin/reset-password` (UX-Fix)      |   ✓   |       |       |       |       |
+| `GET/POST /api/auth/customer/[...nextauth]`    |       |   ✓   |       |       |       |
+| `GET /api/customer/oauth-finalize` (v1.5.1)    |       |   ✓   |       |       |       |
+| `POST /api/bookings` (erweitert: Adresse+Dauer)|       |       |   ✓   |   ✓   |       |
+| `GET /api/bookings` (Response erweitert)       |       |       |   ✓   |   ✓   |       |
+| `GET /api/customer/bookings` (Response erweitert)|     |       |   ✓   |   ✓   |       |
+| `GET /api/customer/bookings/:id` (Response erweitert)|  |       |   ✓   |   ✓   |       |
+| `GET /api/admin/upcoming-bookings` (Response erweitert)| |       |   ✓   |   ✓   |       |
+| `GET /api/slots/available?duration=...`        |       |       |       |   ✓   |   ✓   |
+| `GET /api/admin/buffer-config`                 |       |       |       |       |   ✓   |
+| `PUT /api/admin/buffer-config`                 |       |       |       |       |   ✓   |
+
+---
+
+### 21.7 Frontend-Aufrufer-Mapping (Iteration 5)
+
+| Endpoint                                       | Aufgerufen von                                                                    |
+| ---------------------------------------------- | --------------------------------------------------------------------------------- |
+| `POST /api/admin/forgot-password`              | `app/admin/passwort-vergessen/page.tsx` (Bestand, Verbesserungen UX)              |
+| `POST /api/admin/reset-password`               | `app/admin/passwort-reset/page.tsx` (Bestand, Verbesserungen UX)                  |
+| `signIn('google', ...)` / `signIn('github', ...)` | `app/konto/login/page.tsx` — neue OAuth-Buttons unter dem Pw-Formular            |
+| `GET /api/customer/oauth-finalize` (v1.5.1)    | Nicht direkt aus FE — Browser-Redirect aus NextAuth-`redirect`-Callback nach OAuth. |
+| `POST /api/bookings` (erweitert)               | `components/booking/BookingForm.tsx` (Adressfelder + Dauer-Picker neu)            |
+| `GET /api/slots/available?duration=...`        | `components/booking/TimeSlotPicker.tsx` (umgebaut: ruft mit ausgewählter Dauer)   |
+| `GET /api/admin/buffer-config`                 | `app/admin/availability/page.tsx` (Buffer-Section neu)                             |
+| `PUT /api/admin/buffer-config`                 | `components/admin/BufferConfigForm.tsx` (NEU IT5)                                  |
+
+---
+
+### 21.8 ENV-Variablen (Iteration 5 ergänzt)
+
+| Variable                | Pflicht                       | Wert / Beispiel             | Zweck                                                    |
+| ----------------------- | ----------------------------- | --------------------------- | -------------------------------------------------------- |
+| `GOOGLE_CLIENT_ID`      | nur wenn Google-Login aktiv   | `<Google OAuth Client-ID>`  | NextAuth Google-Provider (US-31).                         |
+| `GOOGLE_CLIENT_SECRET`  | nur wenn Google-Login aktiv   | `<Google OAuth Secret>`     | NextAuth Google-Provider (US-31).                         |
+| `GITHUB_CLIENT_ID`      | nur wenn GitHub-Login aktiv   | `<GitHub OAuth App ID>`     | NextAuth GitHub-Provider (US-31).                         |
+| `GITHUB_CLIENT_SECRET`  | nur wenn GitHub-Login aktiv   | `<GitHub OAuth Secret>`     | NextAuth GitHub-Provider (US-31).                         |
+| `NEXTAUTH_URL`          | ja (bereits vorhanden)        | `https://www.baerenstark-hausservice.app` (Prod, v1.5.1) | Wird für Reset-Mail-Links + OAuth-Callback-URLs genutzt. |
+
+**OAuth Callback-URLs (für Provider-Konfiguration, v1.5.1 aktualisiert):**
+
+| Provider     | Callback-URL                                                                       |
+| ------------ | ---------------------------------------------------------------------------------- |
+| Google       | `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google`        |
+| GitHub       | `https://www.baerenstark-hausservice.app/api/auth/customer/callback/github`        |
+| Google (Dev) | `http://localhost:3000/api/auth/customer/callback/google`                          |
+| GitHub (Dev) | `http://localhost:3000/api/auth/customer/callback/github`                          |
+
+Tom (Inhaber) muss die OAuth-Apps in den Developer-Konsolen anlegen
+und die Callback-URLs eintragen, dann Client-ID + Secret an Engineers
+für `.env.local` und Vercel-Environment liefern. **Hinweis v1.5.1:**
+Die Produktions-URL hat sich von `baerenstark.vercel.app` auf
+`www.baerenstark-hausservice.app` geändert — bestehende OAuth-Apps in
+Google Cloud Console und GitHub Developer Settings müssen aktualisiert
+werden, damit der OAuth-Flow nach dem Domain-Wechsel weiter
+funktioniert.
+
+---
+
+### 21.9 Rate-Limits (Iteration 5 ergänzt)
+
+| Endpoint                                  | Rate-Limit                                                |
+| ----------------------------------------- | --------------------------------------------------------- |
+| `GET/POST /api/auth/customer/[...nextauth]` | NextAuth-intern; kein eigenes Limit (Provider rate-limited). |
+| `GET /api/customer/oauth-finalize` (v1.5.1) | Kein eigenes Limit (NextAuth-Session ist Authority + nur Cookie-Set). |
+| `GET /api/admin/buffer-config`            | Kein Limit (Admin-only).                                   |
+| `PUT /api/admin/buffer-config`            | 30 / 60 min / Admin-Session (Sanity-Cap gegen Tippfehler). |
