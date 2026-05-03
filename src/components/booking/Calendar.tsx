@@ -310,6 +310,7 @@ export function Calendar({ selectedDate, onSelectDay, onBlockedClick }: Calendar
                       : `${cell.date} nicht verfügbar`;
 
                 return (
+                  // eslint-disable-next-line jsx-a11y/role-supports-aria-props
                   <button
                     key={cell.date}
                     type="button"
