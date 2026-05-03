@@ -6,8 +6,7 @@
  * Zeitfenster.
  */
 
-import { redirect } from 'next/navigation';
-import { auth } from '@/lib/auth';
+import { requireActiveAdmin } from '@/lib/require-admin';
 import { AdminDashboard } from '@/components/admin/AdminDashboard';
 
 export const metadata = {
@@ -18,9 +17,7 @@ export const metadata = {
 export const dynamic = 'force-dynamic';
 
 export default async function AdminPage() {
-  const session = await auth();
-  if (!session?.user) {
-    redirect('/admin/login');
-  }
+  // D2: Status-Check (DISABLED → redirect /admin/login?error=account_disabled).
+  await requireActiveAdmin();
   return <AdminDashboard />;
 }

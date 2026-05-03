@@ -1,10 +1,17 @@
 /**
- * NextAuth-Customer-Konfiguration für OAuth2-Login (Iteration 5 / US-31).
+ * NextAuth-Customer-Konfiguration für OAuth2-Login.
+ *
+ * Iteration 6 (US-IT6-05) — Auth-Bereinigung:
+ *   Provider auf **Google + Facebook** reduziert. GitHub-Provider
+ *   entfernt. Credentials/Email-Magic-Link existieren nicht mehr für
+ *   Kunden — die Endpoints `/api/customer/{login,register,
+ *   forgot-password,reset-password,resend-verification,verify}` wurden
+ *   in IT6 (D3-Resolution) **entfernt** und liefern jetzt 404.
  *
  * Diese Instanz läuft separat vom Admin-NextAuth (siehe `lib/auth.ts`).
  *
  *   Pfad:               /api/auth/customer/[...nextauth]
- *   Provider:           Google + GitHub
+ *   Provider:           Google + Facebook  (IT6 — vorher Google + GitHub)
  *   Session-Strategie:  JWT, kurze TTL (60s — Brücke zur Finalize-Route)
  *
  * Architektur-Hinweis (§18.2.4 ARCHITECTURE.md):
@@ -14,8 +21,16 @@
  *   `GET /api/customer/oauth-finalize` setzt das Cookie nach
  *   erfolgreichem OAuth-Flow.
  *
+ * Google-„Bad request"-Fix (US-IT6-05):
+ *   - `trustHost: true` ist gesetzt (verhindert Vercel-Tunnel-Probleme).
+ *   - Authorization-Scope ist explizit `openid email profile`.
+ *   - `NEXTAUTH_URL` MUSS exakt der Produktions-Domain entsprechen
+ *     (kein Trailing-Slash). Authorized Redirect URI in der
+ *     Google Cloud Console: `${NEXTAUTH_URL}/api/auth/customer/callback/google`.
+ *     Schritt-für-Schritt-Runbook: `docs/AUTH_GOOGLE_FIX_RUNBOOK.md`.
+ *
  * Feature-Flag:
- *   Wenn weder `GOOGLE_CLIENT_ID` noch `GITHUB_CLIENT_ID` gesetzt sind,
+ *   Wenn weder `GOOGLE_CLIENT_ID` noch `FACEBOOK_CLIENT_ID` gesetzt sind,
  *   liefert die Konfiguration eine leere Provider-Liste. Die Routen-
  *   Handler in `app/api/auth/customer/[...nextauth]/route.ts` antworten
  *   dann mit 503 (siehe dort).
@@ -23,7 +38,7 @@
 
 import NextAuth from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
-import GitHubProvider from 'next-auth/providers/github';
+import FacebookProvider from 'next-auth/providers/facebook';
 import type { NextAuthConfig } from 'next-auth';
 import { prisma } from './prisma';
 import {
@@ -41,6 +56,8 @@ import { customerBaseUrl } from './baseUrl';
 /**
  * `true`, wenn mindestens ein Provider konfiguriert ist UND der Engineer
  * das Feature nicht explizit per `FEATURE_OAUTH_LOGIN=false` deaktiviert hat.
+ *
+ * Iteration 6 (US-IT6-05): Google + Facebook (GitHub raus).
  */
 export function isCustomerOAuthEnabled(): boolean {
   const flag = (process.env.FEATURE_OAUTH_LOGIN ?? '').toLowerCase();
@@ -49,10 +66,10 @@ export function isCustomerOAuthEnabled(): boolean {
   const hasGoogle = !!(
     process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
   );
-  const hasGitHub = !!(
-    process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET
+  const hasFacebook = !!(
+    process.env.FACEBOOK_CLIENT_ID && process.env.FACEBOOK_CLIENT_SECRET
   );
-  return hasGoogle || hasGitHub;
+  return hasGoogle || hasFacebook;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,12 +86,13 @@ interface RawProfileGoogle {
   sub?: string;
 }
 
-interface RawProfileGitHub {
+interface RawProfileFacebook {
   email?: string | null;
   name?: string | null;
-  login?: string;
-  avatar_url?: string;
-  id?: number | string;
+  first_name?: string | null;
+  last_name?: string | null;
+  picture?: { data?: { url?: string } } | string | null;
+  id?: string;
 }
 
 interface AccountSlim {
@@ -122,17 +140,23 @@ export function normalizeProfile(
         p.family_name?.trim() || splitName(p.name).lastName || '—',
       avatarUrl: p.picture ?? null,
     };
-  } else if (provider === 'github') {
-    const p = profile as RawProfileGitHub;
+  } else if (provider === 'facebook') {
+    const p = profile as RawProfileFacebook;
     if (!p.email) return null;
     const split = splitName(p.name);
+    const picture =
+      typeof p.picture === 'object' && p.picture && 'data' in p.picture
+        ? p.picture.data?.url ?? null
+        : typeof p.picture === 'string'
+          ? p.picture
+          : null;
     candidate = {
-      provider: 'github',
-      oauthId: account?.providerAccountId ?? (p.id != null ? String(p.id) : ''),
+      provider: 'facebook',
+      oauthId: account?.providerAccountId ?? (p.id ?? ''),
       email: p.email,
-      firstName: split.firstName || p.login || 'Kunde',
-      lastName: split.lastName || '—',
-      avatarUrl: p.avatar_url ?? null,
+      firstName: p.first_name?.trim() || split.firstName || 'Kunde',
+      lastName: p.last_name?.trim() || split.lastName || '—',
+      avatarUrl: picture,
     };
   } else {
     return null;
@@ -246,21 +270,25 @@ export async function handleCustomerOAuthSignIn(
 
 function buildProviders(): NextAuthConfig['providers'] {
   const providers: NextAuthConfig['providers'] = [];
+  // Iteration 6 (US-IT6-05): Google + Facebook only. GitHub-Provider raus.
   if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     providers.push(
       GoogleProvider({
         clientId: process.env.GOOGLE_CLIENT_ID,
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        // Explizit `openid email profile` — Google-„Bad request"-Fix
+        // (US-IT6-05): falsche Scopes oder fehlendes `openid` triggern
+        // den Fehler. Siehe `docs/AUTH_GOOGLE_FIX_RUNBOOK.md`.
         authorization: { params: { scope: 'openid email profile' } },
       }),
     );
   }
-  if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+  if (process.env.FACEBOOK_CLIENT_ID && process.env.FACEBOOK_CLIENT_SECRET) {
     providers.push(
-      GitHubProvider({
-        clientId: process.env.GITHUB_CLIENT_ID,
-        clientSecret: process.env.GITHUB_CLIENT_SECRET,
-        authorization: { params: { scope: 'read:user user:email' } },
+      FacebookProvider({
+        clientId: process.env.FACEBOOK_CLIENT_ID,
+        clientSecret: process.env.FACEBOOK_CLIENT_SECRET,
+        authorization: { params: { scope: 'email public_profile' } },
       }),
     );
   }

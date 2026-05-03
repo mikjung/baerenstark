@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { BookingForm } from '@/components/booking/BookingForm';
 import { Calendar } from '@/components/booking/Calendar';
+import { BookingCalendar } from '@/components/booking/BookingCalendar';
 import { SlotList } from '@/components/booking/SlotList';
 import {
   TimeSlotPicker,
@@ -250,7 +251,14 @@ export function BookingClient() {
         >
           1. Wähle einen Tag
         </h2>
-        <Calendar selectedDate={selectedDate} onSelectDay={handleDaySelect} />
+        {isRebookMode ? (
+          <Calendar selectedDate={selectedDate} onSelectDay={handleDaySelect} />
+        ) : (
+          <BookingCalendar
+            selectedDate={selectedDate}
+            onSelectDay={handleDaySelect}
+          />
+        )}
       </section>
 
       {showDurationPicker && (

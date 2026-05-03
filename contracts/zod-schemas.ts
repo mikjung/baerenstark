@@ -1,11 +1,58 @@
 /**
- * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.5 — Iteration 5)
+ * Bärenstark Hausservice — Geteilte Zod-Schemas (v1.6.1 — Iteration 6, QA-Revision)
  *
  * Diese Datei ist die einzige Quelle der Wahrheit für die Form
  * der API-Payloads. Sowohl Frontend (Forms, Fetch-Wrapper) als auch
  * Backend (API-Routes) importieren von hier.
  *
  * Pfad in der Live-App: src/lib/schemas.ts (synchron mit dieser Datei).
+ *
+ * Änderungen v1.6.1 (QA-Revision nach `QA_DESIGN_REVIEW_IT6.md`,
+ * 2026-05-03 — verbindlich, siehe `ARCHITECTURE_IT6.md` Anhang B):
+ *   - **F3 (DTO-Leak strukturell):** `CustomerUserPublicSchema`,
+ *     `CustomerBookingSchema` und `PublicReviewSchema` sind auf
+ *     `.strict()` umgestellt. Output-Validierung im Customer-Pfad ist
+ *     Pflicht (siehe Anhang B §17.3). Helper
+ *     `selectCustomerUserPublic()` / `selectCustomerUserAdmin()` leben
+ *     in `src/lib/dto/user.ts` und sind verbindlich für jeden
+ *     Prisma-Customer-Select.
+ *   - **F1 (Bootstrap-Schutz):** Neue Fehlercodes
+ *     `BOOTSTRAP_NOT_ALLOWED` (403) und `SETUP_NOT_CONFIGURED` (503).
+ *     Engineering ergänzt `ApiErrorSchema.error.code` entsprechend.
+ *   - **m1 (Public-Reviews):** `GET /api/reviews` rendert ausschließlich
+ *     `PublicReviewSchema.strict()` — keine `customerId`/`bookingId`,
+ *     `customerName` Format `"Vorname N."`.
+ *
+ * Änderungen v1.6 (Iteration 6 — US-IT6-01 bis US-IT6-09):
+ *   - **US-IT6-01 (Multi-Admin):** `UserStatusSchema`,
+ *     `CreateAdminSchema`, `UpdateAdminSchema`, `AdminListItemSchema`.
+ *     Konstanten `ADMIN_PASSWORD_MIN_LENGTH` (12).
+ *   - **US-IT6-02 (Kalender):** `CalendarEventSchema`,
+ *     `AdminCalendarEventsQuerySchema`, `AvailabilityCalendarDaySchema`,
+ *     `AvailabilityCalendarQuerySchema` (öffentlicher Tag-Status).
+ *   - **US-IT6-03 (Reviews):** `ReviewAdminSchemaIT6` (mit `rejectedAt`/
+ *     `moderatedAt`/`moderatedById`), `ReviewModerationStatusSchema`,
+ *     `AdminReviewsQuerySchema`. `POST /api/customer/reviews` Vorbedingung
+ *     verschärft (Backend-Logik, kein Schema-Eingriff).
+ *   - **US-IT6-05 (Auth-Bereinigung):** `CUSTOMER_OAUTH_PROVIDERS_IT6`
+ *     auf `['google','facebook']` (GitHub raus). Engineering ersetzt
+ *     in `src/lib/schemas.ts` die alte Konstante.
+ *   - **US-IT6-07 (Admin-Userverwaltung):** `CustomerUserAdminSchema`
+ *     (DTO mit `adminNote`/`adminRating`),
+ *     `UpdateCustomerUserAdminSchema`, `AdminUsersQuerySchema`.
+ *     **Sicherheits-Convention:** `CustomerUserPublicSchema` bleibt
+ *     leak-frei.
+ *   - **US-IT6-08 (Finaler Preis):** `AdminBookingPatchSchema` mit
+ *     `finalPriceEur` (Komma→Punkt-Normalisierung) und
+ *     `finalPriceNote`. Konstanten `BOOKING_FINAL_PRICE_*`.
+ *     `BookingAdminSchemaIT6` als Erweiterung von `BookingAdminSchema`.
+ *   - **US-IT6-09 (Analytics):** `AnalyticsQuerySchema` (range enum),
+ *     `AnalyticsResponseSchema` mit Sub-Schemas für KPIs, MonatsUmsatz,
+ *     Service-Aufschlüsselung, Top-Kunden.
+ *   - **Neue Fehlercodes (informell):** `ACCOUNT_DISABLED`,
+ *     `LAST_ADMIN_LOCK`, `SELF_MUTATION_FORBIDDEN`,
+ *     `BOOKING_NOT_COMPLETED`, `REVIEW_EXISTS`. Engineers erweitern
+ *     `ApiErrorSchema.error.code` in der Live-Codebase.
  *
  * Änderungen v1.5 (Iteration 5 — US-30 bis US-34):
  *   - **US-31 (OAuth2):** `CustomerUserPublicSchema` erhält
@@ -1019,19 +1066,36 @@ export type CustomerProfileUpdateInput = z.infer<typeof CustomerProfileUpdateSch
  *     gemischte Konten relevant — Kunde kann sowohl per E-Mail/Pw als
  *     auch per OAuth einloggen).
  */
-export const CustomerUserPublicSchema = z.object({
-  id: z.string(),
-  email: z.string(),
-  firstName: z.string(),
-  lastName: z.string(),
-  phone: z.string().nullable(),
-  emailVerified: z.boolean(),
-  // IT5 / US-31:
-  oauthProvider: z.enum(['google', 'github']).nullable(),
-  avatarUrl: z.string().url().nullable(),
-  hasPassword: z.boolean(),
-  createdAt: z.string().datetime({ offset: true }),
-});
+/**
+ * v1.6.1 (QA-Revision F3): `.strict()` ist Pflicht — verhindert, dass
+ * `adminNote`/`adminRating` (oder andere interne Felder) durch ein
+ * versehentliches `findUnique` ohne `select` durchsickern. Siehe
+ * `ARCHITECTURE_IT6.md` Anhang B §17.3.
+ *
+ * **Engineering-Hinweis (Live-Code):** Das Live-`oauthProvider`-Enum
+ * wird nach IT6 auf `['google', 'facebook']` umgestellt
+ * (`CUSTOMER_OAUTH_PROVIDERS_IT6`). Bestand-Konten mit `'github'`
+ * existieren nach US-IT6-06 (Wipe) nicht mehr. Engineers passen das
+ * Enum entsprechend an.
+ */
+export const CustomerUserPublicSchema = z
+  .object({
+    id: z.string(),
+    email: z.string(),
+    firstName: z.string(),
+    lastName: z.string(),
+    phone: z.string().nullable(),
+    emailVerified: z.boolean(),
+    // IT5 / US-31. IT6 (US-IT6-05): 'github' raus, 'facebook' rein. Wir
+    // halten den Wert bewusst als `string().nullable()`, damit Bestandsdaten
+    // (alte 'github'-Verknüpfungen, falls noch vorhanden) nicht durch
+    // Strict-Validation crashen — sie werden vom Frontend einfach ignoriert.
+    oauthProvider: z.string().nullable(),
+    avatarUrl: z.string().url().nullable(),
+    hasPassword: z.boolean(),
+    createdAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
 export type CustomerUserPublic = z.infer<typeof CustomerUserPublicSchema>;
 
 /**
@@ -1059,49 +1123,59 @@ export type CustomerLoginResponse = z.infer<typeof CustomerLoginResponseSchema>;
  * cancelToken bleibt enthalten, damit die Storno-Mail-Aktion auch im Portal
  * funktioniert (Hybrid-Flow).
  */
-export const CustomerBookingSchema = z.object({
-  id: z.string(),
-  date: z.string().nullable(),
-  startTime: z.string().nullable(),
-  endTime: z.string().nullable(),
-  // IT5 / US-33: vom Kunden gewählte Dauer (Minuten).
-  durationMinutes: z.number().int().nonnegative(),
-  service: ServiceSchema,
-  description: z.string(),
-  // IT5 / US-32: Adresse (nullable für Bestand).
-  addressStreet: z.string().nullable(),
-  addressZip: z.string().nullable(),
-  addressCity: z.string().nullable(),
-  status: BookingStatusSchema,
-  /** Liegt das Datum mehr als 24h in der Zukunft? Backend berechnet, Frontend zeigt Storno-Button. */
-  cancellableUntilHours: z.number().int().nullable(),
-  /** true wenn cancellable im Portal (Status erlaubt + 24h-Frist erfüllt). */
-  isCancellable: z.boolean(),
-  /** Wenn true: Bewertungs-Button im Detail-View zeigen (Status === 'COMPLETED' UND keine Review existiert). */
-  canReview: z.boolean(),
-  attachments: z.array(BookingAttachmentSchema),
-  payment: z
-    .object({
-      id: z.string(),
-      amount: z.number().int().positive(),
-      currency: z.string(),
-      status: z.enum(['PENDING', 'PAID', 'FAILED', 'REFUNDED']),
-      paidAt: z.string().datetime({ offset: true }).nullable(),
-    })
-    .nullable(),
-  /** Wenn die Buchung schon eine Review hat — fürs Detail-View, schreibgeschützt. */
-  review: z
-    .object({
-      id: z.string(),
-      stars: z.number().int().min(1).max(5),
-      text: z.string().nullable(),
-      approved: z.boolean(),
-      createdAt: z.string().datetime({ offset: true }),
-    })
-    .nullable(),
-  createdAt: z.string().datetime({ offset: true }),
-  updatedAt: z.string().datetime({ offset: true }),
-});
+/**
+ * v1.6.1 (QA-Revision F3 / US-IT6-08): `.strict()` ist Pflicht —
+ * verhindert, dass `finalPriceEur`, `finalPriceNote`, `adminNote`
+ * oder andere interne Felder im Customer-Pfad geleakt werden. Siehe
+ * `ARCHITECTURE_IT6.md` Anhang B §17.3.
+ */
+export const CustomerBookingSchema = z
+  .object({
+    id: z.string(),
+    date: z.string().nullable(),
+    startTime: z.string().nullable(),
+    endTime: z.string().nullable(),
+    // IT5 / US-33: vom Kunden gewählte Dauer (Minuten).
+    durationMinutes: z.number().int().nonnegative(),
+    service: ServiceSchema,
+    description: z.string(),
+    // IT5 / US-32: Adresse (nullable für Bestand).
+    addressStreet: z.string().nullable(),
+    addressZip: z.string().nullable(),
+    addressCity: z.string().nullable(),
+    status: BookingStatusSchema,
+    /** Liegt das Datum mehr als 24h in der Zukunft? Backend berechnet, Frontend zeigt Storno-Button. */
+    cancellableUntilHours: z.number().int().nullable(),
+    /** true wenn cancellable im Portal (Status erlaubt + 24h-Frist erfüllt). */
+    isCancellable: z.boolean(),
+    /** Wenn true: Bewertungs-Button im Detail-View zeigen (Status === 'COMPLETED' UND keine Review existiert). */
+    canReview: z.boolean(),
+    attachments: z.array(BookingAttachmentSchema),
+    payment: z
+      .object({
+        id: z.string(),
+        amount: z.number().int().positive(),
+        currency: z.string(),
+        status: z.enum(['PENDING', 'PAID', 'FAILED', 'REFUNDED']),
+        paidAt: z.string().datetime({ offset: true }).nullable(),
+      })
+      .strict()
+      .nullable(),
+    /** Wenn die Buchung schon eine Review hat — fürs Detail-View, schreibgeschützt. */
+    review: z
+      .object({
+        id: z.string(),
+        stars: z.number().int().min(1).max(5),
+        text: z.string().nullable(),
+        approved: z.boolean(),
+        createdAt: z.string().datetime({ offset: true }),
+      })
+      .strict()
+      .nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
 export type CustomerBooking = z.infer<typeof CustomerBookingSchema>;
 
 /** Response von GET /api/customer/bookings — Split nach kommend/vergangen. */
@@ -1318,16 +1392,28 @@ export type Review = z.infer<typeof ReviewSchema>;
 /**
  * Öffentliche Review-Antwort (GET /api/reviews) — keine internen IDs,
  * Kundenname auf "Vorname N." gekürzt.
+ *
+ * v1.6.1 (QA-Revision m1): `.strict()` ist Pflicht. `GET /api/reviews`
+ * (siehe `ARCHITECTURE_IT6.md` §5.3 + Anhang B §17.5) bindet sich
+ * **ausschließlich** an dieses Schema — keine `customerId`,
+ * keine `bookingId`, keine `userId`, keine `moderatedById` im Output.
+ *
+ * Whitelist (verbindlich): id, customerName, service, stars, text, createdAt.
+ *
+ * `customerName`-Format: `"Vorname N."` (Vorname + Nachname-Initial + Punkt);
+ * Fallback `"Anonym"` bei `customerId === null` (anonymisierte Buchung).
  */
-export const PublicReviewSchema = z.object({
-  id: z.string(),
-  /** "Vorname N." — Backend kürzt Nachname. */
-  customerName: z.string(),
-  service: ServiceSchema.nullable(),
-  stars: z.number().int().min(1).max(5),
-  text: z.string().nullable(),
-  createdAt: z.string().datetime({ offset: true }),
-});
+export const PublicReviewSchema = z
+  .object({
+    id: z.string(),
+    /** "Vorname N." — Backend kürzt Nachname. "Anonym" wenn customerId null. */
+    customerName: z.string(),
+    service: ServiceSchema.nullable(),
+    stars: z.number().int().min(1).max(5),
+    text: z.string().nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
 export type PublicReview = z.infer<typeof PublicReviewSchema>;
 
 // ---------------------------------------------------------------------------
@@ -1396,7 +1482,11 @@ export type ApiError = z.infer<typeof ApiErrorSchema>;
  * Erlaubte OAuth-Provider für Kunden-Login. Liste muss synchron mit der
  * NextAuth-Customer-Konfiguration in `lib/customer-oauth.ts` sein.
  */
-export const CUSTOMER_OAUTH_PROVIDERS = ['google', 'github'] as const;
+/**
+ * Iteration 6 (US-IT6-05) — Auth-Bereinigung: GitHub raus, Facebook rein.
+ * Frontend-Component `<OAuthButtons />` zeigt nur noch Google + Facebook.
+ */
+export const CUSTOMER_OAUTH_PROVIDERS = ['google', 'facebook'] as const;
 export type CustomerOAuthProvider = (typeof CUSTOMER_OAUTH_PROVIDERS)[number];
 
 export const CustomerOAuthProviderSchema = z.enum(CUSTOMER_OAUTH_PROVIDERS);
@@ -1464,3 +1554,474 @@ export const UpdateBufferConfigSchema = z.object({
     ),
 });
 export type UpdateBufferConfigInput = z.infer<typeof UpdateBufferConfigSchema>;
+
+// ===========================================================================
+// ITERATION 6 — Schemas (US-IT6-01 bis US-IT6-09)
+// ===========================================================================
+//
+// Querschnitt:
+//   - DTO-Trennung (US-IT6-07): `CustomerUserPublicSchema` darf NIEMALS
+//     `adminNote`/`adminRating` enthalten. Neuer `CustomerUserAdminSchema`
+//     ist die einzige Stelle, an der diese Felder rausgegeben werden.
+//   - OAuth-Provider (US-IT6-05): `CUSTOMER_OAUTH_PROVIDERS` wird auf
+//     `['google','facebook']` umgestellt (GitHub raus).
+//   - Neue Fehlercodes: `ACCOUNT_DISABLED`, `LAST_ADMIN_LOCK`,
+//     `SELF_MUTATION_FORBIDDEN`, `BOOKING_NOT_COMPLETED`, `REVIEW_EXISTS`.
+
+// ---------------------------------------------------------------------------
+// US-IT6-05 — OAuth-Provider-Liste umstellen
+// ---------------------------------------------------------------------------
+//
+// **Hinweis:** Die obige Konstante `CUSTOMER_OAUTH_PROVIDERS = ['google','github']`
+// (im IT5-Block) wird mit IT6 durch diese Definition **ersetzt**. Engineering
+// muss in `src/lib/schemas.ts` die alte Definition entfernen, sodass nur die
+// IT6-Variante bleibt. Doppel-Export würde TypeScript brechen.
+//
+// Live-Code:
+//   export const CUSTOMER_OAUTH_PROVIDERS = ['google', 'facebook'] as const;
+
+export const CUSTOMER_OAUTH_PROVIDERS_IT6 = ['google', 'facebook'] as const;
+export type CustomerOAuthProviderIT6 = (typeof CUSTOMER_OAUTH_PROVIDERS_IT6)[number];
+export const CustomerOAuthProviderSchemaIT6 = z.enum(CUSTOMER_OAUTH_PROVIDERS_IT6);
+
+// ---------------------------------------------------------------------------
+// US-IT6-01 — Multi-Admin
+// ---------------------------------------------------------------------------
+
+export const ADMIN_PASSWORD_MIN_LENGTH = 12;
+export const ADMIN_PASSWORD_MAX_LENGTH = 200;
+
+export const UserStatusSchema = z.enum(['ACTIVE', 'DISABLED']);
+export type UserStatus = z.infer<typeof UserStatusSchema>;
+
+/** Body für POST /api/admin/admins. */
+export const CreateAdminSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2, 'Name muss mindestens 2 Zeichen haben')
+    .max(120, 'Name ist zu lang'),
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email('Bitte eine gültige E-Mail-Adresse angeben'),
+  password: z
+    .string()
+    .min(ADMIN_PASSWORD_MIN_LENGTH, `Mindestens ${ADMIN_PASSWORD_MIN_LENGTH} Zeichen.`)
+    .max(ADMIN_PASSWORD_MAX_LENGTH, 'Passwort ist zu lang.')
+    .regex(/[A-Z]/, 'Mindestens ein Großbuchstabe.')
+    .regex(/[a-z]/, 'Mindestens ein Kleinbuchstabe.')
+    .regex(/[0-9]/, 'Mindestens eine Ziffer.'),
+});
+export type CreateAdminInput = z.infer<typeof CreateAdminSchema>;
+
+/** Body für PATCH /api/admin/admins/:id. Mind. ein Feld muss gesetzt sein. */
+export const UpdateAdminSchema = z
+  .object({
+    name: z.string().trim().min(2).max(120).optional(),
+    email: z.string().trim().toLowerCase().email().optional(),
+    status: UserStatusSchema.optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (
+      data.name === undefined &&
+      data.email === undefined &&
+      data.status === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Mindestens ein Feld muss gesetzt sein.',
+        path: [],
+      });
+    }
+  });
+export type UpdateAdminInput = z.infer<typeof UpdateAdminSchema>;
+
+/** Response-Item für GET /api/admin/admins. */
+export const AdminListItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  email: z.string().email(),
+  status: UserStatusSchema,
+  createdAt: z.string().datetime({ offset: true }),
+  lastLoginAt: z.string().datetime({ offset: true }).nullable(),
+  createdById: z.string().nullable(),
+});
+export type AdminListItem = z.infer<typeof AdminListItemSchema>;
+
+// ---------------------------------------------------------------------------
+// US-IT6-02 — Kalender (Admin-Aggregator + öffentlicher Tag-Status)
+// ---------------------------------------------------------------------------
+
+export const CalendarEventTypeSchema = z.enum([
+  'BOOKING',
+  'AVAILABILITY',
+  'BUFFER',
+]);
+export type CalendarEventType = z.infer<typeof CalendarEventTypeSchema>;
+
+export const CalendarEventSchema = z.object({
+  id: z.string(),
+  type: CalendarEventTypeSchema,
+  title: z.string(),
+  start: z.string().datetime({ offset: true }),
+  end: z.string().datetime({ offset: true }),
+  /** Nur bei BOOKING gesetzt. */
+  status: BookingStatusSchema.optional(),
+  /** FullCalendar-Convention. */
+  color: z.string().optional(),
+  /** FullCalendar-Convention für Hintergrund-Events (AVAILABILITY). */
+  display: z.literal('background').optional(),
+  /** Klick-Ziel für Buchungs-Events. */
+  url: z.string().optional(),
+});
+export type CalendarEvent = z.infer<typeof CalendarEventSchema>;
+
+export const AdminCalendarEventsQuerySchema = z
+  .object({
+    from: DateStringSchema,
+    to: DateStringSchema,
+  })
+  .superRefine((d, ctx) => {
+    const fromMs = Date.parse(d.from);
+    const toMs = Date.parse(d.to);
+    if (toMs < fromMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`to` muss nach `from` liegen.',
+        path: ['to'],
+      });
+    }
+    const days = (toMs - fromMs) / (1000 * 60 * 60 * 24);
+    if (days > 90) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Max 90 Tage Range pro Anfrage.',
+        path: ['to'],
+      });
+    }
+  });
+export type AdminCalendarEventsQuery = z.infer<typeof AdminCalendarEventsQuerySchema>;
+
+export const AvailabilityCalendarDayStatusSchema = z.enum([
+  'available',
+  'partial',
+  'unavailable',
+]);
+export type AvailabilityCalendarDayStatus = z.infer<
+  typeof AvailabilityCalendarDayStatusSchema
+>;
+
+export const AvailabilityCalendarDaySchema = z.object({
+  date: DateStringSchema,
+  status: AvailabilityCalendarDayStatusSchema,
+});
+export type AvailabilityCalendarDay = z.infer<typeof AvailabilityCalendarDaySchema>;
+
+export const AvailabilityCalendarQuerySchema = z
+  .object({
+    from: DateStringSchema,
+    to: DateStringSchema,
+    serviceId: z.string().optional(),
+  })
+  .superRefine((d, ctx) => {
+    const fromMs = Date.parse(d.from);
+    const toMs = Date.parse(d.to);
+    if (toMs < fromMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`to` muss nach `from` liegen.',
+        path: ['to'],
+      });
+    }
+    const days = (toMs - fromMs) / (1000 * 60 * 60 * 24);
+    if (days > 62) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Max 62 Tage Range pro Anfrage.',
+        path: ['to'],
+      });
+    }
+  });
+export type AvailabilityCalendarQuery = z.infer<typeof AvailabilityCalendarQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// US-IT6-03 — Reviews mit COMPLETED-Trigger & Reject-Spur
+// ---------------------------------------------------------------------------
+
+/** Erweitertes ReviewSchema (Admin-View) — bestehendes ReviewSchema bleibt
+ * abwärtskompatibel; Engineering kann die Felder direkt auf das Bestand-
+ * Schema mergen. */
+export const ReviewAdminSchemaIT6 = ReviewSchema.extend({
+  rejectedAt: z.string().datetime({ offset: true }).nullable(),
+  moderatedAt: z.string().datetime({ offset: true }).nullable(),
+  moderatedById: z.string().nullable(),
+});
+export type ReviewAdminIT6 = z.infer<typeof ReviewAdminSchemaIT6>;
+
+export const ReviewModerationStatusSchema = z.enum([
+  'PENDING_APPROVAL',
+  'APPROVED',
+  'REJECTED',
+]);
+export type ReviewModerationStatus = z.infer<typeof ReviewModerationStatusSchema>;
+
+export const AdminReviewsQuerySchema = z.object({
+  status: ReviewModerationStatusSchema.optional(),
+});
+export type AdminReviewsQuery = z.infer<typeof AdminReviewsQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// US-IT6-07 — Admin-Userverwaltung (DTOs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Admin-DTO für CustomerUser.
+ *
+ * **Sicherheits-Convention:** `CustomerUserPublicSchema` (Bestand) DARF
+ * `adminNote` und `adminRating` NIEMALS enthalten. `CustomerUserAdminSchema`
+ * (NEU) ist die einzige Stelle, an der diese Felder im Output erscheinen.
+ *
+ * Backend-Code in `lib/customer-portal.ts` und allen `/api/customer/*`
+ * MUSS `prisma.customerUser`-Selects mit explizitem `select` versehen,
+ * damit die Felder nicht versehentlich geleakt werden.
+ */
+export const CUSTOMER_ADMIN_NOTE_MAX_LENGTH = 1000;
+export const CUSTOMER_ADMIN_RATING_MIN = 1;
+export const CUSTOMER_ADMIN_RATING_MAX = 5;
+
+export const CustomerUserAdminSchema = z.object({
+  id: z.string(),
+  email: z.string().email(),
+  firstName: z.string(),
+  lastName: z.string(),
+  phone: z.string().nullable(),
+  emailVerified: z.boolean(),
+  oauthProvider: z.string().nullable(),
+  avatarUrl: z.string().url().nullable(),
+  // Interne Felder — siehe oben.
+  adminNote: z.string().max(CUSTOMER_ADMIN_NOTE_MAX_LENGTH).nullable(),
+  adminRating: z
+    .number()
+    .int()
+    .min(CUSTOMER_ADMIN_RATING_MIN)
+    .max(CUSTOMER_ADMIN_RATING_MAX)
+    .nullable(),
+  bookingCount: z.number().int().nonnegative(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type CustomerUserAdmin = z.infer<typeof CustomerUserAdminSchema>;
+
+/** Body für PATCH /api/admin/users/:id. Alle Felder optional, mind. eines. */
+export const UpdateCustomerUserAdminSchema = z
+  .object({
+    firstName: z.string().trim().min(1).max(120).optional(),
+    lastName: z.string().trim().min(1).max(120).optional(),
+    phone: z
+      .string()
+      .trim()
+      .min(5)
+      .max(40)
+      .nullable()
+      .optional(),
+    adminNote: z
+      .string()
+      .trim()
+      .max(CUSTOMER_ADMIN_NOTE_MAX_LENGTH)
+      .nullable()
+      .optional(),
+    adminRating: z
+      .number()
+      .int()
+      .min(CUSTOMER_ADMIN_RATING_MIN)
+      .max(CUSTOMER_ADMIN_RATING_MAX)
+      .nullable()
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (Object.keys(data).length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Mindestens ein Feld muss gesetzt sein.',
+        path: [],
+      });
+    }
+  });
+export type UpdateCustomerUserAdminInput = z.infer<
+  typeof UpdateCustomerUserAdminSchema
+>;
+
+export const AdminUsersQuerySchema = z.object({
+  q: z.string().trim().min(2).max(120).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+  sort: z
+    .enum(['lastName_asc', 'createdAt_desc', 'bookingCount_desc', 'adminRating_desc'])
+    .default('lastName_asc'),
+});
+export type AdminUsersQuery = z.infer<typeof AdminUsersQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// US-IT6-08 — Finaler Preis pro Buchung
+// ---------------------------------------------------------------------------
+
+export const BOOKING_FINAL_PRICE_MIN_EUR = 0;
+export const BOOKING_FINAL_PRICE_MAX_EUR = 100_000;
+export const BOOKING_FINAL_PRICE_NOTE_MAX_LENGTH = 200;
+
+/**
+ * Akzeptiert string ("185,00") oder number (185). Komma → Punkt
+ * Normalisierung erfolgt im Schema. `null` = entfernen.
+ */
+const finalPriceEurInputSchema = z
+  .union([z.string(), z.number(), z.null()])
+  .optional()
+  .transform((v) => {
+    if (v === null || v === undefined || v === '') return null;
+    if (typeof v === 'number') return v;
+    const cleaned = v.replace(/\s/g, '').replace(',', '.');
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : NaN;
+  })
+  .refine(
+    (n) =>
+      n === null ||
+      (Number.isFinite(n) &&
+        n >= BOOKING_FINAL_PRICE_MIN_EUR &&
+        n <= BOOKING_FINAL_PRICE_MAX_EUR),
+    {
+      message: `Bitte einen gültigen Betrag in Euro eingeben (${BOOKING_FINAL_PRICE_MIN_EUR}–${BOOKING_FINAL_PRICE_MAX_EUR}).`,
+    },
+  );
+
+/** Erweitertes Body-Schema für PATCH /api/admin/bookings/:id (IT6). */
+export const AdminBookingPatchSchema = z
+  .object({
+    status: BookingStatusSchema.optional(),
+    finalPriceEur: finalPriceEurInputSchema,
+    finalPriceNote: z
+      .string()
+      .trim()
+      .max(BOOKING_FINAL_PRICE_NOTE_MAX_LENGTH)
+      .nullable()
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    const hasAny =
+      data.status !== undefined ||
+      data.finalPriceEur !== undefined ||
+      data.finalPriceNote !== undefined;
+    if (!hasAny) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Mindestens ein Feld muss gesetzt sein.',
+        path: [],
+      });
+    }
+  });
+export type AdminBookingPatchInput = z.infer<typeof AdminBookingPatchSchema>;
+
+/** Erweiterung von BookingAdminSchema um IT6-Felder. */
+export const BookingAdminSchemaIT6 = BookingAdminSchema.extend({
+  finalPriceEur: z.string().nullable(), // Prisma Decimal serialisiert als String.
+  finalPriceNote: z.string().nullable(),
+});
+export type BookingAdminIT6 = z.infer<typeof BookingAdminSchemaIT6>;
+
+// ---------------------------------------------------------------------------
+// US-IT6-09 — Analytics
+// ---------------------------------------------------------------------------
+
+export const AnalyticsRangeSchema = z.enum(['30d', '90d', '12m', 'ytd', 'custom']);
+export type AnalyticsRange = z.infer<typeof AnalyticsRangeSchema>;
+
+export const AnalyticsQuerySchema = z
+  .object({
+    range: AnalyticsRangeSchema.default('12m'),
+    from: DateStringSchema.optional(),
+    to: DateStringSchema.optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.range === 'custom') {
+      if (!d.from || !d.to) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Bei range=custom sind from+to Pflicht.',
+          path: ['range'],
+        });
+      } else if (Date.parse(d.to) < Date.parse(d.from)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: '`to` muss nach `from` liegen.',
+          path: ['to'],
+        });
+      }
+    }
+  });
+export type AnalyticsQuery = z.infer<typeof AnalyticsQuerySchema>;
+
+export const AnalyticsKpisSchema = z.object({
+  /** Decimal-String wegen Prisma. `null` wenn keine Daten. */
+  totalRevenueEur: z.string().nullable(),
+  completedBookings: z.number().int().nonnegative(),
+  averageOrderValueEur: z.string().nullable(),
+  bookingsThisMonth: z.number().int().nonnegative(),
+});
+
+export const AnalyticsRevenueByMonthSchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/),
+  totalEur: z.string(), // Decimal-String.
+  count: z.number().int().nonnegative(),
+});
+
+export const AnalyticsBookingsByServiceSchema = z.object({
+  service: ServiceSchema,
+  count: z.number().int().nonnegative(),
+});
+
+export const AnalyticsTopCustomerSchema = z.object({
+  customerId: z.string(),
+  customerName: z.string(), // "Vorname N." (Live-Join, Anonym wenn customerId obsolete)
+  totalEur: z.string(),
+  bookingCount: z.number().int().nonnegative(),
+});
+
+export const AnalyticsResponseSchema = z.object({
+  range: z.object({
+    from: DateStringSchema,
+    to: DateStringSchema,
+  }),
+  kpis: AnalyticsKpisSchema,
+  revenueByMonth: z.array(AnalyticsRevenueByMonthSchema),
+  bookingsByService: z.array(AnalyticsBookingsByServiceSchema),
+  topCustomers: z.array(AnalyticsTopCustomerSchema),
+});
+export type AnalyticsResponse = z.infer<typeof AnalyticsResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// IT6 — Erweiterte Fehlercodes (Hinweis für ApiErrorSchema-Konsumenten)
+// ---------------------------------------------------------------------------
+//
+// **Engineering-Hinweis:** Die folgenden Codes sollen in
+// `ApiErrorSchema.error.code` zusätzlich akzeptiert werden. Engineering
+// erweitert die enum-Liste in `src/lib/schemas.ts` um:
+//
+//   'ACCOUNT_DISABLED',         // 422 — disabled Admin-Login.
+//   'LAST_ADMIN_LOCK',          // 409 — letzter aktiver Admin nicht löschbar.
+//   'SELF_MUTATION_FORBIDDEN',  // 409 — Admin will sich selbst deaktivieren.
+//   'BOOKING_NOT_COMPLETED',    // 409 — Review nur bei COMPLETED.
+//   'REVIEW_EXISTS',            // 409 — Buchung hat bereits eine Review.
+//
+// **NEU v1.6.1 (QA-Revision F1, siehe ARCHITECTURE_IT6.md Anhang B §17.1):**
+//
+//   'BOOTSTRAP_NOT_ALLOWED',    // 403 — Setup-Email matched nicht
+//                               //       BOOTSTRAP_ADMIN_EMAIL.
+//   'SETUP_NOT_CONFIGURED',     // 503 — Setup ist aufgerufen worden,
+//                               //       ENV BOOTSTRAP_ADMIN_EMAIL fehlt
+//                               //       (Setup-Page ist blockiert, bis
+//                               //       Eng den Wert setzt).
+//
+// Im `contracts/zod-schemas.ts` (dieser Datei) wird das Bestandsschema
+// nicht hart erweitert, um IT5-Live-Code nicht zu brechen — Engineers
+// fügen die Codes lokal in ihrer Branch ein.

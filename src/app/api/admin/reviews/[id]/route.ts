@@ -1,17 +1,29 @@
 /**
- * PATCH /api/admin/reviews/:id — US-29 AC6, AC7.
+ * PATCH /api/admin/reviews/:id — IT6 / US-IT6-03 (Audit-Spur).
  *
- * Setzt `approved` auf true (Freigabe) oder false (Rückzug).
- * Idempotenz: gleicher Wert → 200 ohne DB-Schreiben.
+ * Body: `{ approved: boolean }`
+ *
+ * Verhalten:
+ *   - approved=true  → setzt approved=true, rejectedAt=null,
+ *                      moderatedAt=now(), moderatedById=me.id.
+ *   - approved=false → setzt approved=false, rejectedAt=now(),
+ *                      moderatedAt=now(), moderatedById=me.id.
+ *
+ * Cache-Tag: bei Status-Wechsel `revalidateTag('public-reviews')`,
+ * damit `GET /api/reviews` sofort den neuen Stand zeigt.
+ *
+ * Idempotenz: gleicher `approved`-Wert → 200 ohne DB-Schreiben (außer
+ * `moderatedAt` wird nicht erneut gesetzt — das passt zur Spec).
  */
 
 import type { NextRequest } from 'next/server';
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
-import { auth } from '@/lib/auth';
+import { revalidateTag } from 'next/cache';
 import { prisma } from '@/lib/prisma';
 import { ApproveReviewSchema } from '@/lib/schemas';
 import { apiError, apiSuccess, internalError, zodErrorResponse } from '@/lib/api';
+import { requireAdmin, isAdminError } from '@/lib/require-admin';
 import { SERVICES } from '@/lib/services';
 import type { Service } from '@/lib/services';
 
@@ -36,10 +48,8 @@ export async function PATCH(
   ctx: { params: Promise<{ id: string }> | { id: string } },
 ): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const params = await ctx.params;
     const { id } = params;
@@ -51,7 +61,6 @@ export async function PATCH(
     if (!json || typeof json !== 'object') {
       return apiError({ code: 'VALIDATION_ERROR', message: 'Body muss JSON sein' });
     }
-
     const data = ApproveReviewSchema.parse(json);
 
     const existing = await prisma.review.findUnique({
@@ -61,22 +70,33 @@ export async function PATCH(
         booking: { select: { service: true } },
       },
     });
-
     if (!existing) {
       return apiError({ code: 'NOT_FOUND', message: 'Bewertung nicht gefunden.' });
     }
 
     let updated = existing;
-    if (existing.approved !== data.approved) {
+    const now = new Date();
+    const stateChanged =
+      existing.approved !== data.approved ||
+      (data.approved === false && existing.rejectedAt === null) ||
+      (data.approved === true && existing.rejectedAt !== null);
+
+    if (stateChanged) {
       try {
-        updated = await prisma.review.update({
+        const refreshed = await prisma.review.update({
           where: { id },
-          data: { approved: data.approved },
+          data: {
+            approved: data.approved,
+            rejectedAt: data.approved ? null : now,
+            moderatedAt: now,
+            moderatedById: me.id,
+          },
           include: {
             customer: { select: { firstName: true, lastName: true } },
             booking: { select: { service: true } },
           },
         });
+        updated = refreshed;
       } catch (err) {
         if (
           err instanceof Prisma.PrismaClientKnownRequestError &&
@@ -85,6 +105,13 @@ export async function PATCH(
           return apiError({ code: 'NOT_FOUND', message: 'Bewertung nicht gefunden.' });
         }
         throw err;
+      }
+
+      // Cache-Invalidation für GET /api/reviews (öffentliche Liste).
+      try {
+        revalidateTag('public-reviews');
+      } catch {
+        /* ignore */
       }
     }
 
@@ -97,6 +124,9 @@ export async function PATCH(
       stars: updated.stars,
       text: updated.text,
       approved: updated.approved,
+      rejectedAt: updated.rejectedAt ? updated.rejectedAt.toISOString() : null,
+      moderatedAt: updated.moderatedAt ? updated.moderatedAt.toISOString() : null,
+      moderatedById: updated.moderatedById,
       createdAt: updated.createdAt.toISOString(),
       updatedAt: updated.updatedAt.toISOString(),
     });

@@ -17,6 +17,7 @@ import {
   getCustomerFromRequest,
   toCustomerPublic,
 } from '@/lib/customer-auth-server';
+import { selectCustomerUserPublic } from '@/lib/dto/user';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -55,6 +56,8 @@ export async function PATCH(req: NextRequest): Promise<Response> {
         ...(parsed.lastName !== undefined ? { lastName: parsed.lastName } : {}),
         ...(parsed.phone !== undefined ? { phone: parsed.phone ?? null } : {}),
       },
+      // F3-Schutz: Public-Select — KEIN adminNote/adminRating in der Response.
+      select: selectCustomerUserPublic(),
     });
 
     return apiSuccess(toCustomerPublic(updated));

@@ -20,6 +20,7 @@
 
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { selectCustomerUserPublic } from '@/lib/dto/user';
 import {
   customerOAuthAuth,
   isCustomerOAuthEnabled,
@@ -71,9 +72,11 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   // Defense-in-Depth: CustomerUser muss in DB existieren.
+  // F3-Schutz: nutze `selectCustomerUserPublic()` — wir lesen zwar nur
+  // id+email, aber wir verzichten konsequent auf Default-Selects.
   const user = await prisma.customerUser.findUnique({
     where: { id: customerId },
-    select: { id: true, email: true },
+    select: selectCustomerUserPublic(),
   });
   if (!user) {
     return redirectToLoginError(req, 'oauth_finalize_failed');

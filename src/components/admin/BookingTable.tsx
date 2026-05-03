@@ -21,6 +21,7 @@ import type { BookingAdmin, BookingStatus } from '@/lib/schemas';
 import { getServiceLabel } from '@/lib/services';
 import { CounterProposalDialog } from './CounterProposalDialog';
 import { PaymentEditor } from './PaymentEditor';
+import { FinalPriceEditor } from './FinalPriceEditor';
 
 type StatusFilter = 'ALL' | BookingStatus;
 
@@ -282,6 +283,23 @@ export function BookingTable() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <Badge tone={STATUS_TONE[b.status]}>{STATUS_LABEL[b.status]}</Badge>
+                      {(() => {
+                        const fp = (b as BookingAdmin & {
+                          finalPriceEur?: string | null;
+                        }).finalPriceEur;
+                        if (fp === null || fp === undefined || fp === '') return null;
+                        const n = Number(fp);
+                        if (!Number.isFinite(n)) return null;
+                        return (
+                          <Badge tone="info" title="Finaler Preis">
+                            {n.toLocaleString('de-DE', {
+                              style: 'currency',
+                              currency: 'EUR',
+                              maximumFractionDigits: 0,
+                            })}
+                          </Badge>
+                        );
+                      })()}
                       {mailFailed && (
                         <Badge tone="danger" title={b.mailError ?? 'Mail-Versand fehlgeschlagen'}>
                           Mail nicht zugestellt
@@ -404,6 +422,34 @@ export function BookingTable() {
                       />
                     </div>
                   )}
+
+                  {/* US-IT6-08: Finaler Preis (Admin-internes Feld) */}
+                  <div className="mt-3">
+                    <FinalPriceEditor
+                      bookingId={b.id}
+                      initialFinalPriceEur={
+                        (b as BookingAdmin & { finalPriceEur?: string | null })
+                          .finalPriceEur ?? null
+                      }
+                      initialFinalPriceNote={
+                        (b as BookingAdmin & { finalPriceNote?: string | null })
+                          .finalPriceNote ?? null
+                      }
+                      onSaved={(price, note) => {
+                        setBookings((prev) =>
+                          prev.map((x) =>
+                            x.id === b.id
+                              ? ({
+                                  ...x,
+                                  finalPriceEur: price,
+                                  finalPriceNote: note,
+                                } as BookingAdmin)
+                              : x,
+                          ),
+                        );
+                      }}
+                    />
+                  </div>
 
                   <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
                     {mailFailed && !isCancelled && (

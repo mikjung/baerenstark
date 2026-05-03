@@ -6,9 +6,8 @@
  */
 
 import type { Metadata } from 'next';
-import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { auth } from '@/lib/auth';
+import { requireActiveAdmin } from '@/lib/require-admin';
 import { ReviewModerationTable } from '@/components/admin/ReviewModerationTable';
 
 export const metadata: Metadata = {
@@ -19,10 +18,8 @@ export const metadata: Metadata = {
 export const dynamic = 'force-dynamic';
 
 export default async function AdminReviewsPage() {
-  const session = await auth();
-  if (!session?.user) {
-    redirect('/admin/login');
-  }
+  // D2: Status-Check (DISABLED → redirect /admin/login?error=account_disabled).
+  await requireActiveAdmin();
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-12">
       <header className="mb-6">

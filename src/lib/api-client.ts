@@ -22,12 +22,7 @@ import type {
   CreatePaymentSessionResponse,
   CreateReviewInput,
   CustomerBookingsResponse,
-  CustomerForgotPasswordInput,
-  CustomerLoginInput,
-  CustomerLoginResponse,
   CustomerProfileUpdateInput,
-  CustomerRegisterInput,
-  CustomerResetPasswordInput,
   CustomerUserPublic,
   DayOverride,
   Payment,
@@ -604,33 +599,14 @@ export async function uploadFile(file: File): Promise<UploadResponse> {
 // ---------------------------------------------------------------------------
 // Iteration 4 — Kunden-Auth (US-25)
 // ---------------------------------------------------------------------------
-
-export interface CustomerRegisterResponse {
-  id: string;
-  email: string;
-  emailVerified: boolean;
-  verificationMailSent: boolean;
-}
-
-export async function registerCustomer(
-  payload: CustomerRegisterInput,
-): Promise<CustomerRegisterResponse> {
-  const res = await request<DataEnvelope<CustomerRegisterResponse>>(
-    '/api/customer/register',
-    { method: 'POST', body: payload },
-  );
-  return res.data;
-}
-
-export async function loginCustomer(
-  payload: CustomerLoginInput,
-): Promise<CustomerLoginResponse> {
-  const res = await request<DataEnvelope<CustomerLoginResponse>>(
-    '/api/customer/login',
-    { method: 'POST', body: payload },
-  );
-  return res.data;
-}
+//
+// Iteration 6 / US-IT6-05 (D3 / QA-IT6):
+//   Die alten Email/Pwd-Endpoints (/api/customer/{login,register,
+//   forgot-password,reset-password,resend-verification,verify}) sind
+//   gelöscht — Kunden-Auth läuft ausschließlich per Google/Facebook-OAuth.
+//   Die zugehörigen Client-Helper (`registerCustomer`, `loginCustomer`,
+//   `forgotPassword`, `resetPassword`, `resendVerification`) wurden
+//   entfernt; nur Profile-/Logout-Helper bleiben übrig.
 
 export async function logoutCustomer(): Promise<void> {
   await request<DataEnvelope<{ loggedOut: boolean }>>('/api/customer/logout', {
@@ -665,31 +641,6 @@ export async function updateCustomerProfile(
     body: payload,
   });
   return res.data;
-}
-
-export async function forgotPassword(
-  payload: CustomerForgotPasswordInput,
-): Promise<void> {
-  await request<DataEnvelope<{ ok: boolean }>>('/api/customer/forgot-password', {
-    method: 'POST',
-    body: payload,
-  });
-}
-
-export async function resetPassword(
-  payload: CustomerResetPasswordInput,
-): Promise<void> {
-  await request<DataEnvelope<{ ok: boolean }>>('/api/customer/reset-password', {
-    method: 'POST',
-    body: payload,
-  });
-}
-
-export async function resendVerification(email: string): Promise<void> {
-  await request<DataEnvelope<{ ok: boolean }>>(
-    '/api/customer/resend-verification',
-    { method: 'POST', body: { email } },
-  );
 }
 
 // ---------------------------------------------------------------------------

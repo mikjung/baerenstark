@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { CONTACT } from '@/lib/contact';
+import { SERVICE_DETAIL_SLUGS, getServiceInfo } from '@/lib/services';
 
 export function Footer() {
   return (
@@ -42,7 +43,7 @@ export function Footer() {
 
         <section aria-labelledby="footer-links">
           <h2 id="footer-links" className="mb-3 font-serif text-lg font-semibold">
-            Service
+            Services
           </h2>
           <ul className="space-y-2 text-sm">
             <li>
@@ -55,6 +56,16 @@ export function Footer() {
                 Termin buchen
               </Link>
             </li>
+            {SERVICE_DETAIL_SLUGS.map((slug) => (
+              <li key={slug}>
+                <Link
+                  href={`/services/${slug}`}
+                  className="hover:text-baerenstark-accent"
+                >
+                  {getServiceInfo(slug).label}
+                </Link>
+              </li>
+            ))}
           </ul>
         </section>
 

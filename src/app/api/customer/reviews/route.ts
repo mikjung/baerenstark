@@ -60,20 +60,18 @@ export async function POST(req: NextRequest): Promise<Response> {
       });
     }
 
-    // Spec sagt "COMPLETED"; lassen wir CONFIRMED zu? Spec-Brief sagt:
-    // "Status ist CONFIRMED oder COMPLETED" — aber api-routes.md verlangt
-    // explizit "Status muss COMPLETED sein". Wir folgen api-routes.md
-    // (Vertrag) und verwerfen CONFIRMED. (Spec deviation flagged.)
+    // IT6 / US-IT6-03: Vorbedingung verschärft auf COMPLETED.
     if (booking.status !== 'COMPLETED') {
       return apiError({
-        code: 'CONFLICT',
+        code: 'BOOKING_NOT_COMPLETED',
         message: 'Bewertung erst nach Auftragsabschluss möglich.',
       });
     }
 
+    // IT6 / US-IT6-03: Spam-Schutz — Idempotenz auch über REJECTED-State.
     if (booking.review) {
       return apiError({
-        code: 'CONFLICT',
+        code: 'REVIEW_EXISTS',
         message: 'Sie haben diese Buchung bereits bewertet.',
       });
     }
@@ -95,7 +93,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         err.code === 'P2002'
       ) {
         return apiError({
-          code: 'CONFLICT',
+          code: 'REVIEW_EXISTS',
           message: 'Sie haben diese Buchung bereits bewertet.',
         });
       }

@@ -1053,10 +1053,415 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 | US-31      | OAuth2-Login für Kunden (Google + GitHub)     | Must Have    | Iteration 5 (aktuell)                |
 | US-32      | Adressfeld in Buchungsformular                | Must Have    | Iteration 5 (aktuell)                |
 | US-33      | Buchungsdauer auswählen (Multi-Stunden)       | Must Have    | Iteration 5 (aktuell)                |
-| US-34      | Buffer-Zeit zwischen Buchungen (Admin)        | Must Have    | Iteration 5 (aktuell)                |
+| US-34      | Buffer-Zeit zwischen Buchungen (Admin)        | Must Have    | Iteration 5 (abgeschlossen)          |
+| US-IT6-01  | Weitere Admins anlegen                        | Must Have    | Iteration 6                          |
+| US-IT6-02  | Kalender-UX Outlook/Google-Style              | Must Have    | Iteration 6                          |
+| US-IT6-03  | Kundenbewertungen nach Abschluss + Freigabe   | Must Have    | Iteration 6                          |
+| US-IT6-04  | SEO-Optimierung                               | Must Have    | Iteration 6                          |
+| US-IT6-05  | Auth-Bereinigung Google + Facebook only       | Must Have    | Iteration 6                          |
+| US-IT6-06  | Alle User-Accounts löschen (DB-Reset)         | Must Have    | Iteration 6                          |
+| US-IT6-07  | Nutzerverwaltung Admin mit Kommentar + Rating | Must Have    | Iteration 6                          |
+| US-IT6-08  | Finaler Preis pro Buchung (EUR-Betrag)        | Must Have    | Iteration 6                          |
+| US-IT6-09  | Analytics-Seite in Admin-Konsole              | Must Have    | Iteration 6                          |
 | US-09      | Instagram-Feed einbinden                      | Should Have  | Backlog                              |
 | US-10      | Kundenbewertungen anzeigen                    | Should Have  | Ersetzt durch US-22                  |
 | US-11      | Bestätigungs-E-Mail an Kunden                 | Should Have  | Ersetzt durch US-24                  |
+
+---
+
+## Iteration 6 — Admin-Reife, Auth-Bereinigung & Wachstums-Features
+
+### Vision (aktualisiert)
+
+Bärenstark Hausservice verfügt ab Iteration 6 über eine produktionsreife Verwaltungsplattform: mehrere Admins können unabhängig arbeiten, die Kalender-UX entspricht etablierten Tools wie Google Calendar, echte Kundenbewertungen fließen nach Moderationsfreigabe auf die Website, und die SEO-Basis sichert organische Sichtbarkeit in Darmstadt. Intern bekommt Tom volle Transparenz über Kunden (inkl. Admin-Notizen und internem Rating), Buchungspreise und Umsatzentwicklung — alles in einer Konsole.
+
+---
+
+#### US-IT6-01: Weitere Admins anlegen
+
+**Als** Admin (Tom)
+**möchte ich** neue Admin-Konten anlegen, bestehende Admins deaktivieren und löschen können,
+**damit** ich z.B. eine Unterstützungskraft Zugang zur Admin-Konsole geben kann, ohne ihr mein eigenes Passwort weiterzugeben.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin als Admin eingeloggt und öffne „Admin-Verwaltung",
+  **When** die Seite geladen ist,
+  **Then** sehe ich eine Liste aller Admin-Accounts mit Name, E-Mail und Status (aktiv/inaktiv).
+
+- **Given** ich klicke auf „Neuen Admin anlegen" und fülle Name, E-Mail und initiales Passwort aus,
+  **When** ich auf „Speichern" klicke,
+  **Then** wird der neue Admin-Account angelegt und erscheint sofort in der Liste.
+
+- **Given** ich versuche, alle vorhandenen Admin-Accounts zu löschen,
+  **When** nur noch ein Admin-Account existiert,
+  **Then** ist der Löschen-Button für diesen letzten Account deaktiviert mit dem Hinweis: „Mindestens ein Admin muss immer vorhanden sein."
+
+- **Given** ich deaktiviere einen Admin-Account (statt ihn zu löschen),
+  **When** der betroffene Admin beim nächsten Login versucht sich einzuloggen,
+  **Then** erhält er die Meldung „Ihr Konto wurde deaktiviert. Bitte wenden Sie sich an Tom Siefert." und der Zugang wird verweigert.
+
+- **Given** ein deaktivierter Admin versucht über eine direkte URL auf eine Admin-Seite zuzugreifen,
+  **When** die Middleware die Session prüft,
+  **Then** wird er zur Login-Seite umgeleitet.
+
+- **Given** ich editiere einen bestehenden Admin (Name oder E-Mail),
+  **When** ich speichere,
+  **Then** werden die Änderungen sofort in der Liste sichtbar.
+
+**Hinweis:** Passwort-Reset für andere Admins ist out-of-scope für IT6 (Tom kann Passwort des Fremd-Admins beim Anlegen setzen). Der angemeldete Admin kann sich nicht selbst löschen oder deaktivieren, um Lock-out zu verhindern.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-IT6-02: Kalender-UX — Outlook/Google-Calendar-Style für Admin und Kunde
+
+**Als** Admin (Tom) und als Kunde
+**möchte ich** Zeitfenster in einer intuitiven, drag-and-drop-fähigen Kalenderansicht sehen und verwalten — vergleichbar mit Google Calendar oder Microsoft Outlook —,
+**damit** ich Termine auf einen Blick erkenne, direkt im Kalender neue Slots anlege und die Buchungsauswahl für Kunden deutlich komfortabler wird.
+
+**Akzeptanzkriterien:**
+
+**Admin-Kalender:**
+
+- **Given** ich öffne den Admin-Bereich „Kalender / Verfügbarkeit",
+  **When** die Seite geladen ist,
+  **Then** sehe ich eine Wochen- oder Tagesansicht mit einem Zeitraster (Stunden-Spalten), analog zu Google Calendar.
+
+- **Given** ich befinde mich in der Kalenderansicht,
+  **When** ich auf einen freien Zeitblock klicke oder per Drag-and-drop einen Bereich markiere,
+  **Then** öffnet sich ein Formular zur Erstellung eines neuen Verfügbarkeitsfensters mit vorausgefülltem Datum und Uhrzeit.
+
+- **Given** bestätigte Buchungen existieren,
+  **When** ich die Kalenderansicht lade,
+  **Then** sind bestätigte Buchungen als farbige Blöcke (z.B. Grün = bestätigt, Blau = offen/pending, Grau = Buffer) im Kalender sichtbar.
+
+- **Given** ich klicke auf einen Buchungsblock im Kalender,
+  **When** der Klick verarbeitet ist,
+  **Then** öffnet sich eine Detail-Popover/Sidebar mit Kundenname, Service, Dauer und einem Link zur vollständigen Buchungsdetailseite.
+
+- **Given** ich wechsle zwischen Wochen- und Monatsansicht,
+  **When** ich auf den entsprechenden Toggle klicke,
+  **Then** wird die Ansicht sofort umgeschaltet, ohne Seitenneuladen.
+
+**Kunden-Kalender:**
+
+- **Given** ich rufe die Buchungsseite auf,
+  **When** der Kalender geladen ist,
+  **Then** sehe ich eine Monatsansicht (analog zu Google Calendar) mit farblich markierten Tagen: verfügbar (grün), nicht verfügbar (grau/rot), heute (blau umrandet).
+
+- **Given** ich klicke auf einen verfügbaren Tag,
+  **When** der Tag ausgewählt ist,
+  **Then** erscheinen darunter (oder in einem Panel) die buchbaren Zeitslots als klickbare Chips in 30-Minuten-Schritten — analog zur Zeitauswahl in Google Calendar / Calendly.
+
+- **Given** ich wähle einen Zeitslot,
+  **When** der Slot ausgewählt ist,
+  **Then** ist er visuell hervorgehoben und das Buchungsformular wird mit Datum und Uhrzeit vorausgefüllt.
+
+- **Given** ich nutze ein Smartphone,
+  **When** ich den Kalender bediene,
+  **Then** sind alle Interaktionen (Tippen, Swipe zwischen Monaten) vollständig touch-optimiert ohne horizontales Scrollen.
+
+**Hinweis:** Empfohlene Bibliothek für Admin-Ansicht: `react-big-calendar` oder `@fullcalendar/react` (beide MIT-lizenziert). Kunden-Ansicht kann leichtgewichtigere Custom-Komponente oder `react-day-picker` verwenden. Drag-and-drop für Admin-Slots ist Must Have; Drag-and-drop zum Verschieben bestätigter Buchungen ist Could Have (nicht in IT6). Ersetzt/erweitert die bisherigen Kalender-Implementierungen aus US-15, US-16, US-17 — diese bleiben als Datenbasis erhalten.
+
+**Priorität:** Must Have | **Story Points:** 8
+
+---
+
+#### US-IT6-03: Kundenbewertungen nach Abschluss mit Admin-Freigabe (Verbesserung)
+
+**Als** Kunde mit einem abgeschlossenen Auftrag (Status `COMPLETED`)
+**möchte ich** eine Bewertung (1–5 Sterne + optionaler Text) abgeben können,
+**damit** andere Interessenten von meiner Erfahrung profitieren — und Tom weiß, dass die Bewertungsmöglichkeit erst nach echtem Abschluss erscheint.
+
+**Hinweis zum Scope:** US-29 (Iteration 4) hat die Grundstruktur bereits implementiert. US-IT6-03 ergänzt / korrigiert folgende Punkte explizit: (a) Sicherstellung, dass der Trigger ausschließlich auf Status `COMPLETED` basiert (nicht auf `CONFIRMED`), (b) Verbesserung der Admin-Moderations-UI, (c) Sicherstellung, dass Bewertungen nie über öffentliche APIs ohne Freigabe abrufbar sind.
+
+**Akzeptanzkriterien:**
+
+- **Given** mein Auftrag hat den Status `COMPLETED` (explizit durch Admin gesetzt),
+  **When** ich meine Auftragsdetails im Kundenportal öffne,
+  **Then** sehe ich den Button „Jetzt bewerten" — und zwar ausschließlich bei diesem Status.
+
+- **Given** mein Auftrag hat einen anderen Status (PENDING, CONFIRMED, REJECTED, CANCELLED),
+  **When** ich die Auftragsdetails öffne,
+  **Then** ist kein Bewertungs-Button sichtbar.
+
+- **Given** ich schicke eine Bewertung ab,
+  **When** sie gespeichert wurde,
+  **Then** hat sie den internen Status `PENDING_APPROVAL` und ist für keinen Endkunden sichtbar.
+
+- **Given** Tom öffnet die Bewertungsverwaltung im Admin-Bereich,
+  **When** eine neue Bewertung vorliegt (Status `PENDING_APPROVAL`),
+  **Then** sieht er Kundenname, Buchungsdatum, Service, Sternezahl und Text und kann „Freigeben" oder „Ablehnen" klicken.
+
+- **Given** Tom gibt eine Bewertung frei (Status `APPROVED`),
+  **When** die öffentliche Bewertungssektion auf der Startseite geladen wird,
+  **Then** erscheint die Bewertung dort.
+
+- **Given** die öffentliche API `GET /api/reviews` aufgerufen wird,
+  **When** der Request verarbeitet wird,
+  **Then** werden ausschließlich Bewertungen mit Status `APPROVED` zurückgegeben — Bewertungen mit `PENDING_APPROVAL` oder `REJECTED` sind in keiner öffentlichen API-Response enthalten.
+
+- **Given** ich habe für einen Auftrag bereits eine Bewertung abgegeben,
+  **When** ich den Auftrag erneut öffne,
+  **Then** ist der Bewertungs-Button nicht mehr vorhanden und meine bestehende Bewertung ist schreibgeschützt sichtbar.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT6-04: SEO-Optimierung der gesamten Website
+
+**Als** Besucher (und als Google-Crawler)
+**möchte ich** eine technisch sauber optimierte Website vorfinden,
+**damit** Bärenstark Hausservice bei lokalen Suchanfragen in Darmstadt und Umgebung gut auffindbar ist.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe eine beliebige öffentliche Seite auf,
+  **When** ich den Quelltext prüfe,
+  **Then** enthält jede Seite ein eindeutiges `<title>`-Tag (max. 60 Zeichen) und eine `<meta name="description">` (max. 160 Zeichen) mit relevantem Keyword-Bezug.
+
+- **Given** ich teile die Startseite oder eine Unterseite auf WhatsApp, LinkedIn oder Facebook,
+  **When** der Link gepostet wird,
+  **Then** werden korrekte Open-Graph-Tags angezeigt (`og:title`, `og:description`, `og:image`, `og:url`, `og:type`).
+
+- **Given** ein Google-Crawler ruft die Website auf,
+  **When** er `https://<domain>/sitemap.xml` aufruft,
+  **Then** gibt die Datei eine gültige XML-Sitemap zurück, die alle öffentlichen Seiten (Startseite, Services, Buchung, Impressum, Datenschutz) mit `<loc>` und `<lastmod>` enthält.
+
+- **Given** ein Crawler ruft `https://<domain>/robots.txt` auf,
+  **When** die Datei geliefert wird,
+  **Then** erlaubt sie das Crawlen öffentlicher Seiten und sperrt Admin-Routen (`/admin/*`) und API-Routen (`/api/*`).
+
+- **Given** die öffentlichen Seiten gerendert werden,
+  **When** ich den HTML-Output mit einem Accessibility/SEO-Linter prüfe,
+  **Then** enthalten alle Seiten semantische HTML5-Elemente (`<header>`, `<main>`, `<footer>`, `<nav>`, `<article>`, `<section>`) anstelle von reinen `<div>`-Containern.
+
+- **Given** ich prüfe die Startseite mit Google Rich Results Test oder schema.org Validator,
+  **When** der Test durchgeführt wird,
+  **Then** ist ein valides `LocalBusiness`-Structured-Data-JSON-LD-Block vorhanden mit: `name`, `address` (Darmstadt), `telephone`, `url`, `openingHours` (Platzhalter, von Tom zu bestätigen).
+
+- **Given** ich messe die Core Web Vitals der Startseite (z.B. mit Lighthouse),
+  **When** der Test auf Desktop ausgeführt wird,
+  **Then** erzielt die Seite einen Performance-Score von mindestens 80/100 (Lighthouse).
+
+**Hinweis:** `sitemap.xml` und `robots.txt` werden als Next.js Route Handler implementiert. Structured Data wird als `<script type="application/ld+json">` in das `<head>`-Element der betroffenen Seiten injiziert. Lighthouse-Score 80+ ist Richtwert — Bildoptimierung (WebP, next/image) ist Voraussetzung. `openingHours` und exakte Geschäftszeiten: Tom muss Werte liefern (Platzhalter: Mo–Fr 07:00–18:00).
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-IT6-05: Auth-Bereinigung — nur Google und Facebook OAuth
+
+**Als** Admin (Tom)
+**möchte ich**, dass sich Kunden ausschließlich über Google OAuth oder Facebook OAuth registrieren und einloggen können — E-Mail/Passwort und alle anderen Provider werden entfernt —,
+**damit** die Anmeldestrecke übersichtlich und wartungsarm ist und der bekannte Google-OAuth-Fehler „Bad request" behoben wird.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/konto/login` auf,
+  **When** die Seite geladen ist,
+  **Then** sehe ich ausschließlich zwei Schaltflächen: „Mit Google anmelden" und „Mit Facebook anmelden". Das E-Mail/Passwort-Formular, der GitHub-Button und alle anderen Provider-Buttons sind vollständig entfernt.
+
+- **Given** ein Kunde klickt auf „Mit Google anmelden",
+  **When** er den Google-OAuth-Flow abschließt,
+  **Then** ist er erfolgreich eingeloggt und wird zu `/konto` weitergeleitet — ohne „Bad request"-Fehler.
+
+- **Given** ein Kunde klickt auf „Mit Facebook anmelden",
+  **When** er den Facebook-OAuth-Flow abschließt,
+  **Then** ist er erfolgreich eingeloggt und wird zu `/konto` weitergeleitet.
+
+- **Given** ein Kunde bricht den OAuth-Flow ab oder der Provider gibt einen Fehler zurück,
+  **When** er zur Anwendung zurückgeleitet wird,
+  **Then** erscheint eine deutschsprachige Fehlermeldung auf `/konto/login`.
+
+- **Given** die Routen `/konto/registrieren` (E-Mail/Passwort-Formular) und `/api/auth/register` existierten bisher,
+  **When** IT6 deployed wird,
+  **Then** sind diese Routen deaktiviert oder geben HTTP 404 zurück — bestehende Passwort-Hashes in der DB bleiben vorerst erhalten, werden aber nicht mehr genutzt.
+
+- **Given** bestehende Kunden-Accounts, die sich per E-Mail/Passwort registriert haben,
+  **When** sie versuchen, sich nach IT6 einzuloggen,
+  **Then** erscheint der Hinweis: „Die E-Mail/Passwort-Anmeldung ist nicht mehr verfügbar. Bitte melden Sie sich mit Google oder Facebook an." (falls ihre E-Mail bei einem der Provider existiert, erfolgt Account-Verknüpfung automatisch).
+
+- **Given** der GitHub-Provider war bisher konfiguriert (US-31),
+  **When** IT6 deployed wird,
+  **Then** ist der GitHub-OAuth-Provider vollständig aus der NextAuth-Konfiguration entfernt.
+
+- **Given** ich prüfe die NextAuth-Provider-Konfiguration (`customer-oauth.ts` oder äquivalent),
+  **When** ich die Datei lese,
+  **Then** sind nur `GoogleProvider` und `FacebookProvider` konfiguriert — kein `GitHubProvider`, kein `CredentialsProvider`.
+
+**Hinweis:** Der Google-OAuth-Fehler „Bad request" ist mit hoher Wahrscheinlichkeit auf eine falsch konfigurierte Redirect-URI in der Google Cloud Console zurückzuführen (localhost vs. Produktions-Domain) oder auf einen fehlenden `NEXTAUTH_URL`-Wert in der Produktionsumgebung. Der Architekt muss die OAuth-App-Konfigurationen in Google Cloud Console und Meta Developer Portal prüfen und die `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET` als Env-Variablen sicherstellen. Facebook OAuth erfordert eine verifizierte App-Domain (kein localhost in Produktion).
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-IT6-06: Alle User-Accounts löschen (Datenbank-Reset für Neustart)
+
+**Als** Admin (Tom)
+**möchte ich**, dass alle bestehenden Kunden-Registrierungen und Admin-Accounts aus der Datenbank gelöscht werden,
+**damit** ich mit einem sauberen Stand neu starten und mich als erster Admin frisch registrieren kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** das Migrations-Skript wurde ausgeführt,
+  **When** ich die Datenbank prüfe,
+  **Then** enthält die Tabelle `CustomerUser` keine Einträge mehr.
+
+- **Given** das Migrations-Skript wurde ausgeführt,
+  **When** ich die Datenbank prüfe,
+  **Then** enthält die Tabelle `User` (Admin) keine Einträge mehr.
+
+- **Given** Tom nach dem Reset die URL `/admin/login` aufruft und Zugangsdaten eingibt,
+  **When** er sich erfolgreich authentifiziert,
+  **Then** ist er als einziger Admin eingeloggt.
+
+- **Given** Buchungen mit `COMPLETED`- oder `CONFIRMED`-Status existieren, die einem gelöschten `CustomerUser` zugeordnet waren,
+  **When** das Skript ausgeführt wird,
+  **Then** werden diese Buchungen **anonymisiert** (d.h. `customerId` auf `NULL` gesetzt, Kundenname/E-Mail bleiben als statische Strings erhalten) — sie werden nicht hart gelöscht, damit Buchungshistorie und Finanzdaten erhalten bleiben.
+
+- **Given** Buchungen mit Status `PENDING` oder `COUNTER_PROPOSED` existieren, die einem gelöschten Kunden zugeordnet waren,
+  **When** das Skript ausgeführt wird,
+  **Then** werden diese Buchungen auf `CANCELLED` gesetzt und `customerId` auf `NULL` — da sie kein aktives Geschäft darstellen.
+
+- **Given** das Skript erfolgreich durchgelaufen ist,
+  **When** eine Zusammenfassung ausgegeben wird,
+  **Then** enthält sie: Anzahl gelöschter `CustomerUser`-Einträge, Anzahl gelöschter `User`-Einträge, Anzahl anonymisierter Buchungen, Anzahl stornierter Buchungen.
+
+**Hinweis:** Dieses Skript ist ein einmaliger Migrations-Run — kein dauerhafter Feature-Toggle. Implementierung als `scripts/reset-users.ts` (ts-node). Vor Ausführung: Datenbank-Backup empfohlen. DSGVO-Konformität: Hartes Löschen von Personendaten ist zulässig auf expliziten Betreiberauftrag (Tom ist der Verantwortliche). Die Anonymisierung abgeschlossener Buchungen stellt sicher, dass Buchhaltungs- und Umsatzdaten nicht verloren gehen.
+
+**Priorität:** Must Have | **Story Points:** 2
+
+---
+
+#### US-IT6-07: Admin-Nutzerverwaltung mit Kommentarfeld und internem Rating
+
+**Als** Admin (Tom)
+**möchte ich** in der Admin-Konsole alle registrierten Kunden einsehen, editieren, löschen sowie interne Notizen und eine interne Sternebewertung pro Kunde hinterlegen können,
+**damit** ich gute und schlechte Kunden unterscheiden und relevante Hinweise festhalten kann — ohne dass diese Informationen jemals für den Kunden sichtbar sind.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne den Admin-Bereich „Nutzerverwaltung",
+  **When** die Seite geladen ist,
+  **Then** sehe ich eine tabellarische Liste aller `CustomerUser`-Einträge mit: Name, E-Mail, Registrierungsdatum, Anzahl Buchungen und internem Admin-Rating (Sterne-Icon, 1–5).
+
+- **Given** ich klicke auf einen Kunden,
+  **When** die Detailansicht öffnet,
+  **Then** sehe ich alle Profilfelder (Name, E-Mail, Telefon, Adresse) und zusätzlich zwei admin-exklusive Felder: „Internes Kommentarfeld" (Freitext, max. 1000 Zeichen) und „Interne Bewertung" (1–5 Sterne, klickbare Sterne-Icons).
+
+- **Given** ich speichere eine interne Notiz oder ein Admin-Rating für einen Kunden,
+  **When** das Speichern abgeschlossen ist,
+  **Then** erscheint die Bestätigung „Gespeichert" und die Werte sind beim nächsten Öffnen des Kundenprofils noch vorhanden.
+
+- **Given** ein Kunde ruft sein eigenes Profil unter `/konto/profil` auf,
+  **When** die Seite geladen ist,
+  **Then** sind weder das Admin-Kommentarfeld noch das interne Admin-Rating sichtbar oder in der HTTP-Response enthalten.
+
+- **Given** die API `GET /api/customer/profile` oder eine äquivalente öffentliche Kunden-API aufgerufen wird,
+  **When** die Response zurückgegeben wird,
+  **Then** enthalten die JSON-Daten kein `adminNote`-Feld und kein `adminRating`-Feld.
+
+- **Given** ich lösche einen Kunden-Account aus der Nutzerverwaltung,
+  **When** der Lösch-Dialog bestätigt wird,
+  **Then** wird der `CustomerUser`-Eintrag hart gelöscht; verknüpfte Buchungen werden anonymisiert (analog US-IT6-06: `customerId` = NULL, Buchungsdaten bleiben erhalten).
+
+- **Given** ich editiere Profildaten eines Kunden (z.B. Namenskorrektur, Telefonnummer),
+  **When** ich speichere,
+  **Then** werden die Änderungen sofort in der Nutzerliste und im Kundenprofil sichtbar.
+
+- **Given** ich suche in der Nutzerliste per Freitextsuche (Name oder E-Mail),
+  **When** ich mindestens 2 Zeichen eingebe,
+  **Then** wird die Liste auf passende Einträge gefiltert (case-insensitive, Debounce 300 ms).
+
+**Hinweis:** `adminNote` und `adminRating` werden als neue Felder im `CustomerUser`-Prisma-Modell ergänzt. Diese Felder dürfen in keinem Kunden-facing API-Endpunkt (`/api/customer/*`, `/api/auth/*`) serialisiert werden — Prisma-Select muss diese Felder explizit ausschließen. Das interne Admin-Rating hat nichts mit den öffentlichen Kundenbewertungen (US-IT6-03 / US-29) zu tun.
+
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-IT6-08: Finaler Preis pro Buchung (EUR-Betrag vermerken)
+
+**Als** Admin (Tom)
+**möchte ich** bei jeder Buchung einen finalen Euro-Betrag (`final_price_eur`) hinterlegen können,
+**damit** ich meine Einnahmen pro Auftrag direkt in der Buchungsübersicht im Blick habe und für die Analytics-Auswertung (US-IT6-09) eine Datenbasis habe.
+
+**Hinweis zum Scope:** US-28 (Iteration 4) hat bereits ein Preisfeld für die Stripe-Zahlungsaufforderung eingeführt. US-IT6-08 ergänzt ein separates `final_price_eur`-Feld, das unabhängig vom Stripe-Payment-Betrag befüllt werden kann — z.B. für Barzahlung, nachträgliche Korrekturen oder Aufträge ohne Online-Zahlung.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne die Detailansicht einer Buchung im Admin-Portal,
+  **When** die Seite geladen ist,
+  **Then** sehe ich das editierbare Feld „Finaler Preis (EUR)" mit dem Wert in Euro (leer = noch nicht gesetzt, Platzhalter: „0,00 €").
+
+- **Given** ich gebe einen Betrag ein (z.B. „185,00") und speichere,
+  **When** das Speichern abgeschlossen ist,
+  **Then** erscheint „Gespeichert" und der Betrag ist in der Buchungsübersichtsliste sichtbar (zusätzliche Spalte oder Badge).
+
+- **Given** ich gebe einen ungültigen Wert ein (negativer Betrag, nicht-numerischer String),
+  **When** ich auf „Speichern" klicke,
+  **Then** erscheint die Inline-Fehlermeldung „Bitte geben Sie einen gültigen Betrag in Euro ein (z.B. 150,00)."
+
+- **Given** eine Buchung hat `final_price_eur` gesetzt,
+  **When** die Buchungsübersicht geladen wird,
+  **Then** ist der Betrag pro Eintrag als Kurzinfo sichtbar (z.B. „185 €" als Badge oder in einer eigenen Spalte).
+
+- **Given** ein Kunde ruft seine Buchungsdetails im Kundenportal auf,
+  **When** die Detailseite geladen ist,
+  **Then** ist das `final_price_eur`-Feld nicht sichtbar — es ist ein internes Admin-Feld.
+
+- **Given** `final_price_eur` in der API `GET /api/bookings/:id` aufgerufen wird (Kunden-API),
+  **When** die Response zurückgegeben wird,
+  **Then** ist das Feld `final_price_eur` nicht in der JSON-Response enthalten.
+
+**Hinweis:** `final_price_eur` wird als `Decimal?`-Feld (nullable) im `Booking`-Prisma-Modell ergänzt. Dezimaltrenner in der UI: Komma (deutsch). API-Validierung: `>= 0`. Wert wird für US-IT6-09 (Analytics) als Umsatz-Basis verwendet.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT6-09: Analytics-Seite in der Admin-Konsole
+
+**Als** Admin (Tom)
+**möchte ich** in der Admin-Konsole eine Übersichtsseite sehen, die mir Umsatz, Buchungsvolumen und Service-Performance visualisiert,
+**damit** ich auf einen Blick erkenne, wie sich das Geschäft entwickelt, und fundierte Entscheidungen treffen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne den Admin-Bereich „Analytics",
+  **When** die Seite geladen ist,
+  **Then** sehe ich folgende KPI-Kacheln: „Gesamtumsatz (gesetzt)" (Summe aller `final_price_eur`), „Abgeschlossene Buchungen gesamt", „Durchschnittlicher Auftragswert", „Buchungen diesen Monat".
+
+- **Given** ich wähle einen Zeitraum-Filter (Monat, Quartal, Jahr oder benutzerdefinierter Bereich),
+  **When** der Filter angewendet wird,
+  **Then** aktualisieren sich alle KPI-Kacheln und Diagramme auf den gefilterten Zeitraum.
+
+- **Given** ich sehe das Umsatz-Diagramm,
+  **When** die Seite geladen ist,
+  **Then** ist ein Balken- oder Liniendiagramm sichtbar, das den monatlichen Umsatz (Summe `final_price_eur` nach `COMPLETED`-Buchungen) der letzten 12 Monate anzeigt.
+
+- **Given** ich sehe die Service-Aufschlüsselung,
+  **When** die Seite geladen ist,
+  **Then** ist ein Tortendiagramm oder eine sortierte Liste sichtbar, die die Anzahl abgeschlossener Buchungen pro Service-Typ anzeigt.
+
+- **Given** noch keine Buchungen mit gesetztem `final_price_eur` existieren,
+  **When** die Analytics-Seite geladen wird,
+  **Then** zeigen die KPI-Kacheln „0" oder „–" (kein Fehler, kein leerer Bildschirm) und ein Hinweis: „Noch keine Umsatzdaten vorhanden. Hinterlegen Sie finale Preise bei abgeschlossenen Buchungen."
+
+- **Given** ich klicke auf eine KPI-Kachel (z.B. „Abgeschlossene Buchungen diesen Monat"),
+  **When** der Klick verarbeitet ist,
+  **Then** navigiere ich zur gefilterten Buchungsliste mit den entsprechenden Buchungen.
+
+- **Given** die Analytics-Seite über einen API-Endpoint befüllt wird (`GET /api/admin/analytics`),
+  **When** ein nicht-autorisierter Request eintrifft,
+  **Then** gibt der Endpoint HTTP 401 zurück — die Seite ist ausschließlich für eingeloggte Admins zugänglich.
+
+**Hinweis:** Diagramme mit `recharts` (bereits weit verbreitet im Next.js-Ökosystem, MIT-Lizenz) oder `chart.js` + `react-chartjs-2`. Umsatz basiert auf `final_price_eur` von Buchungen mit Status `COMPLETED`. Buchungen ohne gesetzten `final_price_eur` werden in Umsatzsummen nicht mitgezählt (NULL = kein Betrag). Datums-Aggregation erfolgt serverseitig im API-Endpunkt.
+
+**Priorität:** Must Have | **Story Points:** 5
 
 ---
 
@@ -1079,3 +1484,11 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 - Buchungsdauer (US-33): Verfügbare Optionen 1 h, 2 h, 3 h, 4 h, 5 h, 6 h, 8 h und Ganztag. Preisschätzung basiert auf Richtpreisen aus US-20 — kein rechtsverbindlicher Preis.
 - Buffer-Zeit (US-34): Default 30 Minuten. Gilt nur nach bestätigten Buchungen (CONFIRMED). Konfiguration global (ein Wert für alle Buchungen).
 - Adressfelder (US-32): Straße + Hausnummer, PLZ (5-stellig, Deutschland), Ort — alle Pflichtfelder, keine optionale Adresse.
+- IT6 — Admin-Verwaltung (US-IT6-01): Ein eingeloggter Admin kann sich nicht selbst löschen oder deaktivieren (Lock-out-Schutz). Passwort-Reset für Fremd-Admins ist IT7-Backlog.
+- IT6 — Kalender-UX (US-IT6-02): Drag-and-drop zum Verschieben bestätigter Buchungen ist Could Have / IT7. Empfohlene Bibliothek: `react-big-calendar` oder `@fullcalendar/react` für Admin; `react-day-picker` für Kunden.
+- IT6 — Auth-Bereinigung (US-IT6-05): Facebook OAuth erfordert eine verifizierte App-Domain (kein localhost in Produktion). `FACEBOOK_CLIENT_ID` und `FACEBOOK_CLIENT_SECRET` liefert Tom. Google-„Bad request"-Fix: Redirect-URI-Konfiguration in Google Cloud Console muss geprüft werden.
+- IT6 — DB-Reset (US-IT6-06): Abgeschlossene und bestätigte Buchungen werden anonymisiert (customerId = NULL), nicht hart gelöscht — Buchungshistorie und Finanzdaten bleiben erhalten. Offene/stornierte Buchungen verwaister Kunden werden auf CANCELLED gesetzt. Skript: `scripts/reset-users.ts`.
+- IT6 — Nutzerverwaltung (US-IT6-07): `adminNote` und `adminRating` dürfen in keinem Kunden-facing Endpoint serialisiert werden. Prisma-Select muss diese Felder explizit ausschließen.
+- IT6 — Finaler Preis (US-IT6-08): `final_price_eur` ist vom Stripe-Betrag (US-28) getrennt — deckt auch Barzahlung und manuelle Korrekturen ab. Dezimaltrenner in der UI: Komma (DE-Format).
+- IT6 — Analytics (US-IT6-09): Nur Buchungen mit Status `COMPLETED` und gesetztem `final_price_eur` fließen in Umsatzsummen ein. Empfohlene Charting-Bibliothek: `recharts`.
+- IT6 — SEO (US-IT6-04): `openingHours` im Structured Data (LocalBusiness) muss Tom bestätigen. Platzhalter: Mo–Fr 07:00–18:00. Lighthouse-Score 80+ auf Desktop ist Richtwert.

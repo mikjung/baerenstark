@@ -1,261 +1,140 @@
 'use client';
 
 /**
- * LoginForm — Client-Komponente für /konto/login.
+ * LoginForm — Iteration 6 / US-IT6-05.
  *
- * Iteration 5 (US-31):
- *   - OAuth-Buttons (Google + GitHub) OBERHALB des Pw-Formulars,
- *     wenn `NEXT_PUBLIC_FEATURE_OAUTH_LOGIN === 'true'`.
- *   - Fehler-Mapping für `?error=oauth_no_email`,
- *     `?error=oauth_unverified_conflict` etc.
+ * Email/Password und GitHub-Provider sind komplett entfernt. Es gibt
+ * ausschließlich zwei OAuth-Buttons: Google und Facebook.
  *
- * Bestand IT4:
- *   - Liest `?callbackUrl=/konto/...` (Middleware-Redirect-Param).
- *   - Bei 422 EMAIL_NOT_VERIFIED Anzeige eines Resend-Buttons.
+ * Die Komponente liest `?error=`-Parameter aus dem Customer-NextAuth-Flow
+ * und zeigt freundliche, deutschsprachige Fehlermeldungen.
  */
 
-import { zodResolver } from '@hookform/resolvers/zod';
-import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { useState } from 'react';
-import { useForm } from 'react-hook-form';
 import { Banner } from '@/components/ui/Banner';
-import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Input';
-import {
-  ApiClientError,
-  loginCustomer,
-  resendVerification,
-} from '@/lib/api-client';
-import { safeCustomerCallback } from '@/lib/customer-portal';
-import { CustomerLoginSchema, type CustomerLoginInput } from '@/lib/schemas';
-import {
-  OAuthButtons,
-  OAuthDivider,
-  mapOAuthErrorMessage,
-  useOAuthEnabled,
-} from './OAuthButtons';
 
-const GENERIC_LOGIN_ERROR = 'E-Mail oder Passwort falsch.';
+type Provider = 'google' | 'facebook';
+
+const CUSTOMER_AUTH_BASE_PATH = '/api/auth/customer';
+
+function mapErrorMessage(code: string | null): string | null {
+  if (!code) return null;
+  switch (code) {
+    case 'oauth_no_email':
+      return 'Dein Anbieter hat keine E-Mail-Adresse übermittelt. Bitte erlaube den E-Mail-Zugriff bei Google oder Facebook und versuche es erneut.';
+    case 'oauth_unverified_conflict':
+      return 'Es existiert bereits ein Konto mit dieser E-Mail-Adresse. Bitte melde dich mit dem ursprünglichen Anbieter an.';
+    case 'oauth_unverified':
+      return 'Dein Anbieter-Konto hat keine bestätigte E-Mail-Adresse.';
+    case 'oauth_finalize_failed':
+      return 'Die Anmeldung konnte nicht abgeschlossen werden. Bitte versuche es erneut.';
+    case 'oauth_error':
+      return 'Die Anmeldung wurde abgebrochen oder ist fehlgeschlagen. Bitte erneut versuchen.';
+    case 'legacy_credentials':
+      return 'Die E-Mail/Passwort-Anmeldung ist nicht mehr verfügbar. Bitte melde dich mit Google oder Facebook unter derselben E-Mail-Adresse an.';
+    default:
+      return null;
+  }
+}
 
 export function LoginForm() {
-  const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = safeCustomerCallback(
-    searchParams.get('callbackUrl') ?? searchParams.get('redirectUrl'),
-  );
-  const verifiedQuery = searchParams.get('verified');
   const errorQuery = searchParams.get('error');
-  const oauthEnabled = useOAuthEnabled();
+  const errorMessage = mapErrorMessage(errorQuery);
+  const [pending, setPending] = useState<Provider | null>(null);
 
-  const [submitting, setSubmitting] = useState(false);
-  const [serverError, setServerError] = useState<string | null>(null);
-  const [needsVerification, setNeedsVerification] = useState<string | null>(null);
-  const [resending, setResending] = useState(false);
-  const [resendSuccess, setResendSuccess] = useState<string | null>(null);
-
-  const {
-    register,
-    handleSubmit,
-    getValues,
-    formState: { errors },
-  } = useForm<CustomerLoginInput>({
-    resolver: zodResolver(CustomerLoginSchema),
-    mode: 'onBlur',
-    defaultValues: {
-      email: '',
-      password: '',
-      redirectUrl: callbackUrl,
-    },
-  });
-
-  const onSubmit = handleSubmit(async (values) => {
-    setServerError(null);
-    setNeedsVerification(null);
-    setResendSuccess(null);
-    setSubmitting(true);
-    try {
-      const result = await loginCustomer({
-        email: values.email,
-        password: values.password,
-        redirectUrl: callbackUrl,
-      });
-      const target = safeCustomerCallback(result.redirectUrl);
-      router.replace(target);
-      router.refresh();
-    } catch (err) {
-      if (err instanceof ApiClientError) {
-        if (err.status === 401) {
-          setServerError(GENERIC_LOGIN_ERROR);
-        } else if (err.code === 'EMAIL_NOT_VERIFIED' || err.status === 422) {
-          // OAUTH_ONLY_ACCOUNT (US-31) ist auch 422 — eigene Message:
-          if (err.message && /oauth/i.test(err.message)) {
-            setServerError(
-              'Dieses Konto ist für die Anmeldung mit Google/GitHub eingerichtet — bitte nutze den entsprechenden Anbieter-Button oben.',
-            );
-          } else {
-            setNeedsVerification(values.email);
-          }
-        } else if (err.code === 'RATE_LIMITED') {
-          setServerError('Zu viele Login-Versuche. Bitte 15 Minuten warten.');
-        } else {
-          setServerError(err.message || GENERIC_LOGIN_ERROR);
-        }
-      } else {
-        setServerError(GENERIC_LOGIN_ERROR);
-      }
-      setSubmitting(false);
-    }
-  });
-
-  const onResend = async () => {
-    if (!needsVerification) return;
-    setResending(true);
-    setResendSuccess(null);
-    try {
-      await resendVerification(needsVerification);
-      setResendSuccess(
-        'Wir haben dir eine neue Bestätigungs-E-Mail gesendet (sofern dein Konto noch nicht verifiziert ist).',
-      );
-    } catch {
-      setResendSuccess(
-        'Wir haben dir eine neue Bestätigungs-E-Mail gesendet (sofern dein Konto noch nicht verifiziert ist).',
-      );
-    } finally {
-      setResending(false);
-    }
+  const handleClick = (provider: Provider) => {
+    setPending(provider);
+    window.location.href = `${CUSTOMER_AUTH_BASE_PATH}/${provider}`;
   };
 
-  // Hinweise aus URL-Params (z.B. nach Verifikation oder OAuth-Fehler).
-  const oauthErrorMessage = mapOAuthErrorMessage(errorQuery);
-
-  const queryBanner = (() => {
-    if (verifiedQuery === '1') {
-      return {
-        tone: 'success' as const,
-        title: 'E-Mail bestätigt',
-        message:
-          'Deine E-Mail-Adresse wurde bestätigt. Du kannst dich jetzt einloggen.',
-      };
-    }
-    if (errorQuery === 'invalid_token') {
-      return {
-        tone: 'error' as const,
-        title: 'Bestätigungslink ungültig',
-        message:
-          'Der Bestätigungslink ist ungültig oder abgelaufen. Bitte fordere einen neuen Link an.',
-      };
-    }
-    if (oauthErrorMessage) {
-      return {
-        tone: 'error' as const,
-        title: 'Anmeldung fehlgeschlagen',
-        message: oauthErrorMessage,
-      };
-    }
-    return null;
-  })();
-
   return (
-    <div className="space-y-2">
-      {queryBanner && (
-        <div className="mb-4">
-          <Banner
-            tone={queryBanner.tone}
-            title={queryBanner.title}
-            role={queryBanner.tone === 'error' ? 'alert' : 'status'}
-          >
-            {queryBanner.message}
-          </Banner>
-        </div>
+    <div className="space-y-5">
+      {errorMessage && (
+        <Banner tone="error" title="Anmeldung fehlgeschlagen" role="alert">
+          {errorMessage}
+        </Banner>
       )}
 
-      {oauthEnabled && (
-        <>
-          <OAuthButtons />
-          <OAuthDivider label="oder" />
-        </>
-      )}
+      <div className="space-y-3">
+        <button
+          type="button"
+          onClick={() => handleClick('google')}
+          disabled={pending !== null}
+          aria-label="Mit Google fortfahren"
+          className="flex w-full items-center justify-center gap-3 rounded-lg border border-baerenstark-sand bg-white px-4 py-3 text-sm font-medium text-baerenstark-bark hover:bg-baerenstark-cream/50 transition disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent"
+        >
+          <GoogleIcon />
+          <span>
+            {pending === 'google' ? 'Wird umgeleitet …' : 'Mit Google fortfahren'}
+          </span>
+        </button>
 
-      <form onSubmit={onSubmit} noValidate className="space-y-4">
-        <Input
-          label="E-Mail"
-          type="email"
-          autoComplete="username"
-          required
-          error={errors.email?.message}
-          {...register('email')}
-        />
-        <Input
-          label="Passwort"
-          type="password"
-          autoComplete="current-password"
-          required
-          error={errors.password?.message}
-          {...register('password')}
-        />
+        <button
+          type="button"
+          onClick={() => handleClick('facebook')}
+          disabled={pending !== null}
+          aria-label="Mit Facebook fortfahren"
+          className="flex w-full items-center justify-center gap-3 rounded-lg border border-transparent bg-[#1877F2] px-4 py-3 text-sm font-medium text-white hover:bg-[#155EBF] transition disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent"
+        >
+          <FacebookIcon />
+          <span>
+            {pending === 'facebook' ? 'Wird umgeleitet …' : 'Mit Facebook fortfahren'}
+          </span>
+        </button>
+      </div>
 
-        <div className="flex justify-end">
-          <Link
-            href="/konto/passwort-vergessen"
-            className="text-sm text-baerenstark-wood underline-offset-2 hover:underline"
-          >
-            Passwort vergessen?
-          </Link>
-        </div>
-
-        {serverError && (
-          <Banner tone="error" role="alert">
-            {serverError}
-          </Banner>
-        )}
-
-        {needsVerification && (
-          <Banner tone="warning" title="E-Mail-Adresse noch nicht bestätigt" role="alert">
-            <p className="mb-3">
-              Bitte bestätige zuerst deine E-Mail-Adresse, indem du den Link aus
-              der Verifikations-E-Mail anklickst.
-            </p>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={onResend}
-              isLoading={resending}
-            >
-              Bestätigungs-E-Mail erneut senden
-            </Button>
-            {resendSuccess && (
-              <p className="mt-2 text-sm text-green-900">{resendSuccess}</p>
-            )}
-          </Banner>
-        )}
-
-        <Button type="submit" isLoading={submitting} className="w-full">
-          Einloggen
-        </Button>
-
-        <p className="pt-2 text-center text-sm text-baerenstark-bark/80">
-          Noch kein Konto?{' '}
-          <Link
-            href={
-              callbackUrl !== '/konto'
-                ? `/konto/registrieren?callbackUrl=${encodeURIComponent(callbackUrl)}`
-                : '/konto/registrieren'
-            }
-            className="text-baerenstark-wood underline-offset-2 hover:underline"
-          >
-            Jetzt registrieren
-          </Link>
-        </p>
-
-        {/* Hidden marker for tests / dev tools */}
-        <input
-          type="hidden"
-          name="callbackUrl"
-          value={getValues('redirectUrl') ?? callbackUrl}
-        />
-      </form>
+      <p className="rounded-md border border-baerenstark-sand bg-baerenstark-cream/50 p-3 text-xs leading-relaxed text-baerenstark-bark/80">
+        Eine Anmeldung mit E-Mail und Passwort ist nicht mehr möglich. Falls
+        du früher einen Account hattest, melde dich bitte mit Google oder
+        Facebook unter derselben E-Mail-Adresse an — bestehende Buchungen
+        werden automatisch verknüpft.
+      </p>
     </div>
+  );
+}
+
+function GoogleIcon() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 18 18"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <path
+        fill="#4285F4"
+        d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"
+      />
+      <path
+        fill="#34A853"
+        d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.836.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M3.964 10.707A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.039l3.007-2.332z"
+      />
+      <path
+        fill="#EA4335"
+        d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"
+      />
+    </svg>
+  );
+}
+
+function FacebookIcon() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M24 12.073C24 5.405 18.627 0 12 0S0 5.405 0 12.073C0 18.099 4.388 23.094 10.125 24v-8.437H7.078v-3.49h3.047V9.412c0-3.014 1.792-4.683 4.532-4.683 1.314 0 2.687.235 2.687.235v2.97h-1.514c-1.49 0-1.954.927-1.954 1.878v2.255h3.328l-.532 3.49h-2.796V24C19.612 23.094 24 18.1 24 12.073z" />
+    </svg>
   );
 }

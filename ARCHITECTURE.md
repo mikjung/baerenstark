@@ -1,8 +1,10 @@
 # Architektur — Bärenstark Hausservice Website
 
-**Version:** 1.5.1 (Iteration 5 — Design-Revision nach QA, US-30 bis US-34)
-**Stand:** 2026-05-02
+**Version:** 1.6.0 (Iteration 6 — Admin-Reife, Auth-Bereinigung, SEO; siehe §19 + ARCHITECTURE_IT6.md)
+**Stand:** 2026-05-03
 **Autor:** Solution Architect
+
+> Vor v1.6.0: Version 1.5.1 (Iteration 5 — Design-Revision nach QA, US-30 bis US-34, Stand 2026-05-02).
 
 ---
 
@@ -3973,3 +3975,60 @@ Engineers erweitern beim Implementieren die `.env.example`.
 | US-32 | Drei neue Adressfelder im Booking-Modell + Schema. `BookingForm` mit Pflicht-Inputs + 5-stellige PLZ-Validierung. Admin-Liste/Detail + Kunden-Detail zeigen Adresse. |
 | US-33 | `Booking.durationMinutes` neu. `<DurationPicker>` mit 8 Kacheln + Preisschätzung. Slot-API erweitert um `?duration=`. Backend berechnet `endTime` (Authority). Ganztag-Sonderwert reserviert volles Fenster. Admin-Liste/Detail zeigt Dauer. |
 | US-34 | `BufferConfig`-Singleton, Default 30. `GET/PUT /api/admin/buffer-config`. Slot-Berechnung berücksichtigt Buffer nur nach CONFIRMED. Admin-UI mit Dropdown. Buffer-Visualisierung im Admin-Kalender. Whitelist [0,15,30,45,60]. |
+
+---
+
+## 19. Iteration 6 — Technisches Design (US-IT6-01 bis US-IT6-09)
+
+**Version:** 1.6.0 (Iteration 6 — Admin-Reife, Auth-Bereinigung, SEO,
+Wachstums-Features). **Stand:** 2026-05-03.
+
+> Die vollständige Spec für Iteration 6 lebt in einem **separaten
+> Dokument**: [`ARCHITECTURE_IT6.md`](./ARCHITECTURE_IT6.md).
+> Begründung: das vorliegende ARCHITECTURE.md ist mit ~4.000 Zeilen
+> bereits sehr groß; ein dediziertes IT6-Doc bleibt navigierbar und
+> erlaubt Engineers, beim Build zwischen IT1–IT5-Bestand und IT6-
+> Neuem klar zu trennen.
+
+### 19.1 Inhalts-Überblick `ARCHITECTURE_IT6.md`
+
+| Kap. | Story        | Inhalt                                                                              |
+| ---- | ------------ | ----------------------------------------------------------------------------------- |
+| §1   | —            | Architektur-Entscheidungen, Stack-Beibehaltung, neue Libs.                          |
+| §2   | —            | Datenmodell-Migration: 5 Migrationen + Backfill-Logik.                              |
+| §3   | US-IT6-01    | Multi-Admin: `User.status`/`createdById`/`lastLoginAt`, Lock-out-Schutz, 4 Routes.  |
+| §4   | US-IT6-02    | Kalender-UX mit `@fullcalendar/react`; Aggregator-Endpoint; Kunden-Monatsansicht.  |
+| §5   | US-IT6-03    | Reviews mit COMPLETED-Trigger + Reject-Spur (`rejectedAt`/`moderatedById`).        |
+| §6   | US-IT6-04    | SEO: `sitemap.ts`, `robots.ts`, JSON-LD-Wrapper, Service-Detail-Pages, ISR.         |
+| §7   | US-IT6-05    | Auth-Bereinigung: GitHub raus, Facebook rein, Google-Bad-Request-Diagnose-Liste.    |
+| §8   | US-IT6-06    | User-Wipe-Skript `scripts/reset-users.ts` mit ENV-Gate.                             |
+| §9   | US-IT6-07    | Admin-Userverwaltung mit DTO-Trennung (`CustomerUserAdminSchema`).                  |
+| §10  | US-IT6-08    | `Booking.finalPriceEur` (Decimal) + `finalPriceNote`, customer-API filtert es aus.  |
+| §11  | US-IT6-09    | Analytics-Page mit `lib/analytics.ts`, recharts in Client-Inseln.                   |
+| §12  | Querschnitt  | `requireAdmin()`-Helper in `src/lib/auth-server.ts` (verbindlich).                  |
+| §13  | —            | Migrations-Reihenfolge & Roll-out-Phasen.                                           |
+| §14  | —            | Test-Plan IT6 inkl. DTO-Leak-Tests und Pressure-Tests.                              |
+| §15  | —            | Annahmen, NEEDS INPUT, Risiken (R1 DTO-Leak, R2 Auth-Reihenfolge, R3 Lock-out).     |
+| §16  | —            | Akzeptanzkriterien-Mapping IT6.                                                     |
+
+### 19.2 Begleitende Updates der Contracts
+
+- `contracts/schema.prisma` (v1.6) — `User.status`/`createdById`/`lastLoginAt`, `CustomerUser.adminNote`/`adminRating`, `Booking.finalPriceEur`/`finalPriceNote`, `Review.rejectedAt`/`moderatedById`/`moderatedAt`, neuer Enum `UserStatus`, neue Indexe.
+- `contracts/api-routes.md` (v1.6) — neuer Abschnitt §22 mit allen IT6-Endpoints (siehe §22.1 Multi-Admin, §22.2 Kalender, §22.3 Reviews, §22.4 Userverwaltung, §22.5 Final-Preis, §22.6 Analytics, §22.7 Story-Matrix, §22.8 Aufrufer-Mapping, §22.9 ENV-Variablen, §22.10 Rate-Limits).
+- `contracts/zod-schemas.ts` (v1.6) — neue Schemas am Dateiende; bestehende IT5-Konstanten unverändert; Engineering-Hinweis zur GitHub→Facebook-Umstellung.
+
+### 19.3 Akzeptanzkriterien-Mapping IT6 (Kurzfassung)
+
+Vollständiges Mapping siehe `ARCHITECTURE_IT6.md` §16.
+
+| Story        | Erfüllt durch                                                                                                                                |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| US-IT6-01    | `User.status` + 4 Admin-Routes + Lock-out-Schutz + Login-Status-Gate.                                                                       |
+| US-IT6-02    | FullCalendar-Integration; `/api/admin/calendar/events`-Aggregator; `/api/availability/calendar` für Kunden-Monatsansicht; Drag-to-create.   |
+| US-IT6-03    | `Review.rejectedAt`+Audit-Spalten; `POST /api/customer/reviews` prüft `COMPLETED`; `GET /api/reviews` filtert hart auf `approved AND !rejectedAt`. |
+| US-IT6-04    | `app/sitemap.ts`, `app/robots.ts`, `generateMetadata` pro Page, `<JsonLd>`-Wrapper, `next/image`+ISR, neue Service-Detail-Pages.            |
+| US-IT6-05    | NextAuth-Customer auf Google+Facebook reduziert; alle Email/Pw-Routes/Pages gelöscht (404). Diagnose-Checkliste für Google-Bad-Request.     |
+| US-IT6-06    | `scripts/reset-users.ts` mit `ALLOW_USER_WIPE`-ENV-Gate, Cascade-Reihenfolge Reviews → Bookings (anonymize/cancel) → CustomerUsers → Users. |
+| US-IT6-07    | `CustomerUser.adminNote`/`adminRating` neu; DTO-Trennung `CustomerUserPublicSchema` vs. `CustomerUserAdminSchema`; `/admin/users`-Page.     |
+| US-IT6-08    | `Booking.finalPriceEur` Decimal; `PATCH /api/admin/bookings/:id` erweitert; UI-Eingabe + Liste-Spalte; Customer-API filtert das Feld aus.   |
+| US-IT6-09    | Page `/admin/analytics` Server-Component; Prisma-Aggregationen + Raw-SQL-Monatsumsätze; recharts Client-Inseln; Empty-State.                |

@@ -24,12 +24,13 @@ import { formatIsoBerlinShort } from '@/lib/customer-portal';
 import type { Review } from '@/lib/schemas';
 import { getServiceLabel } from '@/lib/services';
 
-type FilterValue = 'all' | 'pending' | 'approved';
+type FilterValue = 'all' | 'pending' | 'approved' | 'rejected';
 
 const FILTERS: ReadonlyArray<{ value: FilterValue; label: string }> = [
   { value: 'all', label: 'Alle' },
   { value: 'pending', label: 'Ausstehend' },
   { value: 'approved', label: 'Freigegeben' },
+  { value: 'rejected', label: 'Abgelehnt' },
 ];
 
 type Status = 'loading' | 'ready' | 'error';
@@ -64,13 +65,29 @@ export function ReviewModerationTable() {
   }, [load]);
 
   const filtered = useMemo(() => {
-    if (filter === 'pending') return reviews.filter((r) => !r.approved);
+    // Optional `rejectedAt` (IT6) — fallback wenn Backend es nicht liefert.
+    type WithReject = Review & { rejectedAt?: string | null };
+    if (filter === 'pending') {
+      return reviews.filter(
+        (r) => !r.approved && !(r as WithReject).rejectedAt,
+      );
+    }
     if (filter === 'approved') return reviews.filter((r) => r.approved);
+    if (filter === 'rejected') {
+      return reviews.filter(
+        (r) => !r.approved && Boolean((r as WithReject).rejectedAt),
+      );
+    }
     return reviews;
   }, [reviews, filter]);
 
   const pendingCount = useMemo(
-    () => reviews.filter((r) => !r.approved).length,
+    () =>
+      reviews.filter(
+        (r) =>
+          !r.approved &&
+          !(r as Review & { rejectedAt?: string | null }).rejectedAt,
+      ).length,
     [reviews],
   );
 

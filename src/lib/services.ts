@@ -261,6 +261,25 @@ export function getServiceLabel(slug: Service | string): string {
 }
 
 /**
+ * Liefert ServiceInfo zu einem unsicheren String (z. B. URL-Param).
+ * Gibt `null` zurück, wenn der Slug nicht zu unseren Services gehört oder
+ * `'sonstiges'` ist (das hat keine eigene Detail-Page).
+ */
+export function getServiceBySlug(slug: string): ServiceInfo | null {
+  if (!(SERVICES as readonly string[]).includes(slug)) return null;
+  if (slug === 'sonstiges') return null;
+  return SERVICE_BY_SLUG[slug as Service];
+}
+
+/**
+ * Slugs, für die eine eigene `/services/[slug]`-Detail-Page existiert
+ * (= alle echten Services, ohne die Anfrage-Kategorie `'sonstiges'`).
+ * Wird von `generateStaticParams` und der Sitemap genutzt.
+ */
+export const SERVICE_DETAIL_SLUGS: ReadonlyArray<Exclude<Service, 'sonstiges'>> =
+  SERVICES.filter((s): s is Exclude<Service, 'sonstiges'> => s !== 'sonstiges');
+
+/**
  * US-20 — formatiert den Preis für die Anzeige auf Service-Karten und Popups.
  * Beispiele:
  *   priceFrom=35, priceUnit='hour' → "ab 35 €/Std."

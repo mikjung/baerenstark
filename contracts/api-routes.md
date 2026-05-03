@@ -3,6 +3,23 @@
 **Verbindliche Spezifikation für Frontend & Backend.**
 Alle Endpunkte sind Next.js Route Handlers unter `src/app/api/`.
 
+**Version:** 1.6.0 (Iteration 6 — US-IT6-01 bis US-IT6-09)
+
+**Änderungen v1.6.0 gegenüber v1.5.1:**
+
+- **US-IT6-01 (Multi-Admin):** 4 neue Admin-Endpunkte (`/api/admin/admins(/:id)`).
+- **US-IT6-02 (Kalender-UX):** 2 neue Endpunkte — `/api/admin/calendar/events` (Aggregator), `/api/availability/calendar` (öffentlicher Tag-Status-Feed).
+- **US-IT6-03 (Reviews):** Vorbedingung `POST /api/customer/reviews` auf `status='COMPLETED'` verschärft. `GET /api/admin/reviews?status=` neuer Filter. `PATCH /api/admin/reviews/:id` setzt zusätzlich `rejectedAt`/`moderatedAt`/`moderatedById`. Neue Fehlercodes `BOOKING_NOT_COMPLETED`, `REVIEW_EXISTS`.
+- **US-IT6-04 (SEO):** `sitemap.xml` und `robots.txt` als Next.js-Routes — keine API-Endpunkte.
+- **US-IT6-05 (Auth-Bereinigung):** Folgende Endpunkte werden **gelöscht** (404 nach IT6): `POST /api/customer/login`, `POST /api/customer/register`, `POST /api/customer/forgot-password`, `POST /api/customer/reset-password`, `POST /api/customer/resend-verification`, `GET /api/customer/verify`. Customer-OAuth-Provider auf Google + Facebook reduziert (GitHub raus).
+- **US-IT6-06 (User-Wipe):** kein HTTP-Endpoint; nur Skript `scripts/reset-users.ts` mit ENV-Gate `ALLOW_USER_WIPE=true`.
+- **US-IT6-07 (Admin-Userverwaltung):** 4 neue Endpunkte (`/api/admin/users(/:id)`). Neues DTO `CustomerUserAdminSchema` (mit `adminNote`/`adminRating`); `CustomerUserPublicSchema` bleibt leak-frei.
+- **US-IT6-08 (Finaler Preis):** `PATCH /api/admin/bookings/:id` erweitert um `finalPriceEur` + `finalPriceNote`. `BookingAdminSchema` erweitert; `CustomerBookingSchema` filtert die Felder explizit aus.
+- **US-IT6-09 (Analytics):** Neuer Endpoint `GET /api/admin/analytics?range=`. Page `/admin/analytics` lädt direkt via `lib/analytics.ts` (Server-Component); API ist Future-Use.
+- **Querschnitt:** `requireAdmin()`-Helper (siehe ARCHITECTURE_IT6.md §12) ist verbindlich für alle Admin-Endpunkte. Neue Fehlercodes `ACCOUNT_DISABLED` (422), `LAST_ADMIN_LOCK` (409), `SELF_MUTATION_FORBIDDEN` (409).
+
+---
+
 **Version:** 1.5.1 (Iteration 5 — Design-Revision nach QA, US-30 bis US-34)
 
 **Änderungen v1.5.1 gegenüber v1.5 (Design-Revision, kein Code-Bruch
@@ -2114,6 +2131,15 @@ PUBLIC_ADMIN_PATHS = [
 ];
 ```
 
+> **REVISED v1.6.1 (QA-Revision F1) — siehe `ARCHITECTURE_IT6.md`
+> Anhang B §17.1.** `/admin/setup` bleibt zwar in
+> `PUBLIC_ADMIN_PATHS`, aber `POST /api/admin/setup` ist **nicht mehr
+> bedingungslos** akzeptiert. Der Endpoint blockiert jeden Request,
+> dessen Email **nicht** mit der ENV-Var `BOOTSTRAP_ADMIN_EMAIL`
+> übereinstimmt (403 `BOOTSTRAP_NOT_ALLOWED`). Fehlt die ENV → 503
+> `SETUP_NOT_CONFIGURED`. Sobald `users` ≥ 1 Datensatz enthält,
+> liefert der Endpoint 410 `GONE` (ENV wird ignoriert).
+
 ---
 
 ### 21.2 OAuth2 Customer-Login (US-31)
@@ -2693,3 +2719,682 @@ funktioniert.
 | `GET /api/customer/oauth-finalize` (v1.5.1) | Kein eigenes Limit (NextAuth-Session ist Authority + nur Cookie-Set). |
 | `GET /api/admin/buffer-config`            | Kein Limit (Admin-only).                                   |
 | `PUT /api/admin/buffer-config`            | 30 / 60 min / Admin-Session (Sanity-Cap gegen Tippfehler). |
+
+---
+
+## 22. Iteration 6 — Endpoints (US-IT6-01 bis US-IT6-09)
+
+**Version:** 1.6.1 (Iteration 6 Design — QA-Revision 2026-05-03)
+
+> **REVISED v1.6.1 — `ARCHITECTURE_IT6.md` Anhang B (§17) ist
+> verbindlich.** Bei Konflikt zwischen einem Bestand-Abschnitt in §22
+> und Anhang B gilt Anhang B. Betroffene Abschnitte sind oben in §22.1
+> (Lock-out via `disableAdminSafely`), §22.3 (Public-Reviews-Schema-
+> Bindung), §22.4 (DTO-Helper + Sort-Whitelist), §22.5
+> (Cache-Invalidation + Review-Auto-Reject), §22.9 (neue ENV-Var
+> `BOOTSTRAP_ADMIN_EMAIL`).
+
+**Querschnitts-Convention:** Jeder Admin-Endpoint ruft als allerersten
+Schritt `requireAdmin()` (siehe `ARCHITECTURE_IT6.md` §12). Der Helper
+prüft Session UND `User.status === 'ACTIVE'`. Disabled-Admins erhalten
+403 `FORBIDDEN`.
+
+**Neue Fehlercodes IT6:**
+- `ACCOUNT_DISABLED` (422, Subtyp von `FORBIDDEN`) — Login mit deaktiviertem Admin-Konto. Frontend zeigt Hinweis-Banner auf der Login-Page.
+- `LAST_ADMIN_LOCK` (409, Subtyp von `CONFLICT`) — Versuch, den letzten aktiven Admin zu deaktivieren/löschen.
+- `SELF_MUTATION_FORBIDDEN` (409) — eingeloggter Admin will sich selbst deaktivieren oder löschen.
+- `BOOKING_NOT_COMPLETED` (409, Subtyp von `CONFLICT`) — Review für nicht-COMPLETED-Buchung.
+- `REVIEW_EXISTS` (409) — Review für die Buchung existiert bereits (auch wenn rejected).
+- `WIPE_NOT_ALLOWED` (— nur Skript) — `ALLOW_USER_WIPE`-ENV fehlt.
+- `BOOTSTRAP_NOT_ALLOWED` (403, NEU v1.6.1, F1) — `POST /api/admin/setup`-Email matched nicht `BOOTSTRAP_ADMIN_EMAIL`.
+- `SETUP_NOT_CONFIGURED` (503, NEU v1.6.1, F1) — `POST /api/admin/setup` aufgerufen, aber `BOOTSTRAP_ADMIN_EMAIL` ist nicht gesetzt.
+
+---
+
+### 22.1 Multi-Admin (US-IT6-01)
+
+#### `GET /api/admin/admins`
+
+**Auth:** Admin (`requireAdmin()`)
+**Story:** US-IT6-01 AC1
+
+Liste aller Admins (auch DISABLED). Sortierung: `createdAt asc`.
+
+**Response 200:**
+
+```json
+{
+  "data": [
+    {
+      "id": "u_abc",
+      "name": "Tom Siefert",
+      "email": "tom@baerenstark-hausservice.de",
+      "status": "ACTIVE",
+      "createdAt": "2026-04-01T08:00:00.000Z",
+      "lastLoginAt": "2026-05-03T07:14:00.000Z",
+      "createdById": null
+    },
+    {
+      "id": "u_xyz",
+      "name": "Lisa Aushilfe",
+      "email": "lisa@example.de",
+      "status": "ACTIVE",
+      "createdAt": "2026-05-03T09:00:00.000Z",
+      "lastLoginAt": null,
+      "createdById": "u_abc"
+    }
+  ],
+  "total": 2
+}
+```
+
+Schema: Array von `AdminListItemSchema` (siehe `contracts/zod-schemas.ts` §16).
+
+---
+
+#### `POST /api/admin/admins`
+
+**Auth:** Admin
+**Story:** US-IT6-01 AC2
+
+Legt einen neuen Admin an.
+
+**Request Body** (`CreateAdminSchema`):
+
+```json
+{
+  "name": "Lisa Aushilfe",
+  "email": "lisa@example.de",
+  "password": "Sehr-Sicher-2026!"
+}
+```
+
+| Feld     | Validierung                                                                        |
+| -------- | ----------------------------------------------------------------------------------- |
+| name     | trim, 2–120 Zeichen.                                                                |
+| email    | lowercased, gültige Adresse, UNIQUE in `users.email`. Bei Konflikt 409 `EMAIL_TAKEN`. |
+| password | mind. 12 Zeichen; ein Großbuchstabe + ein Kleinbuchstabe + eine Ziffer (Regex).     |
+
+**Verhalten:**
+1. `requireAdmin()` → wirft 401/403.
+2. Email-Lookup; falls existiert → 409.
+3. `bcrypt.hash(password, 10)`.
+4. `prisma.user.create({ data: { ..., createdById: me.id, status: 'ACTIVE' } })`.
+
+**Response 201:** `AdminListItemSchema` (ohne `password`).
+
+**Fehler:** 400 `VALIDATION_ERROR`, 401 `UNAUTHORIZED`, 403 `FORBIDDEN`, 409 `CONFLICT` (mit `field: 'email'`).
+
+---
+
+#### `PATCH /api/admin/admins/:id`
+
+**Auth:** Admin
+**Story:** US-IT6-01 AC3, AC4, AC6
+
+Edit Name, Email oder Status.
+
+**Request Body** (`UpdateAdminSchema`, alle Felder optional, mind. eines):
+
+```json
+{
+  "name": "Lisa Aushilfe (Senior)",
+  "email": "lisa.neu@example.de",
+  "status": "DISABLED"
+}
+```
+
+**Lock-out-Schutz (REVISED v1.6.1 — F2, siehe `ARCHITECTURE_IT6.md`
+Anhang B §17.2):**
+- Wenn `status === 'DISABLED'` und `:id === me.id` → 409 `SELF_MUTATION_FORBIDDEN`.
+- Wenn `status === 'DISABLED'`: der Status-Wechsel erfolgt
+  **atomar** über den Helper `disableAdminSafely(targetId)`
+  (`src/lib/admin-status.ts`). Der Helper führt einen einzigen
+  Conditional UPDATE aus:
+  ```sql
+  UPDATE users
+  SET status = 'DISABLED'
+  WHERE id = :targetId
+    AND status = 'ACTIVE'
+    AND EXISTS (
+      SELECT 1 FROM users u2
+      WHERE u2.id <> :targetId AND u2.status = 'ACTIVE'
+    );
+  ```
+  Bei `affectedRows === 0` differenziert der Handler via Read:
+  Target schon DISABLED → idempotente 200; sonst → 409 `LAST_ADMIN_LOCK`.
+  Damit ist die Letzter-Admin-Race (TOCTOU zwischen `count()` und
+  `update()`) konstruktionsbedingt ausgeschlossen.
+- Email-Konflikt: 409 `CONFLICT` (field='email').
+
+**Response 200:** `AdminListItemSchema`.
+
+**Fehler:** 400, 401, 403, 404, 409.
+
+---
+
+#### `DELETE /api/admin/admins/:id`
+
+**Auth:** Admin
+**Story:** US-IT6-01 AC3, AC7
+
+**Verhalten:** Soft-Delete via `status: 'DISABLED'` (echtes DELETE würde `Review.moderatedById`-FK brechen). Identisch zur PATCH-Variante mit `{ status: 'DISABLED' }`. Im Frontend als „Löschen"-Button beschriftet, weil Tom semantisch das meint.
+
+**Lock-out-Schutz (REVISED v1.6.1):** wie PATCH — nutzt denselben
+`disableAdminSafely()`-Helper. `SELF_MUTATION_FORBIDDEN` und
+`LAST_ADMIN_LOCK` sind die einzigen 409-Subcodes.
+
+**Response 204:** kein Body.
+
+**Fehler:** 401, 403, 404, 409.
+
+---
+
+### 22.2 Kalender-UX (US-IT6-02)
+
+#### `GET /api/admin/calendar/events?from=YYYY-MM-DD&to=YYYY-MM-DD`
+
+**Auth:** Admin
+**Story:** US-IT6-02
+
+Aggregator-Endpoint: liefert in einem Roundtrip alle Daten, die der
+FullCalendar-Admin-View braucht — Buchungen, Verfügbarkeitsfenster
+(Template + Override), Buffer-Blöcke. Reduziert Wasserfall.
+
+**Query-Parameter:**
+
+| Name | Pflicht | Format | Range                                          |
+| ---- | ------- | ------ | ---------------------------------------------- |
+| from | ja      | `YYYY-MM-DD` | inklusiv. Max 90 Tage Range (`to - from <= 90`). |
+| to   | ja      | `YYYY-MM-DD` | inklusiv.                                       |
+
+**Response 200:**
+
+```json
+{
+  "data": {
+    "events": [
+      {
+        "id": "bk_abc",
+        "type": "BOOKING",
+        "title": "Maria Müller — Entrümpelung",
+        "start": "2026-05-15T09:00:00+02:00",
+        "end":   "2026-05-15T13:00:00+02:00",
+        "status": "CONFIRMED",
+        "color":  "#22c55e",
+        "url":    "/admin/bookings/bk_abc"
+      },
+      {
+        "id": "buf_bk_abc",
+        "type": "BUFFER",
+        "title": "Pufferzeit",
+        "start": "2026-05-15T13:00:00+02:00",
+        "end":   "2026-05-15T13:30:00+02:00",
+        "color": "#9ca3af"
+      },
+      {
+        "id": "avail_2026-05-15",
+        "type": "AVAILABILITY",
+        "title": "Verfügbar",
+        "start": "2026-05-15T08:00:00+02:00",
+        "end":   "2026-05-15T17:00:00+02:00",
+        "display": "background"
+      }
+    ]
+  }
+}
+```
+
+**Verhalten:**
+- Buchungen: alle aktiven Stati (`PENDING`, `CONFIRMED`, `COUNTER_PROPOSED`, `COMPLETED`) im Range.
+- Verfügbarkeit: kombiniert `AvailabilityTemplate[dayOfWeek]` + `DayOverride[date]` per `lib/availability.ts.resolveDay(date)`.
+- Buffer-Blöcke: für jede CONFIRMED-Buchung im Range mit `BufferConfig.bufferMinutes`-Suffix.
+- ISO-8601 mit Berlin-Offset (Sommer/Winter berücksichtigt).
+- Cache: keiner (Daten ändern sich häufig).
+
+**Fehler:** 400 `VALIDATION_ERROR` (`from`/`to`-Range), 401, 403.
+
+---
+
+#### `GET /api/availability/calendar?from=&to=&serviceId=`
+
+**Auth:** öffentlich
+**Story:** US-IT6-02 (Kunden-Monatsansicht)
+
+Pro Tag im Range den Status. Wird vom Kunden-`<BookingCalendar>` für
+die Monatsansicht verwendet.
+
+**Query-Parameter:**
+
+| Name      | Pflicht | Anmerkung |
+| --------- | ------- | --------- |
+| from      | ja      | `YYYY-MM-DD`, inklusiv. Max 62 Tage Range. |
+| to        | ja      | `YYYY-MM-DD`, inklusiv.                    |
+| serviceId | nein    | Reserviert für IT7 (Service-spezifische Verfügbarkeit). MVP ignoriert ihn. |
+
+**Response 200:**
+
+```json
+{
+  "data": {
+    "days": [
+      { "date": "2026-05-15", "status": "available" },
+      { "date": "2026-05-16", "status": "partial"   },
+      { "date": "2026-05-17", "status": "unavailable" }
+    ]
+  }
+}
+```
+
+`status`-Mapping:
+- `available` — irgend ein Slot im Tag noch buchbar.
+- `partial` — Tag aktiv, aber alle Slots durch Buchungen+Buffer belegt für Default-Dauer.
+- `unavailable` — Tag inaktiv (Template `isActive=false` oder DayOverride `isActive=false`).
+
+**Cache:** `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`.
+
+**Fehler:** 400 (Range > 62 Tage).
+
+---
+
+### 22.3 Reviews IT6-Verschärfung (US-IT6-03)
+
+#### `POST /api/customer/reviews` — verschärft
+
+**Auth:** Customer-Session
+**Story:** US-IT6-03 AC1, AC2, AC3, AC7
+
+**Body:** unverändert (`CreateReviewSchema`).
+
+**Geänderte Vorbedingung:** `booking.status === 'COMPLETED'` (vorher
+laut IT4-Spec evtl. CONFIRMED — siehe Story-Notes). Bei
+`status !== 'COMPLETED'` → 409 `BOOKING_NOT_COMPLETED`.
+
+**Idempotenz / Spam-Schutz:** wenn `booking.review` existiert (egal
+ob PENDING/APPROVED/REJECTED), → 409 `REVIEW_EXISTS`.
+
+**Response 201:** `ReviewSchema`.
+
+---
+
+#### `PATCH /api/admin/reviews/:id` — Erweiterung
+
+**Auth:** Admin
+**Story:** US-IT6-03 AC4, AC5
+
+**Body** (unverändert: `ApproveReviewSchema`):
+
+```json
+{ "approved": true }
+```
+
+**Verhalten:**
+- `approved: true` → setzt `approved=true`, `rejectedAt=null`, `moderatedAt=now()`, `moderatedById=me.id`.
+- `approved: false` → setzt `approved=false`, `rejectedAt=now()`, `moderatedAt=now()`, `moderatedById=me.id`.
+
+**Response 200:** erweitertes `ReviewSchema` mit `rejectedAt`, `moderatedAt`, `moderatedById`.
+
+---
+
+#### `GET /api/reviews` — verschärft
+
+**Auth:** öffentlich
+**Story:** US-IT6-03 AC6
+
+**Filter (verbindlich):** `WHERE approved = true AND rejectedAt IS NULL`.
+Defense-in-Depth: zweite Bedingung verhindert Bug-Klasse, in der
+`approved` versehentlich nicht zurückgesetzt wird.
+
+**Output-Schema (REVISED v1.6.1 — m1, siehe `ARCHITECTURE_IT6.md`
+Anhang B §17.5):** Response-Body wird **ausschließlich** gegen
+`PublicReviewSchema.strict()` (siehe `contracts/zod-schemas.ts`)
+serialisiert.
+
+Whitelist-Felder im Output (verbindlich):
+- `id`
+- `customerName` (Format `"Vorname N."` — Backend kürzt `lastName`
+  auf den ersten Buchstaben + Punkt; Fallback `"Anonym"` bei
+  `customerId === null`)
+- `service`
+- `stars`
+- `text`
+- `createdAt`
+
+**Verboten im Output:** `customerId`, `bookingId`, `userId`,
+`moderatedById`, `rejectedAt`, `moderatedAt`, vollständiger Nachname,
+Email, Telefonnummer, OAuth-Provider, Avatar.
+
+**Cache-Tag (m5/m7):** Antwort wird mit
+`unstable_cache([...], { tags: ['public-reviews'], revalidate: 60 })`
+gewrapped. Tag-Invalidation erfolgt im PATCH-Pfad von
+`/api/admin/reviews/:id` (Approve/Reject) und beim Auto-Reject im
+PATCH `/api/admin/bookings/:id` (Status-Rollback aus COMPLETED, siehe
+§17.11).
+
+---
+
+#### `GET /api/admin/reviews?status=`
+
+**Auth:** Admin
+**Story:** US-IT6-03 AC4
+
+**Query (NEU):**
+
+| Name   | Werte                                              |
+| ------ | -------------------------------------------------- |
+| status | `PENDING_APPROVAL` \| `APPROVED` \| `REJECTED` \| (omit für alle) |
+
+**Mapping:**
+- `PENDING_APPROVAL`: `approved=false AND rejectedAt IS NULL`
+- `APPROVED`: `approved=true`
+- `REJECTED`: `approved=false AND rejectedAt IS NOT NULL`
+
+---
+
+### 22.4 Admin-Userverwaltung (US-IT6-07)
+
+> **REVISED v1.6.1 (F3 + m2, siehe `ARCHITECTURE_IT6.md` Anhang B §17.3
+> + §17.6).** Alle Endpoints unter `/api/admin/users*` MÜSSEN
+> Prisma-Selects ausschließlich über den Helper
+> `selectCustomerUserAdmin()` (`src/lib/dto/user.ts`) bauen. Direktes
+> `prisma.customerUser.find*()` ohne Helper ist verboten — der
+> CI-Architektur-Test (siehe Anhang B §17.3.4) blockt PRs, die das
+> umgehen. Die korrespondierenden Customer-Endpoints unter
+> `/api/customer/*` nutzen `selectCustomerUserPublic()` und parsen den
+> Output durch `CustomerUserPublicSchema.strict()`.
+>
+> **Sort-Whitelist (m2):** Der `sort`-Param ist auf
+> `lastName_asc | createdAt_desc | bookingCount_desc | adminRating_desc`
+> beschränkt (Zod-Enum). Für Customer-API ist `sort` **vollständig
+> verboten** — kein Customer-Endpoint nimmt den Param entgegen.
+
+#### `GET /api/admin/users`
+
+**Auth:** Admin
+**Story:** US-IT6-07 AC1, AC8
+
+**Query:**
+
+| Name      | Default | Anmerkung                                                |
+| --------- | ------- | -------------------------------------------------------- |
+| q         | —       | Freitext, mind. 2 Zeichen, sucht in `firstName`+`lastName`+`email` (case-insensitive). |
+| page      | `1`     | 1-basiert.                                               |
+| pageSize  | `25`    | max 100.                                                 |
+| sort      | `lastName_asc` | enum: `lastName_asc`, `createdAt_desc`, `bookingCount_desc`, `adminRating_desc`. |
+
+**Response 200:**
+
+```json
+{
+  "data": [
+    {
+      "id": "cu_abc",
+      "email": "maria@example.de",
+      "firstName": "Maria",
+      "lastName": "Müller",
+      "phone": "0157-12345678",
+      "emailVerified": true,
+      "oauthProvider": "google",
+      "avatarUrl": "https://...",
+      "adminNote": "VIP — pünktliche Zahlung",
+      "adminRating": 5,
+      "bookingCount": 7,
+      "createdAt": "2026-03-12T10:30:00.000Z"
+    }
+  ],
+  "total": 142,
+  "page": 1,
+  "pageSize": 25
+}
+```
+
+Schema: `CustomerUserAdminSchema[]` (siehe `contracts/zod-schemas.ts` §16).
+
+---
+
+#### `GET /api/admin/users/:id`
+
+**Auth:** Admin
+**Story:** US-IT6-07 AC2
+
+**Response 200:** `CustomerUserAdminSchema` + `bookings: CustomerBookingSchema[]` (alle Buchungen des Kunden, sortiert nach `date desc`).
+
+---
+
+#### `PATCH /api/admin/users/:id`
+
+**Auth:** Admin
+**Story:** US-IT6-07 AC3, AC7
+
+**Body** (`UpdateCustomerUserAdminSchema`, alle optional, mind. eines):
+
+```json
+{
+  "firstName": "Maria",
+  "lastName":  "Müller-Schmidt",
+  "phone":     "0157-99999999",
+  "adminNote": "VIP",
+  "adminRating": 5
+}
+```
+
+| Feld         | Validierung                                                                  |
+| ------------ | ---------------------------------------------------------------------------- |
+| firstName    | trim, 1–120.                                                                  |
+| lastName     | trim, 1–120.                                                                  |
+| phone        | bestehendes `phoneSchema` (nullable).                                         |
+| adminNote    | trim, max 1000 Zeichen, oder `null` zum Löschen.                              |
+| adminRating  | int 1..5, oder `null` zum Löschen.                                            |
+
+**Wichtig:** `email`-Änderung ist **nicht** zulässig (Engineering-
+Konvention; siehe BUG-402 in IT4 — auch im Admin-Pfad gilt das, weil
+sonst OAuth-Konsistenz bricht). Versuche ergeben 400 `VALIDATION_ERROR`.
+
+**Response 200:** `CustomerUserAdminSchema`.
+
+---
+
+#### `DELETE /api/admin/users/:id`
+
+**Auth:** Admin
+**Story:** US-IT6-07 AC6
+
+**Verhalten:**
+1. `prisma.customerUser.delete({ where: { id } })`.
+2. ON DELETE SET NULL auf `Booking.customerId` macht Anonymisierung automatisch.
+3. Reviews mit `customerId === id` bekommen `customerId = null` (siehe IT4 onDelete-Verhalten).
+
+**Response 204.**
+
+**Fehler:** 401, 403, 404.
+
+---
+
+### 22.5 Finaler Preis pro Buchung (US-IT6-08)
+
+#### `PATCH /api/admin/bookings/:id` — Erweiterung
+
+**Auth:** Admin
+**Story:** US-IT6-08 AC1, AC2, AC3
+
+> **Hinweis:** in IT1–IT5 lief der Status-Update über `PATCH /api/bookings/:id` (Admin-only). In IT6 wird der Update-Endpoint **konsolidiert** unter `/api/admin/bookings/:id`, damit alle Admin-Mutations konsistent unter `/api/admin/*` liegen. Der alte `PATCH /api/bookings/:id` bleibt als Alias und delegiert.
+
+**Body** (`AdminBookingPatchSchema`, alle optional):
+
+```json
+{
+  "status": "COMPLETED",
+  "finalPriceEur": "185.00",
+  "finalPriceNote": "inkl. Anfahrt"
+}
+```
+
+| Feld           | Validierung                                                                                                                |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| status         | Enum (siehe State-Machine-Spec IT4).                                                                                        |
+| finalPriceEur  | string oder number; nach Komma→Punkt-Normalisierung muss `0 <= x <= 100000` gelten. `null` = entfernen. Validation message: "Bitte einen gültigen Betrag in Euro eingeben (0–100.000)." |
+| finalPriceNote | trim, max 200 Zeichen. `null` = entfernen.                                                                                  |
+
+**Sichtbarkeit:** `finalPriceEur` und `finalPriceNote` erscheinen in `BookingAdminSchema`, `UpcomingBookingSchema` (NEU für Spalte/Badge in der Liste). NICHT in `CustomerBookingSchema`.
+
+**Response 200:** `BookingAdminSchema` (erweitert).
+
+**Cache-Invalidation (REVISED v1.6.1 — m5, siehe `ARCHITECTURE_IT6.md`
+Anhang B §17.9):** Im Erfolgs-Pfad ruft der Handler `revalidateTag('analytics')`
+auf, wenn
+
+- `finalPriceEur` im Body gesetzt ist (auch bei `null` zum Löschen), ODER
+- der Status zu/von `COMPLETED` wechselt.
+
+Damit reflektiert `/admin/analytics` (sowie `GET /api/admin/analytics`)
+sofort den neuen Wert (Latenz < 2 s).
+
+**Side-Effect: Review-Auto-Reject (REVISED v1.6.1 — m7, siehe Anhang B
+§17.11):** Wenn die Buchung eine Review hat (`booking.review != null`)
+und der Status aus `COMPLETED` zurückläuft (typischerweise `CANCELLED`),
+setzt der Handler in derselben Transaktion automatisch:
+
+- `review.approved = false`
+- `review.rejectedAt = now()`
+- `review.moderatedAt = now()`
+- `review.moderatedById = me.id`
+
+Anschließend `revalidateTag('public-reviews')`. Damit verschwindet die
+Review aus `GET /api/reviews` (siehe §22.3-Filter).
+
+---
+
+### 22.6 Analytics (US-IT6-09)
+
+#### `GET /api/admin/analytics?range=`
+
+**Auth:** Admin
+**Story:** US-IT6-09 AC1, AC2, AC7
+
+**Query:**
+
+| Name  | Werte                                | Default |
+| ----- | ------------------------------------ | ------- |
+| range | `30d` \| `90d` \| `12m` \| `ytd` \| `custom` | `12m`   |
+| from  | `YYYY-MM-DD` (nur bei `custom`)      | —       |
+| to    | `YYYY-MM-DD` (nur bei `custom`)      | —       |
+
+**Response 200:**
+
+```json
+{
+  "data": {
+    "range": { "from": "2025-05-01", "to": "2026-05-03" },
+    "kpis": {
+      "totalRevenueEur": "12450.00",
+      "completedBookings": 87,
+      "averageOrderValueEur": "143.10",
+      "bookingsThisMonth": 12
+    },
+    "revenueByMonth": [
+      { "month": "2025-06", "totalEur": "1200.00", "count": 8 },
+      { "month": "2025-07", "totalEur": "1450.00", "count": 9 }
+    ],
+    "bookingsByService": [
+      { "service": "entruempelung", "count": 31 },
+      { "service": "reinigung",     "count": 24 }
+    ],
+    "topCustomers": [
+      {
+        "customerId": "cu_abc",
+        "customerName": "Maria M.",
+        "totalEur": "1340.00",
+        "bookingCount": 6
+      }
+    ]
+  }
+}
+```
+
+**Empty-State:** wenn alle Aggregationen 0/null sind, `kpis` enthält `null`-Werte für `totalRevenueEur`/`averageOrderValueEur`. Frontend zeigt Banner "Noch keine Umsatzdaten".
+
+**Fehler:** 400 `VALIDATION_ERROR` (Custom-Range-Validation), 401, 403.
+
+**Cache:** `Cache-Control: private, max-age=300` + Server-side ISR (Page-Komponente, siehe ARCHITECTURE_IT6.md §11.1).
+
+---
+
+### 22.7 Endpoint-zu-Story-Matrix (Iteration 6)
+
+| Endpoint                                            | Story        | Methode  |
+| --------------------------------------------------- | ------------ | -------- |
+| `/api/admin/admins`                                  | US-IT6-01    | GET      |
+| `/api/admin/admins`                                  | US-IT6-01    | POST     |
+| `/api/admin/admins/:id`                              | US-IT6-01    | PATCH    |
+| `/api/admin/admins/:id`                              | US-IT6-01    | DELETE   |
+| `/api/admin/calendar/events`                         | US-IT6-02    | GET      |
+| `/api/availability/calendar`                         | US-IT6-02    | GET      |
+| `/api/customer/reviews` (Vorbedingung verschärft)    | US-IT6-03    | POST     |
+| `/api/admin/reviews?status=`                         | US-IT6-03    | GET      |
+| `/api/admin/reviews/:id` (Reject-Spur)               | US-IT6-03    | PATCH    |
+| `/api/reviews` (Filter verschärft)                   | US-IT6-03    | GET      |
+| `/sitemap.xml` (Next.js-Route)                       | US-IT6-04    | GET      |
+| `/robots.txt` (Next.js-Route)                        | US-IT6-04    | GET      |
+| `/api/auth/customer/[...nextauth]` (Provider-Wechsel)| US-IT6-05    | GET/POST |
+| `/api/customer/login` (404 nach IT6)                 | US-IT6-05    | —        |
+| `/api/customer/register` (404 nach IT6)              | US-IT6-05    | —        |
+| `/api/customer/forgot-password` (404)                | US-IT6-05    | —        |
+| `/api/customer/reset-password` (404)                 | US-IT6-05    | —        |
+| `/api/customer/resend-verification` (404)            | US-IT6-05    | —        |
+| `/api/customer/verify` (404)                         | US-IT6-05    | —        |
+| `scripts/reset-users.ts` (kein HTTP-Endpoint)        | US-IT6-06    | tsx      |
+| `/api/admin/users`                                   | US-IT6-07    | GET      |
+| `/api/admin/users/:id`                               | US-IT6-07    | GET      |
+| `/api/admin/users/:id`                               | US-IT6-07    | PATCH    |
+| `/api/admin/users/:id`                               | US-IT6-07    | DELETE   |
+| `/api/admin/bookings/:id` (Erweiterung)              | US-IT6-08    | PATCH    |
+| `/api/admin/analytics`                               | US-IT6-09    | GET      |
+
+---
+
+### 22.8 Frontend-Aufrufer-Mapping (Iteration 6)
+
+| Page                          | Endpoints                                                            |
+| ----------------------------- | -------------------------------------------------------------------- |
+| `/admin/admins`               | GET/POST/PATCH/DELETE `/api/admin/admins(/:id)`                      |
+| `/admin/kalender`             | GET `/api/admin/calendar/events?from=&to=`                          |
+| `/admin/users`                | GET `/api/admin/users?q=&page=&sort=`                                |
+| `/admin/users/:id` (Drawer)   | GET/PATCH/DELETE `/api/admin/users/:id`                              |
+| `/admin/bookings/:id`         | PATCH `/api/admin/bookings/:id` (mit `finalPriceEur`/`finalPriceNote`) |
+| `/admin/reviews`              | GET `/api/admin/reviews?status=` + PATCH `/api/admin/reviews/:id`    |
+| `/admin/analytics`            | direktes Server-Component-Loading via `lib/analytics.ts` (kein API-Roundtrip) — optional `GET /api/admin/analytics` für Future-Use. |
+| `/buchung`                    | GET `/api/availability/calendar?from=&to=`                          |
+| `/konto/login`                | NextAuth-OAuth-Buttons (Google + Facebook)                           |
+| `/` (Landingpage)             | GET `/api/reviews?limit=6&minStars=4` (Bestand)                      |
+| `/services/:slug`             | statisch ISR — kein API-Call                                          |
+
+---
+
+### 22.9 ENV-Variablen (Iteration 6 ergänzt)
+
+| Variable            | Pflicht | Beschreibung                                                                                |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------- |
+| `FACEBOOK_CLIENT_ID`     | wenn FB OAuth aktiv | Meta Developer Portal → App-Settings → App ID.                                  |
+| `FACEBOOK_CLIENT_SECRET` | wenn FB OAuth aktiv | Meta Developer Portal → App-Settings → App Secret.                              |
+| `GITHUB_CLIENT_ID`       | **entfernt**       | GitHub-Provider raus. Variablen können in `.env` belassen bleiben (ignored).    |
+| `GITHUB_CLIENT_SECRET`   | **entfernt**       | s.o.                                                                              |
+| `ALLOW_USER_WIPE`        | nur für Wipe-Skript | `true`, sonst lehnt `scripts/reset-users.ts` ab.                                  |
+| `NEXTAUTH_URL`           | ja                 | Muss exakt der Produktions-Domain entsprechen (kein Trailing-Slash). Siehe ARCHITECTURE_IT6.md §7.5. |
+| `BOOTSTRAP_ADMIN_EMAIL`  | nur Bootstrap-Fenster (NEU v1.6.1, F1) | Allowlist-Email für `POST /api/admin/setup`. **MUSS** vor dem Wipe gesetzt sein, sonst blockiert Setup mit 503 `SETUP_NOT_CONFIGURED`. Wird vom Endpoint **nur** ausgewertet, solange `users` leer ist (siehe ARCHITECTURE_IT6.md Anhang B §17.1). Empfohlen: nach erfolgreichem Bootstrap aus Hosting-Env entfernen. |
+
+---
+
+### 22.10 Rate-Limits (Iteration 6 ergänzt)
+
+| Endpoint                              | Rate-Limit                                                              |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `POST /api/admin/admins`              | 10 / Stunde / Admin-Session.                                            |
+| `PATCH /api/admin/admins/:id`         | 30 / Stunde / Admin-Session.                                            |
+| `DELETE /api/admin/admins/:id`        | 10 / Stunde / Admin-Session.                                            |
+| `PATCH /api/admin/users/:id`          | 60 / Stunde / Admin-Session (Tom darf Notizen flüssig pflegen).         |
+| `DELETE /api/admin/users/:id`         | 30 / Stunde / Admin-Session.                                            |
+| `GET /api/admin/calendar/events`      | 120 / Minute / Admin-Session (Kalender-Polling).                        |
+| `GET /api/availability/calendar`      | 60 / Minute / IP (öffentlich, gecached).                                |
+| `GET /api/admin/analytics`            | 30 / Minute / Admin-Session.                                            |
+| `POST /api/customer/reviews`          | 5 / Stunde / Customer-Session (Spam-Schutz).                            |
+

@@ -4,69 +4,74 @@
  * Importiert `customer-auth.ts` (Edge-safe) UND Prisma. Diese Datei darf
  * NIE aus der Edge-Middleware geladen werden — sonst zieht Prisma in den
  * Edge-Build.
+ *
+ * IT6 / US-IT6-07 (F3-Resolution): nutzt `selectCustomerUserPublic()` —
+ * `adminNote` und `adminRating` werden NIEMALS aus der DB gelesen, wenn
+ * der Caller im Customer-Pfad ist. Der CI-Test
+ * `tests/architecture/no-raw-customer-user-find.test.ts` erzwingt diese
+ * Konvention.
  */
 
 import type { NextRequest } from 'next/server';
-import type { CustomerUser } from '@prisma/client';
 import { prisma } from './prisma';
 import {
   readCustomerSessionFromRequest,
   type CustomerSession,
 } from './customer-auth';
+import {
+  selectCustomerUserPublic,
+  type CustomerUserPublicRow,
+} from './dto/user';
 
 /**
- * Liest die Session aus dem Cookie UND lädt den vollen `CustomerUser` aus
- * der DB. Liefert `null`, wenn:
+ * Liest die Session aus dem Cookie UND lädt den `CustomerUser` aus der DB
+ * mit dem **Public-Select**. Liefert `null`, wenn:
  *   - kein Cookie gesetzt ist,
  *   - das JWT ungültig/abgelaufen ist,
  *   - der Customer in der DB nicht (mehr) existiert.
  *
- * Engineers-Hinweis: NIEMALS den `passwordHash` im Response zurückgeben.
- * Konsumenten von `getCustomerFromRequest()` sollten das Ergebnis durch
- * `toCustomerPublic()` schicken, bevor er an den Client geht.
+ * **Wichtig:** Das zurückgegebene Objekt enthält `passwordHash` (für die
+ * `hasPassword`-Berechnung), aber NIEMALS `adminNote` oder `adminRating`.
+ * Mapper `toCustomerPublic()` entfernt `passwordHash` aus der Response.
  */
 export async function getCustomerFromRequest(
   req: NextRequest,
-): Promise<CustomerUser | null> {
+): Promise<CustomerUserPublicRow | null> {
   const session: CustomerSession | null =
     await readCustomerSessionFromRequest(req);
   if (!session) return null;
 
   const user = await prisma.customerUser.findUnique({
     where: { id: session.customerId },
+    select: selectCustomerUserPublic(),
   });
   return user;
 }
 
 /**
  * Maps einen DB-`CustomerUser` auf die öffentliche API-Form
- * (`CustomerUserPublicSchema`). Entfernt `passwordHash` und alle
- * Token-Felder. Iteration 5 fügt `oauthProvider`, `avatarUrl` und das
- * abgeleitete `hasPassword` hinzu (US-31 AC6 — Profil-Seite zeigt das
- * Pw-Feld nur, wenn ein lokales Passwort gesetzt ist).
+ * (`CustomerUserPublicSchema.strict()`). Entfernt `passwordHash`.
+ *
+ * IT6 (F3-Resolution): Output wird gegen das `.strict()`-Schema validiert,
+ * bevor er ans Client-Objekt gereicht wird. Das stellt sicher, dass weder
+ * `adminNote` noch `adminRating` (selbst bei zukünftigen Schema-Erweiterungen)
+ * versehentlich durchlaufen.
  */
-export function toCustomerPublic(user: CustomerUser): {
-  id: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  phone: string | null;
-  emailVerified: boolean;
-  createdAt: string;
-  oauthProvider: string | null;
-  avatarUrl: string | null;
-  hasPassword: boolean;
-} {
-  return {
+import { CustomerUserPublicSchema, type CustomerUserPublic } from './schemas';
+
+export function toCustomerPublic(
+  user: CustomerUserPublicRow,
+): CustomerUserPublic {
+  return CustomerUserPublicSchema.parse({
     id: user.id,
     email: user.email,
     firstName: user.firstName,
     lastName: user.lastName,
     phone: user.phone,
     emailVerified: user.emailVerified,
-    createdAt: user.createdAt.toISOString(),
     oauthProvider: user.oauthProvider,
     avatarUrl: user.avatarUrl,
     hasPassword: user.passwordHash !== null && user.passwordHash !== undefined,
-  };
+    createdAt: user.createdAt.toISOString(),
+  });
 }

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { signOut } from 'next-auth/react';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/Button';
@@ -58,6 +59,17 @@ export function AdminDashboard() {
         </Button>
       </header>
 
+      <nav
+        aria-label="IT6 Verwaltungsbereiche"
+        className="mb-6 flex flex-wrap gap-2 text-sm"
+      >
+        <QuickLink href="/admin/calendar">Kalender</QuickLink>
+        <QuickLink href="/admin/admins">Admins</QuickLink>
+        <QuickLink href="/admin/users">Nutzer</QuickLink>
+        <QuickLink href="/admin/analytics">Analytics</QuickLink>
+        <QuickLink href="/admin/reviews">Bewertungen</QuickLink>
+      </nav>
+
       <UpcomingBookingsList />
 
       <div
@@ -90,6 +102,17 @@ export function AdminDashboard() {
         {tab === 'reviews' && <ReviewModerationTable />}
       </div>
     </div>
+  );
+}
+
+function QuickLink({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex min-h-[44px] items-center rounded-md border border-baerenstark-sand bg-white px-3 py-2 text-baerenstark-bark hover:border-baerenstark-wood hover:bg-baerenstark-cream/40 transition-colors"
+    >
+      {children}
+    </Link>
   );
 }
 

@@ -72,6 +72,13 @@ function LoginPageInner() {
     if (errorParam === 'CredentialsSignin') {
       return 'E-Mail oder Passwort ist falsch.';
     }
+    if (errorParam === 'account_disabled') {
+      // D2: Page-Level-Check hat einen DISABLED-Admin abgewiesen.
+      return 'Ihr Konto wurde deaktiviert. Bitte wenden Sie sich an Tom Siefert.';
+    }
+    if (errorParam === 'account_not_found' || errorParam === 'session_invalid') {
+      return 'Ihre Sitzung ist nicht mehr gültig. Bitte erneut anmelden.';
+    }
     return 'Anmeldung fehlgeschlagen.';
   })();
 

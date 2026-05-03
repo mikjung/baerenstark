@@ -1,6 +1,90 @@
-// Bärenstark Hausservice — Prisma Schema (MVP, v1.5 — Iteration 5)
+// Bärenstark Hausservice — Prisma Schema (MVP, v1.6.1 — Iteration 6, QA-Revision)
 // Single source of truth für das Datenmodell.
 // Live-Schema unter prisma/schema.prisma muss mit dieser Datei synchron bleiben.
+//
+// Änderungen v1.6.1 (QA-Revision nach `QA_DESIGN_REVIEW_IT6.md`,
+// 2026-05-03 — siehe `ARCHITECTURE_IT6.md` Anhang B §17):
+//   **Keine Schema-Änderungen erforderlich.** Alle Major-Findings
+//   (F1 Bootstrap-Race, F2 Letzter-Admin-Race, F3 DTO-Leak) und alle
+//   Minor-Findings (m1–m7) werden ausschließlich im App-Layer gelöst:
+//     - F1: ENV-Gate `BOOTSTRAP_ADMIN_EMAIL` im Setup-Endpoint
+//           (`src/app/api/admin/setup/route.ts`).
+//     - F2: Conditional UPDATE per `prisma.$executeRaw` im Helper
+//           `disableAdminSafely()` (`src/lib/admin-status.ts`).
+//     - F3: DTO-Helper `selectCustomerUserPublic/Admin()`
+//           (`src/lib/dto/user.ts`) + `.strict()` auf
+//           `CustomerUserPublicSchema`, `CustomerBookingSchema`,
+//           `PublicReviewSchema` in `contracts/zod-schemas.ts`.
+//     - m1–m7: API-Layer-Anpassungen (Schema-Bindung, Sort-Whitelist,
+//           Cache-Invalidation, Reihenfolge, Auto-Reject) — keine
+//           Spalten/Indizes betroffen.
+//
+// Änderungen v1.6 (Iteration 6 — US-IT6-01 bis US-IT6-09):
+//   - **US-IT6-01 (Multi-Admin):** `User` erhält drei neue Felder:
+//       * `status UserStatus @default(ACTIVE)` — ACTIVE | DISABLED.
+//         Bei `DISABLED` schlägt der Login mit `ACCOUNT_DISABLED` (422)
+//         fehl, und alle Admin-Routen redirecten via `requireAdmin()`
+//         auf die Login-Seite.
+//       * `createdById String?` (Self-FK auf `users.id`, ON DELETE
+//         SET NULL) — wer hat diesen Admin angelegt? Audit-Light
+//         für die `/admin/admins`-Liste.
+//       * `lastLoginAt DateTime?` — wird bei erfolgreichem
+//         NextAuth-`signIn`-Callback aktualisiert.
+//     Neuer Enum `UserStatus`. Lock-out-Schutz lebt im App-Layer
+//     (siehe ARCHITECTURE_IT6.md §3.1).
+//   - **US-IT6-03 (Reviews IT6-Verschärfung):** `Review` erhält drei
+//     neue Felder:
+//       * `rejectedAt DateTime?` — wird bei Reject gesetzt; APPROVED
+//         hat NULL. Boolean `approved` bleibt Authority; abgeleiteter
+//         Status `(approved, rejectedAt)` ist:
+//             (false, null)     → PENDING_APPROVAL
+//             (true,  null)     → APPROVED
+//             (false, !null)    → REJECTED
+//       * `moderatedAt DateTime?` und `moderatedById String?` (FK auf
+//         `users.id`, ON DELETE SET NULL) — Audit-Spur. Wird beim
+//         PATCH gesetzt.
+//     Vorhandene Index-Definition `[approved, createdAt]` wird in
+//     `[approved, rejectedAt, createdAt]` aktualisiert.
+//   - **US-IT6-05 (Auth-Bereinigung):** **Kein Schema-Eingriff.**
+//     `CustomerUser.passwordHash` bleibt nullable. Nach US-IT6-06
+//     (User-Wipe) sind alle bestehenden Customer-User-Datensätze weg;
+//     neue Konten kommen nur noch via OAuth (Google + Facebook). Die
+//     Spalte bleibt erhalten für Forward-Kompatibilität (falls IT7
+//     E-Mail/Pw-Login wieder einführt).
+//   - **US-IT6-06 (User-Wipe):** Kein Schema-Eingriff. Migrations-Skript
+//     `scripts/reset-users.ts` mit ENV-Gate `ALLOW_USER_WIPE=true`.
+//     Cascade-Reihenfolge siehe ARCHITECTURE_IT6.md §8.2.
+//   - **US-IT6-07 (Admin-Userverwaltung):** `CustomerUser` erhält zwei
+//     neue Felder, die NIEMALS in customer-facing Responses
+//     auftauchen dürfen:
+//       * `adminNote String?` — interner Freitext (max 1000 im App-Layer).
+//       * `adminRating Int?`   — 1..5 im App-Layer.
+//     DTO-Trennung: `CustomerUserPublicSchema` (existiert) bleibt
+//     öffentlich; `CustomerUserAdminSchema` (neu) enthält die internen
+//     Felder. Backend-Convention: `prisma.customerUser`-Selects in
+//     allen `/api/customer/*` MÜSSEN explizit `select` setzen — nie
+//     ungefiltert zurückgeben.
+//   - **US-IT6-08 (Finaler Preis pro Buchung):** `Booking` erhält:
+//       * `finalPriceEur Decimal? @db.Decimal(10,2)` — 0..99.999,99.
+//         Wird vom Admin in der Buchungsdetail-Ansicht eingetragen,
+//         ist NICHT in customer-facing Responses enthalten
+//         (`CustomerBookingSchema` filtert ihn raus).
+//       * `finalPriceNote String?` — optional, max 200 Zeichen.
+//     Dient als Datenbasis für US-IT6-09 (Analytics). Unabhängig vom
+//     Stripe-`Payment.amount`.
+//   - **US-IT6-09 (Analytics):** Kein neues Modell. Aggregationen
+//     erfolgen via Prisma `aggregate`/`groupBy` plus eine Raw-SQL-
+//     Query für Monatsumsätze (`substr(date, 1, 7)`-Gruppierung).
+//     Neuer Index `[status, date]` auf `bookings` für effiziente
+//     Filter+Aggregation.
+//   - **Querschnitts-Indexe Iteration 6:**
+//       * `users(status)` — Filter im `/admin/admins`-Listing.
+//       * `customer_users(lastName, firstName)` — Sortierung in
+//         `/admin/users`.
+//       * `bookings(status, date)` — Analytics-Filter (US-IT6-09).
+//       * `bookings(customerId, status)` — Top-Kunden-Aggregation.
+//       * `reviews(approved, rejectedAt, createdAt DESC)` — neuer
+//         Moderation-Queue-Index (US-IT6-03).
 //
 // Änderungen v1.5 (Iteration 5 — US-30 bis US-34):
 //   - **US-31 (OAuth2 für Kunden):** `CustomerUser` erhält drei neue,
@@ -101,21 +185,52 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// Admin-Benutzer (Tom). Im MVP genau ein Datensatz.
-/// Wird via Setup-Wizard /admin/setup angelegt.
+/// Admin-Benutzer.
 ///
-/// **WICHTIG (Iteration 4):** Dieses Modell ist **ausschließlich** für
+/// **Iteration 6 (US-IT6-01):** Mehrere Admins zulässig. Tom legt sie
+/// via `/admin/admins` an. Lock-out-Schutz im App-Layer:
+///   - der **letzte** aktive Admin darf nicht deaktiviert werden,
+///   - ein eingeloggter Admin darf sich nicht selbst deaktivieren/löschen.
+///
+/// `status === 'DISABLED'` blockiert sowohl Login (NextAuth Credentials
+/// Provider prüft via `LoginSchema` + Status-Check) als auch jeden
+/// Admin-Endpoint (`requireAdmin()` lehnt ab → Redirect mit
+/// `?error=account_disabled`).
+///
+/// **WICHTIG (seit Iteration 4):** Dieses Modell ist **ausschließlich** für
 /// Admin-Login (NextAuth Credentials Provider). Kunden nutzen das
 /// separate `CustomerUser`-Modell und ein eigenes Cookie. Admin-Sessions
 /// und Kunden-Sessions kollidieren NICHT (verschiedene Cookie-Namen).
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  passwordHash String
-  name         String
-  createdAt    DateTime @default(now())
+  id            String     @id @default(cuid())
+  email         String     @unique
+  passwordHash  String
+  name          String
+  // IT6 / US-IT6-01 — Multi-Admin:
+  status        UserStatus @default(ACTIVE)
+  /// Self-FK auf den Admin, der diesen Account angelegt hat. NULL für
+  /// den Initial-Admin (via Setup-Wizard) und nach Löschung des
+  /// Erstellers (`onDelete: SetNull`).
+  createdById   String?
+  createdBy     User?      @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAdmins User[]     @relation("UserCreatedBy")
+  /// Wird bei jedem erfolgreichen Login aktualisiert (NextAuth-`jwt`-
+  /// Callback in `lib/auth.ts`).
+  lastLoginAt   DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
 
+  // IT6 / US-IT6-03 — Backref auf moderierte Reviews:
+  moderatedReviews Review[] @relation("ReviewModeratedBy")
+
+  @@index([status])
   @@map("users")
+}
+
+/// IT6 / US-IT6-01 — Admin-Account-Status. SQLite-ENUM = TEXT.
+enum UserStatus {
+  ACTIVE
+  DISABLED
 }
 
 /// **DEPRECATED ab Iteration 3 (US-17).** Bestehende Buchungen behalten
@@ -241,6 +356,18 @@ model Booking {
   payment       Payment?
   review        Review?
 
+  // --- Iteration 6 (US-IT6-08): Finaler Preis pro Buchung ---
+  /// Vom Admin in der Detail-Ansicht eingetragener Endbetrag in Euro.
+  /// Range im App-Layer: 0 <= x <= 100000. Unabhängig vom Stripe-
+  /// `Payment.amount` (Tom kann auch Bar-Zahlungen erfassen).
+  /// **Sichtbarkeit:** NIE in customer-facing Endpoints
+  /// (`CustomerBookingSchema` filtert das Feld aus). Datenbasis für
+  /// US-IT6-09 (Analytics).
+  finalPriceEur   Decimal?      @db.Decimal(10, 2)
+  /// Optional: kurze Notiz zum Preis (z.B. "inkl. Anfahrt"). Max 200
+  /// Zeichen (App-Layer). NIE in customer-facing Endpoints.
+  finalPriceNote  String?
+
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
@@ -251,6 +378,10 @@ model Booking {
   @@index([status, date, startTime])
   // IT4 — Index für Kundenportal-Buchungs-Listen (`GET /api/customer/bookings`).
   @@index([customerId, date])
+  // IT6 / US-IT6-09 — Analytics-Filter (status='COMPLETED' AND date BETWEEN...).
+  @@index([status, date])
+  // IT6 / US-IT6-09 — Top-Kunden-Aggregation (groupBy customerId, status).
+  @@index([customerId, status])
   @@map("bookings")
 }
 
@@ -413,6 +544,21 @@ model CustomerUser {
   avatarUrl         String?
   // -----------------------------------------------------------------------
 
+  // --- IT6 / US-IT6-07 (Admin-Userverwaltung — INTERN) -------------------
+  /// **NIEMALS in customer-facing Responses.** Interne Notiz, max
+  /// 1000 Zeichen (App-Layer). Wird im Admin-Drawer (`/admin/users/:id`)
+  /// editiert. Schutz via DTO-Trennung:
+  /// `CustomerUserPublicSchema` (öffentlich/Customer-API) vs.
+  /// `CustomerUserAdminSchema` (Admin-API). Backend-Convention:
+  /// alle `prisma.customerUser`-Selects in `/api/customer/*` MÜSSEN
+  /// `select` explizit setzen — niemals ungefiltert zurückgeben.
+  adminNote         String?
+  /// **NIEMALS in customer-facing Responses.** Interne Bewertung 1..5
+  /// (App-Layer). Hat nichts mit öffentlichen Reviews (US-29 / US-IT6-03)
+  /// zu tun.
+  adminRating       Int?
+  // -----------------------------------------------------------------------
+
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -422,6 +568,8 @@ model CustomerUser {
   @@index([email])
   /// IT5 — Index für OAuth-Callback-Lookup (`findFirst` per Provider+ID).
   @@index([oauthProvider, oauthId])
+  /// IT6 / US-IT6-07 — Sortierung in `/admin/users` (Name).
+  @@index([lastName, firstName])
   @@map("customer_users")
 }
 
@@ -545,12 +693,40 @@ model Review {
   stars       Int
   /// Optional. Max 500 Zeichen (App-Layer).
   text        String?
-  /// false bis Admin freigibt.
+  /// **Authority** für die Sichtbarkeit in `GET /api/reviews`. false bis
+  /// Admin freigibt. Bei IT6 wird beim Reject zusätzlich `rejectedAt`
+  /// gesetzt; bei Approve wird `rejectedAt` zurück auf NULL gesetzt.
   approved    Boolean       @default(false)
+
+  // --- IT6 / US-IT6-03 (Reviews mit COMPLETED-Trigger & Admin-Approval) ---
+  /// Wird beim Reject (`PATCH /api/admin/reviews/:id` mit
+  /// `approved: false`) auf `now()` gesetzt. APPROVED-Reviews haben
+  /// es NULL. Abgeleiteter Status:
+  ///   (approved=false, rejectedAt=null)  → PENDING_APPROVAL
+  ///   (approved=true,  rejectedAt=null)  → APPROVED
+  ///   (approved=false, rejectedAt!=null) → REJECTED
+  /// Spam-Schutz: Re-Submit gegen rejectete Buchung wird per
+  /// UNIQUE auf `bookingId` (bereits Bestand) verhindert; Backend
+  /// gibt 409 `REVIEW_EXISTS`.
+  rejectedAt    DateTime?
+  /// Admin, der zuletzt moderiert hat (Approve oder Reject).
+  /// `onDelete: SetNull` — wenn der Admin gelöscht wird, bleibt die
+  /// Audit-Spur als "moderatedBy null".
+  moderatedById String?
+  moderatedBy   User?     @relation("ReviewModeratedBy", fields: [moderatedById], references: [id], onDelete: SetNull)
+  /// Zeitpunkt des letzten Moderation-Klicks.
+  moderatedAt   DateTime?
+  // ----------------------------------------------------------------------
+
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
+  // IT6 / US-IT6-03 — neuer Index ersetzt den alten `[approved, createdAt]`
+  // (siehe Migration `20260503100400_iteration6_indexes`). Bestand bleibt
+  // hier für Rückwärtskompatibilität; Engineering kann ihn nach Migration
+  // entfernen.
   @@index([approved, createdAt])
+  @@index([approved, rejectedAt, createdAt])
   @@index([customerId])
   @@map("reviews")
 }

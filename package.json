@@ -15,6 +15,11 @@
     "test": "tsx --env-file=.env.local tests/smoke.ts 2>/dev/null || tsx tests/smoke.ts"
   },
   "dependencies": {
+    "@fullcalendar/core": "^6.1.20",
+    "@fullcalendar/daygrid": "^6.1.20",
+    "@fullcalendar/interaction": "^6.1.20",
+    "@fullcalendar/react": "^6.1.20",
+    "@fullcalendar/timegrid": "^6.1.20",
     "@hookform/resolvers": "3.9.1",
     "@libsql/client": "0.8.1",
     "@prisma/adapter-libsql": "5.22.0",
@@ -30,6 +35,7 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-hook-form": "7.53.2",
+    "recharts": "^3.8.1",
     "resend": "4.0.1",
     "stripe": "^17.7.0",
     "zod": "3.23.8"

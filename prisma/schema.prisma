@@ -1,5 +1,15 @@
-// Bärenstark Hausservice — Live Prisma Schema (v1.5 — Iteration 5)
+// Bärenstark Hausservice — Live Prisma Schema (v1.6.1 — Iteration 6, QA-Revision)
 // Synchron gehalten mit /contracts/schema.prisma.
+//
+// Iteration 6 Änderungen (US-IT6-01 bis US-IT6-09):
+//   - US-IT6-01 (Multi-Admin): User.status (UserStatus enum), createdById, lastLoginAt.
+//   - US-IT6-03 (Reviews): Review.rejectedAt, moderatedAt, moderatedById +
+//     neuer Index [approved, rejectedAt, createdAt].
+//   - US-IT6-07 (Admin-Userverwaltung): CustomerUser.adminNote, adminRating.
+//   - US-IT6-08 (Finaler Preis): Booking.finalPriceEur (Decimal),
+//     Booking.finalPriceNote.
+//   - Querschnitts-Indexe: users(status), customer_users(lastName, firstName),
+//     bookings(status, date), bookings(customerId, status).
 //
 // Iteration 5 Änderungen:
 //   - US-31 (OAuth2): CustomerUser.oauthProvider/oauthId/avatarUrl neu;
@@ -26,6 +36,14 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// Admin-Benutzer (NextAuth Credentials Provider).
+///
+/// Iteration 6 (US-IT6-01) ergänzt:
+///   - status: 'ACTIVE' | 'DISABLED' (TEXT — SQLite kennt keine ENUMs).
+///     Validierung im App-Layer via Zod `UserStatusSchema`. Lock-out-Schutz
+///     in `src/lib/admin-status.ts.disableAdminSafely`.
+///   - createdById: Self-FK auf den anlegenden Admin (NULL für Bootstrap).
+///   - lastLoginAt: wird im NextAuth-`jwt`-Callback aktualisiert.
 model User {
   id               String    @id @default(cuid())
   email            String    @unique
@@ -33,8 +51,19 @@ model User {
   name             String
   resetToken       String?   @unique
   resetTokenExpiry DateTime?
+  // IT6 / US-IT6-01: 'ACTIVE' | 'DISABLED'.
+  status           String    @default("ACTIVE")
+  createdById      String?
+  createdBy        User?     @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAdmins    User[]    @relation("UserCreatedBy")
+  lastLoginAt      DateTime?
   createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @default(now()) @updatedAt
 
+  // IT6 / US-IT6-03 — moderierte Reviews:
+  moderatedReviews Review[] @relation("ReviewModeratedBy")
+
+  @@index([status])
   @@map("users")
 }
 
@@ -63,6 +92,15 @@ model CustomerUser {
   oauthId       String?
   avatarUrl     String?
 
+  // IT6 / US-IT6-07 — Admin-Userverwaltung (INTERN, NIE customer-facing).
+  /// Interner Freitext (App-Layer max 1000 Zeichen). NIEMALS in
+  /// `/api/customer/*`-Responses. Schutz via DTO-Helper
+  /// `selectCustomerUserPublic()` (siehe `src/lib/dto/user.ts`).
+  adminNote   String?
+  /// Interne Sterne-Bewertung 1..5 (App-Layer). NIEMALS customer-facing.
+  /// Hat nichts mit öffentlichen Reviews zu tun.
+  adminRating Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -71,6 +109,10 @@ model CustomerUser {
 
   @@index([email])
   @@index([oauthProvider, oauthId])
+  // IT6 / US-IT6-07 — Sortierung im /admin/users Listing.
+  @@index([lastName, firstName])
+  // IT6 / US-IT6-07 — Sort-Whitelist `adminRating_desc`.
+  @@index([adminRating])
   @@map("customer_users")
 }
 
@@ -143,6 +185,16 @@ model Booking {
   payment Payment?
   review  Review?
 
+  // IT6 / US-IT6-08 — Finaler Preis pro Buchung (intern).
+  /// Vom Admin in der Detail-Ansicht eingetragener Endbetrag in Euro.
+  /// Range im App-Layer: 0..100000. NIEMALS customer-facing
+  /// (`CustomerBookingSchema.strict()` filtert das Feld aus). Datenbasis
+  /// für US-IT6-09 (Analytics).
+  finalPriceEur  Decimal?
+  /// Optionale Notiz zum Preis (z.B. "inkl. Anfahrt"). Max 200 Zeichen
+  /// (App-Layer). NIEMALS customer-facing.
+  finalPriceNote String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -152,6 +204,8 @@ model Booking {
   @@index([date, status])
   @@index([status, date, startTime])
   @@index([customerId, date])
+  // IT6 / US-IT6-09 — Top-Kunden-Aggregation (groupBy customerId, status).
+  @@index([customerId, status])
   @@map("bookings")
 }
 
@@ -233,21 +287,37 @@ model Payment {
   @@map("payments")
 }
 
-/// Kundenbewertung (Iteration 4 / US-29).
+/// Kundenbewertung (Iteration 4 / US-29, IT6 / US-IT6-03).
 /// 1:1 zu Booking, optional zu CustomerUser.
+///
+/// IT6-Erweiterung (US-IT6-03):
+///   - rejectedAt: timestamp des letzten Rejects (NULL bei APPROVED).
+///     Abgeleiteter Status:
+///       (approved=false, rejectedAt=null)  → PENDING_APPROVAL
+///       (approved=true,  rejectedAt=null)  → APPROVED
+///       (approved=false, rejectedAt!=null) → REJECTED
+///   - moderatedAt + moderatedById: Audit-Spur, wird bei Approve/Reject
+///     im PATCH /api/admin/reviews/:id gesetzt.
 model Review {
-  id         String        @id @default(cuid())
-  customerId String?
-  customer   CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  bookingId  String?       @unique
-  booking    Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
-  stars      Int
-  text       String?
-  approved   Boolean       @default(false)
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
+  id            String        @id @default(cuid())
+  customerId    String?
+  customer      CustomerUser? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  bookingId     String?       @unique
+  booking       Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  stars         Int
+  text          String?
+  approved      Boolean       @default(false)
+  // IT6 / US-IT6-03:
+  rejectedAt    DateTime?
+  moderatedById String?
+  moderatedBy   User?         @relation("ReviewModeratedBy", fields: [moderatedById], references: [id], onDelete: SetNull)
+  moderatedAt   DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 
   @@index([approved, createdAt])
+  // IT6 / US-IT6-03 — Moderation-Queue + Public-Filter.
+  @@index([approved, rejectedAt, createdAt])
   @@index([customerId])
   @@map("reviews")
 }

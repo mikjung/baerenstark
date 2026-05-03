@@ -1,27 +1,31 @@
 /**
- * GET /api/admin/reviews — US-29 AC6.
+ * GET /api/admin/reviews — IT6 / US-IT6-03 (verschärft).
  *
- * Liefert alle Bewertungen (approved + pending), inkl. voller Kunden-
- * Identität (für Moderations-Entscheidung). Sortiert nach createdAt desc.
+ * Liefert alle Bewertungen (auch REJECTED + PENDING_APPROVAL).
+ *
+ * Iteration 6 Erweiterung (siehe `ARCHITECTURE_IT6.md` §22.3 +
+ * `contracts/zod-schemas.ts.AdminReviewsQuerySchema`):
+ *   - Filter `?status=PENDING_APPROVAL|APPROVED|REJECTED|<omit>`.
+ *   - Mapping:
+ *       PENDING_APPROVAL: approved=false AND rejectedAt IS NULL
+ *       APPROVED:         approved=true
+ *       REJECTED:         approved=false AND rejectedAt IS NOT NULL
+ *
+ * Output enthält die Audit-Felder `rejectedAt`, `moderatedAt`,
+ * `moderatedById`, damit das Admin-UI Status + Verlauf anzeigen kann.
  */
 
 import type { NextRequest } from 'next/server';
-import { z } from 'zod';
-import { auth } from '@/lib/auth';
+import { ZodError } from 'zod';
 import { prisma } from '@/lib/prisma';
-import { apiError, apiSuccess, internalError } from '@/lib/api';
+import { apiSuccess, internalError, zodErrorResponse } from '@/lib/api';
+import { requireAdmin, isAdminError } from '@/lib/require-admin';
+import { AdminReviewsQuerySchema } from '@/lib/schemas';
 import { SERVICES } from '@/lib/services';
 import type { Service } from '@/lib/services';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-
-const QuerySchema = z.object({
-  approved: z
-    .enum(['true', 'false'])
-    .optional()
-    .transform((v) => (v === 'true' ? true : v === 'false' ? false : undefined)),
-});
 
 function adminCustomerName(
   customer: { firstName: string; lastName: string } | null,
@@ -38,28 +42,25 @@ function safeService(slug: string | null | undefined): Service | null {
 
 export async function GET(req: NextRequest): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const url = new URL(req.url);
-    const parsed = QuerySchema.safeParse({
-      approved: url.searchParams.get('approved') ?? undefined,
+    const parsed = AdminReviewsQuerySchema.parse({
+      status: url.searchParams.get('status') ?? undefined,
     });
-    if (!parsed.success) {
-      return apiError({
-        code: 'VALIDATION_ERROR',
-        message: 'approved muss "true" oder "false" sein.',
-        field: 'approved',
-      });
+
+    let where: { approved?: boolean; rejectedAt?: { not: null } | null } = {};
+    if (parsed.status === 'PENDING_APPROVAL') {
+      where = { approved: false, rejectedAt: null };
+    } else if (parsed.status === 'APPROVED') {
+      where = { approved: true };
+    } else if (parsed.status === 'REJECTED') {
+      where = { approved: false, rejectedAt: { not: null } };
     }
 
     const reviews = await prisma.review.findMany({
-      where:
-        parsed.data.approved !== undefined
-          ? { approved: parsed.data.approved }
-          : undefined,
+      where,
       orderBy: { createdAt: 'desc' },
       include: {
         customer: { select: { firstName: true, lastName: true } },
@@ -77,11 +78,16 @@ export async function GET(req: NextRequest): Promise<Response> {
         stars: r.stars,
         text: r.text,
         approved: r.approved,
+        // IT6 Audit-Felder:
+        rejectedAt: r.rejectedAt ? r.rejectedAt.toISOString() : null,
+        moderatedAt: r.moderatedAt ? r.moderatedAt.toISOString() : null,
+        moderatedById: r.moderatedById,
         createdAt: r.createdAt.toISOString(),
         updatedAt: r.updatedAt.toISOString(),
       })),
     );
   } catch (err) {
+    if (err instanceof ZodError) return zodErrorResponse(err);
     return internalError(err);
   }
 }
