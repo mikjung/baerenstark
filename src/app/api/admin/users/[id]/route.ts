@@ -37,6 +37,10 @@ interface AdminCustomerRow {
   avatarUrl: string | null;
   adminNote: string | null;
   adminRating: number | null;
+  // IT9 / US-IT9-02 — Default-Adresse (read-only für Admin).
+  streetAndNumber: string | null;
+  postalCode: string | null;
+  city: string | null;
   createdAt: Date;
   _count?: { bookings: number };
 }
@@ -53,6 +57,11 @@ function toAdminCustomer(u: AdminCustomerRow & { _count?: { bookings: number } }
     avatarUrl: u.avatarUrl,
     adminNote: u.adminNote,
     adminRating: u.adminRating,
+    // IT9 / US-IT9-02 — Default-Adresse des Kunden, read-only für Tom.
+    // Edit-Pfad bleibt customer-only (Profil-Page).
+    streetAndNumber: u.streetAndNumber,
+    postalCode: u.postalCode,
+    city: u.city,
     bookingCount: u._count?.bookings ?? 0,
     createdAt: u.createdAt.toISOString(),
   };

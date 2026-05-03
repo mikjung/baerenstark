@@ -2046,4 +2046,289 @@ Story. Falls alle Checks grün sind, liefert der Entwickler Tom einen
 Screenshot des Diagnose-Outputs mit den einzutragenden Redirect-URIs als
 einzige verbleibende Aufgabe.
 
+---
+
+## Iteration 9 — Admin-Stabilität, Kunden-Adresse & Buchungs-Kalender
+
+### Kontext
+
+Nach Abschluss von Iteration 8 (Bugfix-Sweep) hat Tom vier neue Punkte
+gemeldet: ein weiterer Admin-Seiten-Crash (`/admin/users`), die fehlende
+Möglichkeit für Kunden, ihre Adresse zu hinterlegen, ein nicht
+ladendes Kalender-Widget im öffentlichen Buchungs-Flow sowie den Bedarf
+an einem verständlichen Schritt-für-Schritt-Guide zur Google-OAuth-Konfiguration
+in der Google Cloud Console.
+
+Iteration 9 enthält ausschließlich diese vier Punkte. Das bereits angekündigte
+UX/UI-Review (mit externem UX-Experten, Architect und PM) findet separat nach
+IT9 statt — es ist kein Teil dieses Build-Loops.
+
+---
+
+#### US-IT9-01: Admin-Seite `/admin/users` — Crash-Ursache finden und beheben
+
+> **Kritischer Bug.** `/admin/users` rendert die in IT8 eingebaute Error-Boundary
+> (`src/app/admin/error.tsx`) mit der Meldung „Etwas ist schiefgelaufen." Das
+> bedeutet, die Seite crasht serverseitig (Next.js Server Component) oder
+> clientseitig (React-Laufzeit) nach dem Hydration. Analog zu US-IT8-01
+> (`/admin/admins`), aber eine andere Route und wahrscheinlich eine andere
+> Ursache.
+
+**Als** Admin (Tom)
+**möchte ich** `/admin/users` fehlerfrei aufrufen können,
+**damit** ich Kundendaten einsehen und verwalten kann, ohne auf die
+Error-Boundary-Meldung zu treffen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/admin/users` als eingeloggter Admin auf,
+  **When** die Seite lädt,
+  **Then** sehe ich die Kundenübersicht (Tabelle oder Liste der registrierten
+  Kunden) — die Error-Boundary wird nicht mehr gezeigt.
+
+- **Given** der Entwickler öffnet Vercel-Logs oder den Browser-Error-Stack
+  direkt nach dem Crash,
+  **When** er die Stack-Trace analysiert,
+  **Then** ist die Ursache dokumentiert (z. B. ungültiger Datenzugriff auf
+  `undefined`, fehlende Null-Prüfung, falsche Prisma-Query, fehlender
+  null-Check bei Server-Component-Props) — damit ist der Root Cause nachvollziehbar.
+
+- **Given** die Seite `/admin/users` lädt korrekt,
+  **When** es in der DB keine registrierten Kunden gibt,
+  **Then** erscheint ein leerer Zustand mit dem Text „Keine Kunden registriert."
+  statt eines Crashes oder leeren Containers.
+
+- **Given** die Seite `/admin/users` lädt korrekt,
+  **When** mindestens ein Kunde in der DB existiert,
+  **Then** werden mindestens Name (oder E-Mail), Registrierungsdatum und
+  Status des Kunden angezeigt.
+
+**Hinweis:** Diagnose-Reihenfolge: (1) Server-Logs in Vercel prüfen —
+ist der Fehler eine Prisma-Exception, ein undefined-Access oder ein
+Auth-Guard-Problem? (2) Lokale Reproduktion mit `next dev`. (3) Fix +
+Regressionscheck für `/admin/admins` (darf durch den Fix nicht
+zurückbrechen). Diese Story schließt ausdrücklich nur `/admin/users` ein —
+andere Admin-Routen sind Out of Scope.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT9-02: Kunden-Adresse — Eingabe bei Registrierung und Bearbeitung im Profil
+
+> **Neue Funktion.** Tom muss zum Kunden fahren — die Kundenadresse ist für
+> ihn operativ relevant. Die Adresse gehört dem Kunden (DSGVO): Kunden können
+> sie selbst eintragen, ändern und löschen. Das Schema-Modell `CustomerUser`
+> wird um die Adressfelder erweitert (Prisma-Migration).
+
+**Als** Kunde
+**möchte ich** meine Adresse (Straße + Hausnummer, PLZ, Ort) angeben und
+jederzeit selbst ändern können,
+**damit** Tom weiß, wohin er für den gebuchten Termin fahren muss, und ich
+die DSGVO-Hoheit über meine Daten behalte.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne das Registrierungsformular (`/konto/registrieren`),
+  **When** die Seite lädt,
+  **Then** sehe ich drei optionale Adressfelder: „Straße & Hausnummer",
+  „PLZ" und „Ort" — mit einem Hinweistext „Wird für Terminbuchungen
+  benötigt." Felder sind optional bei der Registrierung (keine Pflichtfelder,
+  damit der Einstieg reibungslos bleibt).
+
+- **Given** ich fülle Adressfelder aus und schließe die Registrierung ab,
+  **When** ich mein Profil unter `/konto` öffne,
+  **Then** sehe ich die eingetragene Adresse in den Profilfeldern vorausgefüllt.
+
+- **Given** ich öffne mein Profil unter `/konto`,
+  **When** die Seite lädt,
+  **Then** sehe ich die Adressfelder (vorausgefüllt mit gespeicherten Werten
+  oder leer) und kann sie bearbeiten und speichern.
+
+- **Given** ich ändere meine Adresse im Profil und klicke auf „Speichern",
+  **When** der Request erfolgreich ist,
+  **Then** erscheint eine Bestätigung „Adresse gespeichert." und der neue
+  Wert wird sofort in der Ansicht angezeigt — kein Seitenneuladen.
+
+- **Given** ich möchte meine Adresse löschen,
+  **When** ich alle drei Adressfelder leere und speichere,
+  **Then** werden die Felder in der DB auf `null` gesetzt — die Adresse ist
+  damit entfernt.
+
+- **Given** der Admin (Tom) öffnet `/admin/users` und wählt einen Kunden,
+  **When** die Detailansicht lädt,
+  **Then** sieht Tom die Adresse des Kunden (lesend) — Tom kann die Adresse
+  nicht im Namen des Kunden ändern.
+
+- **Given** ein eingeloggter Kunde startet einen Buchungs-Flow und hat
+  noch keine Adresse hinterlegt,
+  **When** er auf den letzten Schritt des Buchungsformulars zugreift,
+  **Then** erscheint ein Hinweis „Bitte vervollständige zuerst deine Adresse
+  in deinem Profil." mit einem Link zu `/konto` — Adresse ist Pflicht beim
+  Buchen, nicht bei der Registrierung.
+
+- **Given** `GET /api/customer/me` oder ein äquivalenter Profil-Endpoint
+  wird aufgerufen,
+  **When** der Response serialisiert wird,
+  **Then** sind die Adressfelder im Response enthalten — keine anderen
+  kundeninternen Felder wie `adminNote` oder `adminRating` werden
+  herausgegeben (Prisma-Select explizit).
+
+- **Given** eine Prisma-Migration für die neuen Felder wird ausgeführt,
+  **When** die Migration in Produktion applied wird,
+  **Then** brechen keine bestehenden Queries auf `CustomerUser` (Felder
+  nullable, additive Migration).
+
+**Hinweis:** Schema-Erweiterung (alle nullable):
+`streetAndNumber String?`, `postalCode String?` (5-stellig, DE-Validation),
+`city String?`. Prisma-Migration ist Pflicht — kein Raw-SQL-Workaround.
+DSGVO: Adresse wird ausschließlich unter der eigenen Customer-Session
+lesbar und schreibbar. Tom sieht die Adresse im Admin-Read-only-View.
+PLZ-Validierung: `/^\d{5}$/` (clientseitig + serverseitig).
+Annahme: Adresse ist optional bei der Registrierung, Pflicht beim Buchen —
+Tom bitte bestätigen, falls abweichend.
+
+**Priorität:** Should Have | **Story Points:** 5
+
+---
+
+#### US-IT9-03: Buchungs-Kalender im Kunden-Flow — Slot interaktiv auswählen
+
+> **Kritischer Bug / fehlende Funktion.** Der öffentliche Buchungs-Flow
+> zeigt keinen funktionierenden Kalender — vermutlich ein endloser Skeleton
+> oder ein leerer Container. Analog zum Admin-Kalender-Bug aus IT8, aber
+> im kundenseitigen Flow. Ohne Kalender kann kein Termin gebucht werden.
+
+**Als** Kunde
+**möchte ich** im Buchungs-Flow einen Kalender sehen, der verfügbare Zeitslots
+anzeigt, und einen Slot per Klick auswählen können,
+**damit** meine Terminwahl direkt in das Buchungsformular übernommen wird
+und ich die Buchung abschließen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne den Buchungs-Flow (z. B. `/buchen`),
+  **When** der Kalender-Schritt erreicht wird,
+  **Then** rendert der Kalender sichtbar innerhalb von 3 Sekunden — kein
+  dauerhafter Skeleton, kein leerer Container.
+
+- **Given** der Kalender geladen ist,
+  **When** ich einen Tag mit verfügbaren Slots auswähle,
+  **Then** sehe ich die verfügbaren Zeitslots für diesen Tag als klickbare
+  Elemente (z. B. „09:00–10:00", „10:30–11:30" etc.).
+
+- **Given** ich auf einen Slot klicke,
+  **When** die Auswahl registriert wird,
+  **Then** wird der Slot visuell hervorgehoben (selected-State) und der
+  gewählte Termin (Datum + Uhrzeit) erscheint im nachfolgenden
+  Buchungsformular vorausgefüllt.
+
+- **Given** ein Tag hat keine verfügbaren Slots (z. B. vollständig belegt
+  oder DayOverride „Geschlossen"),
+  **When** ich diesen Tag im Kalender anklicke,
+  **Then** sehe ich den Hinweis „Für diesen Tag sind keine Termine verfügbar."
+  — der Tag ist nicht buchbar.
+
+- **Given** der Kalender-Daten-Endpoint (z. B. `GET /api/slots/available`)
+  antwortet mit einem Fehler oder Timeout,
+  **When** der Kalender versucht zu laden,
+  **Then** erscheint eine Fehlermeldung „Verfügbare Termine konnten nicht
+  geladen werden. Bitte Seite neu laden." statt eines dauerhaften Skeletons.
+
+- **Given** ich habe einen Slot ausgewählt und wechsle zurück zum
+  vorherigen Buchungsschritt,
+  **When** ich erneut auf den Kalender-Schritt navigiere,
+  **Then** ist mein vorher gewählter Slot noch selektiert (State bleibt
+  erhalten während der Session).
+
+**Hinweis:** Diagnose-Reihenfolge: (1) Prüfe, ob der Slot-Endpoint
+(`/api/slots/available` o. Ä.) in Produktion erreichbar ist und Daten
+zurückgibt. (2) Prüfe, ob der Kalender-Fetch clientseitig korrekt
+ausgelöst wird (Network-Tab). (3) Prüfe, ob die Kalender-Komponente
+auf den Fetch-State korrekt reagiert (Loading / Error / Data).
+Empfohlene Bibliothek für Kunden-Kalender: `react-day-picker` (laut
+IT6-Annahme). Falls der Bug ein CORS-Problem oder ein fehlender
+API-Route-Handler ist, ist der Fix Teil dieser Story.
+
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT9-04: Google-OAuth-Setup-Guide für Tom — Schritt-für-Schritt-Dokumentation
+
+> **Reine Doku-Story, kein Code-Fix.** Laut Diagnose-Ergebnis aus IT8
+> (US-IT8-05) ist der Code-seitige OAuth-Setup korrekt (`actionRequired:
+> "config"`). Tom kommt mit der Google Cloud Console-Konfiguration nicht
+> zurecht: Er weiß nicht, welche URL in welches Feld eingetragen werden muss
+> und was `redirect_uri_mismatch` bedeutet. Diese Story liefert einen
+> vollständigen, selbsterklärenden Guide — kein Code, keine Vercel-Änderung.
+
+**Als** Tom (Inhaber, nicht-technisch)
+**möchte ich** eine Schritt-für-Schritt-Anleitung haben, die mir genau zeigt,
+wo und was ich in der Google Cloud Console eintragen muss,
+**damit** ich Google-OAuth ohne Rückfragen an die Entwicklung lauffähig kriege.
+
+**Akzeptanzkriterien:**
+
+- **Given** Tom öffnet `docs/GOOGLE_OAUTH_SETUP_GUIDE.md`,
+  **When** er die Anleitung von Anfang bis Ende liest,
+  **Then** kann er ohne weitere Rückfragen die Google Cloud Console öffnen,
+  ein OAuth-Projekt anlegen (oder das bestehende auswählen) und alle
+  notwendigen Redirect-URIs eintragen.
+
+- **Given** der Guide beschreibt den Schritt „Redirect-URIs eintragen",
+  **When** Tom diesen Abschnitt liest,
+  **Then** sieht er die exakten URLs, die einzutragen sind (z. B.
+  `https://www.baerenstark-hausservice.app/api/auth/callback/google`),
+  und eine Screenshot-Beschreibung, die beschreibt, welches Feld in der
+  Cloud Console gemeint ist (z. B. „Im Abschnitt ‚Autorisierte
+  Weiterleitungs-URIs' unter ‚OAuth 2.0-Client-IDs' → deinen App-Eintrag
+  → Bearbeiten").
+
+- **Given** Tom erhält beim Login-Versuch den Fehler `redirect_uri_mismatch`,
+  **When** er den entsprechenden Abschnitt im Guide aufschlägt,
+  **Then** findet er eine Erklärung auf Deutsch, was dieser Fehler bedeutet,
+  warum er auftritt und welchen konkreten Schritt in der Cloud Console er
+  als nächstes ausführen muss.
+
+- **Given** Tom hat alle Schritte des Guides ausgeführt,
+  **When** er auf „Mit Google anmelden" klickt,
+  **Then** wird er durch den Google-OAuth-Flow geleitet und danach auf
+  `/admin` weitergeleitet — kein `redirect_uri_mismatch`, kein Fehler.
+  (Dieses Kriterium ist manuell durch Tom zu verifizieren.)
+
+- **Given** der Guide ist fertiggestellt,
+  **When** ein unabhängiger Leser ohne Cloud-Console-Erfahrung die Anleitung
+  liest,
+  **Then** enthält der Guide mindestens folgende Abschnitte in dieser
+  Reihenfolge: (1) Voraussetzungen, (2) Google Cloud Console öffnen und
+  Projekt auswählen, (3) OAuth-Consent-Screen prüfen, (4) OAuth-Client-ID
+  finden/anlegen, (5) Redirect-URIs eintragen (mit exakten URLs),
+  (6) Client-ID und Client-Secret in Vercel-Umgebungsvariablen eintragen,
+  (7) Fehlerdiagnose (`redirect_uri_mismatch` erklären + Lösung).
+
+**Hinweis:** Dateiname und -pfad sind festgelegt: `docs/GOOGLE_OAUTH_SETUP_GUIDE.md`.
+Der Guide muss auf Deutsch verfasst sein. Screenshot-Beschreibungen ersetzen
+echte Screenshots (da Markdown keine eingebetteten Screenshots aus der Cloud
+Console mitliefern kann) — jede Beschreibung muss präzise genug sein, dass
+Tom das UI-Element eindeutig identifizieren kann. Exakte Redirect-URI-Werte
+werden aus dem IT8-Diagnose-Endpoint (`expectedCallbacks.google`) übernommen.
+Diese Story ist Must Have, weil Google-OAuth für Tom der primäre Login-Weg
+ist und er aktuell blockiert ist.
+
+**Priorität:** Must Have | **Story Points:** 2
+
+---
+
+### Backlog-Eintrag (Post-IT9, kein Bestandteil dieser Iteration)
+
+**UX/UI-Review — Separate Folge-Iteration nach IT9**
+
+Tom hat angekündigt, nach Abschluss von IT9 einen gemeinsamen Review-Termin
+mit einem UX-Experten, dem Architect und dem PM anzusetzen. Dieses Review
+ist kein normaler Build-Loop: Es handelt sich um eine strukturierte
+Evaluierung der bestehenden UI/UX auf Basis von Nutzerfeedback und
+Usability-Heuristiken, aus der ein neues Backlog für gezielte UX-Verbesserungen
+entsteht. Keine Story für IT9 — wird nach IT9-Abschluss separat initiiert.
+
 **Priorität:** Must Have | **Story Points:** 3

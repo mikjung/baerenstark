@@ -107,6 +107,9 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
 
     // 6. Insert.
+    // IT9 / US-IT9-02 — Adresse ist bei Registrierung optional. Nur
+    // Felder mitschreiben, wenn der Caller sie geliefert hat (sonst bleibt
+    // der DB-Default `null`, kein expliziter NULL-Write nötig).
     let user;
     try {
       user = await prisma.customerUser.create({
@@ -119,6 +122,13 @@ export async function POST(req: NextRequest): Promise<Response> {
           emailVerified: false,
           verificationToken,
           verificationTokenExpiry,
+          ...(data.streetAndNumber !== undefined
+            ? { streetAndNumber: data.streetAndNumber }
+            : {}),
+          ...(data.postalCode !== undefined
+            ? { postalCode: data.postalCode }
+            : {}),
+          ...(data.city !== undefined ? { city: data.city } : {}),
         },
         // F3 — Public-Select. KEIN passwordHash, KEIN verificationToken
         // in der Response.

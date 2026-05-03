@@ -49,12 +49,34 @@ export async function PATCH(req: NextRequest): Promise<Response> {
     // strict() lehnt unbekannte Felder ab — insbesondere `email`.
     const parsed = CustomerProfileUpdateSchema.parse(json);
 
+    // IT9 / US-IT9-02 — Adress-Helpers.
+    // Schema akzeptiert `string | "" | null | undefined`. DB-Mapping:
+    //   undefined → Feld nicht aktualisieren.
+    //   null      → DB-Wert auf NULL setzen (Adresse löschen).
+    //   ""        → wie null behandeln (Frontend-Convenience: leeres
+    //               Inputfeld speichert = löschen).
+    //   String    → Wert übernehmen.
+    const normaliseAddrField = (
+      v: string | null | undefined,
+    ): string | null | undefined => {
+      if (v === undefined) return undefined;
+      if (v === null) return null;
+      if (v === '') return null;
+      return v;
+    };
+    const street = normaliseAddrField(parsed.streetAndNumber);
+    const zip = normaliseAddrField(parsed.postalCode);
+    const cityVal = normaliseAddrField(parsed.city);
+
     const updated = await prisma.customerUser.update({
       where: { id: user.id },
       data: {
         ...(parsed.firstName !== undefined ? { firstName: parsed.firstName } : {}),
         ...(parsed.lastName !== undefined ? { lastName: parsed.lastName } : {}),
         ...(parsed.phone !== undefined ? { phone: parsed.phone ?? null } : {}),
+        ...(street !== undefined ? { streetAndNumber: street } : {}),
+        ...(zip !== undefined ? { postalCode: zip } : {}),
+        ...(cityVal !== undefined ? { city: cityVal } : {}),
       },
       // F3-Schutz: Public-Select — KEIN adminNote/adminRating in der Response.
       select: selectCustomerUserPublic(),

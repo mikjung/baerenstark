@@ -4,6 +4,11 @@
 **Verantwortlich:** Tom Siefert (Eigentümer der Google Cloud Console und der
 Meta-Developer-App), unterstützt vom Backend-Engineer.
 
+> **Tom — wenn du keinen technischen Background hast: lies stattdessen
+> `docs/GOOGLE_OAUTH_SETUP_GUIDE.md` (IT9 / US-IT9-04).** Dieses Runbook hier
+> ist Engineer-Sprache; der Setup-Guide ist Schritt-für-Schritt auf Deutsch
+> ohne Fachbegriffe.
+
 > **Iteration 7 Update:** Es gibt jetzt einen Self-Service-Diagnose-Endpoint
 > `GET /api/auth/diagnose`. Der zeigt dir live, welche ENV-Vars gesetzt sind,
 > welche Provider aktiv sind, und welche Callback-URLs Google/Facebook

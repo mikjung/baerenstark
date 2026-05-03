@@ -205,6 +205,59 @@ export async function POST(req: NextRequest): Promise<Response> {
     const isSlotMode = !!data.slotId;
 
     // ---------------------------------------------------------------------
+    // IT9 / US-IT9-02 — Adress-Pflicht für eingeloggte Kunden (Date-Modus).
+    //
+    // AC7: Eingeloggter Kunde ohne Profil-Adresse UND ohne Adresse im
+    //      Booking-Body → 400 mit `address_required` (klare Fehlermeldung,
+    //      Frontend zeigt Banner mit Link auf /konto/profil).
+    //
+    // Fallback-Pfad: Wenn der Body keine Adresse mitliefert, der eingeloggte
+    // Kunde aber eine Profil-Adresse hat → Profil-Adresse in den Body
+    // hineinkopieren (vollständige drei Felder müssen gesetzt sein, sonst
+    // greift AC7).
+    //
+    // Hinweis: Wir lesen die Customer-Session VOR dem Block, damit die
+    // existierende `customerSession`-Variable im Insert-Pfad weiter
+    // funktioniert.
+    // ---------------------------------------------------------------------
+    const customerSession = await readCustomerSessionFromRequest(req);
+
+    if (isDateMode && customerSession?.customerId) {
+      const bodyHasAddress =
+        !!data.addressStreet && !!data.addressZip && !!data.addressCity;
+      if (!bodyHasAddress) {
+        const profile = await prisma.customerUser.findUnique({
+          where: { id: customerSession.customerId },
+          select: {
+            streetAndNumber: true,
+            postalCode: true,
+            city: true,
+          },
+        });
+        const profileComplete =
+          !!profile &&
+          !!profile.streetAndNumber &&
+          !!profile.postalCode &&
+          !!profile.city;
+        if (profileComplete) {
+          // Profil-Adresse in den Body übernehmen — beide Naming-Welten
+          // (`profile.streetAndNumber → data.addressStreet` etc.).
+          data.addressStreet = profile!.streetAndNumber!;
+          data.addressZip = profile!.postalCode!;
+          data.addressCity = profile!.city!;
+        } else {
+          // AC7 — Adresse weder im Body noch vollständig im Profil.
+          return apiError({
+            code: 'VALIDATION_ERROR',
+            message:
+              'Bitte vervollständige zuerst deine Adresse in deinem Profil.',
+            field: 'address_required',
+          });
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------------
     // Modus-spezifische Verifizierung
     // ---------------------------------------------------------------------
     let slotForMail: { startsAt: Date; endsAt: Date; description: string | null } | null = null;
@@ -334,7 +387,8 @@ export async function POST(req: NextRequest): Promise<Response> {
     // ---------------------------------------------------------------------
     // IT4 (US-25 AC8): eingeloggte Kunden bekommen ihre Buchung automatisch
     // zugeordnet. Gastbuchungen lassen `customerId` leer.
-    const customerSession = await readCustomerSessionFromRequest(req);
+    // (IT9 / US-IT9-02: `customerSession` wurde bereits oben für den
+    //  Adress-Pflicht-Check gelesen — wir reusen die Variable hier.)
     const customerId = customerSession?.customerId ?? null;
 
     let bookingId: string;

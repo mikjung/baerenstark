@@ -72,6 +72,15 @@ export function toCustomerPublic(
     oauthProvider: user.oauthProvider,
     avatarUrl: user.avatarUrl,
     hasPassword: user.passwordHash !== null && user.passwordHash !== undefined,
+    // IT9 / US-IT9-02 — Default-Adresse mit-mappen.
+    // Drei Felder MÜSSEN gemeinsam belegt werden, sonst wirft der Public-
+    // Schema-Parse mit `Required` und Login/Register/oauth-finalize/me
+    // crashen alle (extended Schemas erben von hier). `?? null` schützt
+    // gegen alte Bestand-Rows ohne die neuen Felder (Prisma liefert
+    // undefined statt null, wenn der Select neuer ist als die DB).
+    streetAndNumber: user.streetAndNumber ?? null,
+    postalCode: user.postalCode ?? null,
+    city: user.city ?? null,
     createdAt: user.createdAt.toISOString(),
   });
 }

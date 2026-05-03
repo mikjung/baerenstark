@@ -104,12 +104,29 @@ export async function GET(req: NextRequest): Promise<Response> {
       avatarUrl: u.avatarUrl,
       adminNote: u.adminNote,
       adminRating: u.adminRating,
+      // IT9 / US-IT9-02 — Default-Adresse, read-only für Admin-Listing.
+      streetAndNumber: u.streetAndNumber,
+      postalCode: u.postalCode,
+      city: u.city,
       bookingCount: u._count.bookings,
       createdAt: u.createdAt.toISOString(),
     }));
 
+    // IT9 / US-IT9-01: Response-Shape entzerren.
+    //
+    // Vorher (defekt): `apiSuccess({ data, total, page, pageSize })` →
+    //   `{ "data": { "data": [...], "total": …, "page": …, "pageSize": … } }`
+    // Der FE-Client typisiert die äußere Hülle als
+    // `{ data: CustomerUserAdmin[]; total; page; pageSize }` und reichte das
+    // innere Objekt als `users.map(...)` an die Tabelle weiter — TypeError.
+    //
+    // Jetzt (gefixt): `items`-Feld statt `data` für die Liste, damit der
+    // Konflikt mit der `apiSuccess`-Hülle verschwindet. Wire-Format:
+    //   `{ "data": { "items": [...], "total": …, "page": …, "pageSize": … } }`
+    // Symmetrisch zu IT8-01-Fix für `/admin/admins` (dort ohne Pagination,
+    // daher `apiSuccess(array)`; hier mit Pagination, daher Envelope).
     return apiSuccess({
-      data,
+      items: data,
       total,
       page: parsed.page,
       pageSize: parsed.pageSize,

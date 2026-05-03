@@ -63,6 +63,27 @@ interface BookingFormProps {
   onClearSelection: () => void;
   onSubmitted: () => void;
   rebookToken?: string | null;
+  /**
+   * IT9 / US-IT9-02 — Profil-Adress-Defaults. Wenn gesetzt, werden die drei
+   * Adressfelder vorausgefüllt und der Kunde kann sie für diese Buchung noch
+   * überschreiben (Stichwort: Auftrag bei den Eltern). Pflicht für
+   * eingeloggte Kunden ist die Adresse hier wie bisher (Booking-Schema),
+   * aber wenn der Customer schon eine Profil-Adresse hat, ist das Form
+   * bereits ausgefüllt — kein erneutes Tippen.
+   */
+  profileAddress?: {
+    streetAndNumber: string | null;
+    postalCode: string | null;
+    city: string | null;
+  } | null;
+  /** Hinweis-Banner anzeigen, wenn der Kunde eingeloggt ist und noch keine Profil-Adresse hat. */
+  showProfileAddressHint?: boolean;
+  /** E-Mail des eingeloggten Kunden für Vorausfüllung des E-Mail-Felds. */
+  defaultEmail?: string | null;
+  /** Default-Name (Vor- + Nachname) des eingeloggten Kunden. */
+  defaultName?: string | null;
+  /** Default-Telefon des eingeloggten Kunden. */
+  defaultPhone?: string | null;
 }
 
 const SERVICE_OPTIONS = SERVICE_LIST.map((s) => ({ value: s.slug, label: s.label }));
@@ -80,6 +101,11 @@ export function BookingForm({
   onClearSelection,
   onSubmitted,
   rebookToken = null,
+  profileAddress = null,
+  showProfileAddressHint = false,
+  defaultEmail = null,
+  defaultName = null,
+  defaultPhone = null,
 }: BookingFormProps) {
   const [status, setStatus] = useState<FormStatus>({ kind: 'idle' });
   const [rebookSubmitting, setRebookSubmitting] = useState(false);
@@ -98,14 +124,21 @@ export function BookingForm({
     resolver: zodResolver(BookingFormSchema),
     mode: 'onBlur',
     defaultValues: {
-      customerName: '',
-      customerPhone: '',
-      customerEmail: '',
+      // IT9 / US-IT9-02: Vorausfüllung aus dem eingeloggten Kunden-Profil.
+      customerName: defaultName ?? '',
+      customerPhone: defaultPhone ?? '',
+      customerEmail: defaultEmail ?? '',
       service: initialService,
       description: '',
-      addressStreet: '',
-      addressZip: '',
-      addressCity: '',
+      // IT9 / US-IT9-02: Profil-Adresse mappt auf Booking-Adressfelder
+      // (`profile.streetAndNumber → bookingForm.addressStreet`, etc.).
+      // Naming-Drift zwischen Profil-Schema und Booking-Schema ist Architektur-
+      // Vorgabe (siehe ARCHITECTURE_IT9.md §2.3 Naming-Hinweis): Profil-
+      // Adresse = Default, Booking-Adresse = unveränderlicher Auftrags-
+      // Snapshot.
+      addressStreet: profileAddress?.streetAndNumber ?? '',
+      addressZip: profileAddress?.postalCode ?? '',
+      addressCity: profileAddress?.city ?? '',
       // IT5 / US-33: durationMinutes wird vom selectedTimeSlot gemergt,
       // ist aber im Form-Schema Pflicht — Default 60, wird beim Submit
       // mit dem aktuellen `selectedTimeSlot.durationMinutes` überschrieben.
@@ -437,10 +470,35 @@ export function BookingForm({
             />
           </div>
 
+          {/* IT9 / US-IT9-02 — Profil-Adress-Hinweis für eingeloggte Kunden
+              ohne hinterlegte Adresse. */}
+          {showProfileAddressHint && (
+            <div className="mt-5">
+              <Banner tone="info" title="Tipp: Adresse im Profil hinterlegen">
+                <p className="text-sm">
+                  Wenn du deine Adresse einmal in deinem{' '}
+                  <Link
+                    href="/konto/profil"
+                    className="font-medium text-baerenstark-wood underline-offset-2 hover:underline"
+                  >
+                    Profil
+                  </Link>{' '}
+                  hinterlegst, ist sie bei jeder Buchung automatisch
+                  vorausgefüllt.
+                </p>
+              </Banner>
+            </div>
+          )}
+
           {/* IT5 / US-32: Adresse des Auftragsorts */}
           <div className="mt-5 rounded-xl border border-baerenstark-sand/60 bg-baerenstark-cream/30 p-4 space-y-3">
             <p className="text-sm font-medium text-baerenstark-bark">
               <span aria-hidden="true">📍 </span>Adresse des Auftragsorts
+              {profileAddress && (
+                <span className="ml-2 inline-block rounded bg-baerenstark-cream/80 px-2 py-0.5 text-xs font-normal text-baerenstark-bark/70">
+                  Aus deinem Profil — überschreibbar
+                </span>
+              )}
             </p>
             <Input
               label="Straße und Hausnummer"

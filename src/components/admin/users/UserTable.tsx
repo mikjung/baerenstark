@@ -75,6 +75,20 @@ export function UserTable() {
         sort,
       });
       if (reqId !== lastReqId.current) return;
+      // IT9 / US-IT9-01 (Defense-in-Depth): `fetchAdminUsers()` unwrappt
+      // bereits die Backend-Envelope und prüft `Array.isArray`. Diese
+      // zweite Prüfung schützt vor einem zukünftigen Drift im Mapper —
+      // verhindert `users.map is not a function` und damit die Admin-
+      // Error-Boundary.
+      if (!Array.isArray(res.data)) {
+        setStatus('error');
+        setUsers([]);
+        setTotal(0);
+        setErrorMessage(
+          'Datenformat-Fehler beim Laden der Nutzerliste. Bitte Seite neu laden oder den Support kontaktieren.',
+        );
+        return;
+      }
       setUsers(res.data);
       setTotal(res.total);
       setStatus('ready');

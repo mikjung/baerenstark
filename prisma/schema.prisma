@@ -109,6 +109,20 @@ model CustomerUser {
   /// Hat nichts mit öffentlichen Reviews zu tun.
   adminRating Int?
 
+  // IT9 / US-IT9-02 — Default-Adresse des Kunden (Profil).
+  /// Alle drei Felder optional → niemand wird beim Onboarding blockiert.
+  /// Pflicht-Validierung greift im Booking-POST (siehe ARCHITECTURE_IT9.md §2.5).
+  /// App-Layer-Validierung über `ZipCodeSchema` (`/^\d{5}$/`, DE).
+  /// Bewusst NICHT die `addressStreet/addressZip/addressCity`-Naming-Convention
+  /// der Booking-Adresse recyceln — die Buchungs-Adresse ist semantisch der
+  /// Wahrheits-Anker pro Auftrag, die Profil-Adresse ist der Default.
+  /// Straße + Hausnummer (App-Layer 3..100 chars).
+  streetAndNumber String?
+  /// 5-stellige deutsche PLZ (App-Layer Regex).
+  postalCode      String?
+  /// Ort (App-Layer 2..100 chars).
+  city            String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

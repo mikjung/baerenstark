@@ -372,6 +372,35 @@ export const BookingAddressSchema = z.object({
 });
 export type BookingAddress = z.infer<typeof BookingAddressSchema>;
 
+/**
+ * IT9 / US-IT9-02 — Customer-Default-Adresse (Profil-Adresse).
+ *
+ * Bewusst eigenes Naming `streetAndNumber` / `postalCode` / `city`
+ * gegenüber `Booking.addressStreet` etc. — die Profil-Adresse ist der
+ * Default für künftige Buchungen, die Booking-Adresse ist der unveränderliche
+ * Auftrags-Snapshot. Vorausfüllung beim Buchen mappt
+ * `profile.streetAndNumber → bookingForm.addressStreet`,
+ * `profile.postalCode     → bookingForm.addressZip`,
+ * `profile.city           → bookingForm.addressCity`.
+ *
+ * Felder hier sind die Pflicht-Variante (alle drei nicht-leer). Die
+ * partielle Variante kommt aus den Profil-/Register-Schemas (s.u.).
+ */
+export const CustomerAddressSchema = z.object({
+  streetAndNumber: z
+    .string()
+    .trim()
+    .min(3, 'Bitte Straße und Hausnummer angeben')
+    .max(100, 'Adresse ist zu lang'),
+  postalCode: ZipCodeSchema,
+  city: z
+    .string()
+    .trim()
+    .min(2, 'Bitte den Ort angeben')
+    .max(100, 'Ort ist zu lang'),
+});
+export type CustomerAddress = z.infer<typeof CustomerAddressSchema>;
+
 /** US-33: Dauer-Validierung (Whitelist + Sonderwert). */
 const bookingDurationSchema = z.union([
   z.literal(BOOKING_DURATION_ALL_DAY),
@@ -1001,6 +1030,24 @@ export const CustomerRegisterSchema = z.object({
   firstName: z.string().trim().min(1, 'Bitte Vorname angeben').max(120, 'Vorname ist zu lang'),
   lastName: z.string().trim().min(1, 'Bitte Nachname angeben').max(120, 'Nachname ist zu lang'),
   phone: phoneOptionalSchema,
+  // IT9 / US-IT9-02 — Adresse optional bei Registrierung (Onboarding-
+  // Niedrigschwelligkeit). Pflicht greift erst beim Buchen.
+  // Frontend kann leere Strings senden; das Schema verlangt entweder
+  // gültige Werte oder gar nicht das Feld. Backend persistiert die Werte
+  // 1:1 in `customerUser.create`.
+  streetAndNumber: z
+    .string()
+    .trim()
+    .min(3, 'Bitte Straße und Hausnummer angeben')
+    .max(100, 'Adresse ist zu lang')
+    .optional(),
+  postalCode: ZipCodeSchema.optional(),
+  city: z
+    .string()
+    .trim()
+    .min(2, 'Bitte den Ort angeben')
+    .max(100, 'Ort ist zu lang')
+    .optional(),
   privacyAccepted: z.literal(true, {
     errorMap: () => ({ message: 'Bitte den Datenschutzhinweis bestätigen' }),
   }),
@@ -1069,6 +1116,39 @@ export const CustomerProfileUpdateSchema = z
     firstName: z.string().trim().min(1).max(120).optional(),
     lastName: z.string().trim().min(1).max(120).optional(),
     phone: phoneOptionalSchema,
+    // IT9 / US-IT9-02 — Default-Adresse des Kunden.
+    //
+    // Semantik:
+    //   undefined → Feld nicht im Body, Backend lässt den DB-Wert unverändert.
+    //   null      → Feld explizit auf NULL setzen (Adresse löschen).
+    //   ""        → wird im Backend wie `null` behandelt (Frontend-Convenience).
+    //   String    → muss die Längen-/PLZ-Constraints erfüllen.
+    //
+    // `.nullable()` erlaubt expliziten `null`-Reset. `.optional()` lässt
+    // teilweise Updates zu (z.B. nur Telefon ändern, Adresse unangetastet).
+    // PLZ-Validierung greift nur bei nicht-null-String — `null` und
+    // undefined gehen durch.
+    streetAndNumber: z
+      .union([
+        z
+          .string()
+          .trim()
+          .min(3, 'Bitte Straße und Hausnummer angeben')
+          .max(100, 'Adresse ist zu lang'),
+        z.literal(''),
+        z.null(),
+      ])
+      .optional(),
+    postalCode: z
+      .union([ZipCodeSchema, z.literal(''), z.null()])
+      .optional(),
+    city: z
+      .union([
+        z.string().trim().min(2, 'Bitte den Ort angeben').max(100, 'Ort ist zu lang'),
+        z.literal(''),
+        z.null(),
+      ])
+      .optional(),
   })
   .strict();
 export type CustomerProfileUpdateInput = z.infer<typeof CustomerProfileUpdateSchema>;
@@ -1111,6 +1191,20 @@ export const CustomerUserPublicSchema = z
     oauthProvider: z.string().nullable(),
     avatarUrl: z.string().url().nullable(),
     hasPassword: z.boolean(),
+    // IT9 / US-IT9-02 — Default-Adresse. `null` für Konten ohne Adresse.
+    //
+    // Drei Felder MÜSSEN gemeinsam im Public-DTO landen, sonst kippt der
+    // Login-Flow: `CustomerLoginResponseSchema` extends dieses Schema, und
+    // `register` / `oauth-finalize` mappen ebenfalls über `toCustomerPublic()`.
+    // Wenn der Mapper die Felder nicht mit-belegt, wirft `.parse()` mit
+    // `ZodError: Required` und der gesamte Customer-Auth-Pfad bricht.
+    //
+    // Wir machen die Felder bewusst `.nullable()` ABER NICHT `.optional()` —
+    // der Mapper soll IMMER explizit `null` setzen, wenn der DB-Wert fehlt.
+    // Das macht Drift-Bugs sofort sichtbar.
+    streetAndNumber: z.string().nullable(),
+    postalCode: z.string().nullable(),
+    city: z.string().nullable(),
     createdAt: z.string().datetime({ offset: true }),
   })
   .strict();
@@ -1827,6 +1921,14 @@ export const CustomerUserAdminSchema = z.object({
     .max(CUSTOMER_ADMIN_RATING_MAX)
     .nullable(),
   bookingCount: z.number().int().nonnegative(),
+  // IT9 / US-IT9-02 — Default-Adresse des Kunden, im Admin-Drawer NUR
+  // read-only sichtbar. Tom kann die Adresse im Namen des Kunden NICHT
+  // ändern (DSGVO-Hoheit beim Kunden). Drei Felder optional, damit
+  // Bestand-Konten ohne Adresse den Schema-Parse nicht brechen — und
+  // damit die Admin-Liste auch ohne synchronen DB-Migration-Run greift.
+  streetAndNumber: z.string().nullable().optional(),
+  postalCode: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type CustomerUserAdmin = z.infer<typeof CustomerUserAdminSchema>;

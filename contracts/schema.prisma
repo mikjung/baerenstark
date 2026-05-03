@@ -588,6 +588,24 @@ model CustomerUser {
   adminRating       Int?
   // -----------------------------------------------------------------------
 
+  // --- IT9 / US-IT9-02 (Default-Adresse, DSGVO-customer-owned) -----------
+  /// Default-Adresse des Kunden für Termine vor Ort. Alle drei Felder
+  /// optional → Onboarding bleibt niedrigschwellig. Die Pflicht-Validierung
+  /// greift im Booking-POST (eingeloggter Kunde ohne Profil-Adresse +
+  /// kein Adress-Body → 400 `address_required`). DSGVO-Hoheit: Customer
+  /// kann jederzeit alle Felder leeren (`null` in DB). Tom sieht die
+  /// Adresse im Admin-Drawer read-only — kein Edit über `/admin/users/:id`.
+  /// Bewusst getrenntes Naming gegenüber `Booking.addressStreet` etc., weil
+  /// die Booking-Adresse der Auftrags-Snapshot bleibt und davon unabhängig
+  /// historisch persistiert wird.
+  /// Straße + Hausnummer (App-Layer 3..100 chars).
+  streetAndNumber   String?
+  /// 5-stellige deutsche PLZ (App-Layer Regex `/^\d{5}$/`).
+  postalCode        String?
+  /// Ort (App-Layer 2..100 chars).
+  city              String?
+  // -----------------------------------------------------------------------
+
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

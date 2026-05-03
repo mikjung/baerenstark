@@ -346,6 +346,15 @@ export function UserDetailDrawer({ userId, onClose, onChanged, onDeleted }: Prop
                 )}
               </section>
 
+              {/*
+                IT9 / US-IT9-02 AC6: Adresse READ-ONLY für den Admin
+                anzeigen. Tom kann die Adresse nicht im Namen des Kunden
+                ändern (DSGVO-Hoheit beim Kunden). Felder sind defensiv
+                ausgelesen — wenn Backend die Felder noch nicht ausliefert
+                (Migration nicht deployed), zeigen wir den Empty-State.
+              */}
+              <AdminAddressSection user={user} />
+
               <section>
                 <h3 className="text-sm font-semibold uppercase tracking-wide text-baerenstark-bark/60">
                   Stammdaten
@@ -375,5 +384,49 @@ export function UserDetailDrawer({ userId, onClose, onChanged, onDeleted }: Prop
         onConfirm={onDelete}
       />
     </div>
+  );
+}
+
+/**
+ * IT9 / US-IT9-02 AC6 — Adress-Section (read-only) im Admin-Drawer.
+ *
+ * Liest die drei Adressfelder defensiv aus dem `AdminUserDetail`-Object.
+ * Falls das Backend sie noch nicht ausliefert (Migration noch nicht deployed
+ * oder DTO-Helper nicht aktualisiert), zeigen wir den Empty-State statt
+ * eines Crashes.
+ *
+ * KEIN Edit-Button: Tom darf die Adresse nicht im Namen des Kunden ändern
+ * — DSGVO-Hoheit beim Kunden.
+ */
+function AdminAddressSection({ user }: { user: AdminUserDetail }) {
+  const u = user as unknown as Record<string, unknown>;
+  const street = typeof u.streetAndNumber === 'string' ? u.streetAndNumber : null;
+  const zip = typeof u.postalCode === 'string' ? u.postalCode : null;
+  const city = typeof u.city === 'string' ? u.city : null;
+  const hasAddress = Boolean(street || zip || city);
+  return (
+    <section>
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-baerenstark-bark/60">
+        Adresse (Profil)
+      </h3>
+      <p className="mt-1 text-xs text-baerenstark-bark/60">
+        Vom Kunden hinterlegte Default-Adresse. Read-only — Adressänderung nur
+        durch den Kunden selbst (DSGVO).
+      </p>
+      {hasAddress ? (
+        <address className="mt-2 not-italic text-sm text-baerenstark-bark">
+          {street && <div>{street}</div>}
+          <div>
+            {zip}
+            {zip && city ? ' ' : ''}
+            {city}
+          </div>
+        </address>
+      ) : (
+        <p className="mt-2 text-sm text-baerenstark-bark/60">
+          Keine Adresse hinterlegt.
+        </p>
+      )}
+    </section>
   );
 }

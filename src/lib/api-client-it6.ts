@@ -230,6 +230,30 @@ export interface AdminUsersListResponse {
   pageSize: number;
 }
 
+/**
+ * IT9 / US-IT9-01: Backend-Response-Shape ist jetzt
+ *   `{ data: { items: CustomerUserAdmin[]; total; page; pageSize } }`
+ *
+ * (vorher fehlerhaft `{ data: { data: [...], total, page, pageSize } }` → der
+ * frühere Wrapper hat das innere Objekt unverarbeitet an `setUsers` gereicht
+ * und `users.map is not a function` ausgelöst, was die Admin-Error-Boundary
+ * gezeigt hat.)
+ *
+ * Wir unwrappen die Envelope hier zentral und liefern dem alten
+ * Caller-Vertrag (`{ data: User[]; total; page; pageSize }`) unverändert
+ * zurück — UserTable bleibt rückwärtskompatibel.
+ *
+ * Defensive-Read: explizite `Array.isArray`-Prüfung. Bei Schema-Drift wirft
+ * die Funktion einen klar lesbaren `ApiClientError` statt eines untypisierten
+ * Crashes — analog zur IT8-01-Lösung in `fetchAdmins`.
+ */
+interface AdminUsersListEnvelope {
+  items: CustomerUserAdmin[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export async function fetchAdminUsers(
   query: Partial<AdminUsersQuery> = {},
   signal?: AbortSignal,
@@ -241,7 +265,20 @@ export async function fetchAdminUsers(
   if (query.sort) search.set('sort', query.sort);
   const qs = search.toString();
   const path = qs ? `/api/admin/users?${qs}` : '/api/admin/users';
-  return request<AdminUsersListResponse>(path, { signal });
+  const res = await request<DataEnvelope<AdminUsersListEnvelope>>(path, { signal });
+  if (!res?.data || !Array.isArray(res.data.items)) {
+    throw new ApiClientError(
+      500,
+      'INTERNAL_ERROR',
+      'Unerwartetes Antwortformat der Nutzerliste. Bitte Seite neu laden oder den Support kontaktieren.',
+    );
+  }
+  return {
+    data: res.data.items,
+    total: typeof res.data.total === 'number' ? res.data.total : 0,
+    page: typeof res.data.page === 'number' ? res.data.page : 1,
+    pageSize: typeof res.data.pageSize === 'number' ? res.data.pageSize : res.data.items.length,
+  };
 }
 
 export interface AdminUserDetail extends CustomerUserAdmin {

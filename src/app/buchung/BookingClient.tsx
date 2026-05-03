@@ -33,6 +33,7 @@ import {
   fetchSlots,
   type RebookInfoResponse,
 } from '@/lib/api-client';
+import { useCustomer } from '@/lib/use-customer';
 import type { SlotPublic } from '@/lib/schemas';
 import { SERVICE_LIST, type Service } from '@/lib/services';
 
@@ -66,6 +67,25 @@ export function BookingClient() {
   const defaultService = params.get('service');
 
   const isRebookMode = Boolean(rebookToken);
+
+  // IT9 / US-IT9-02: Eingeloggten Kunden laden für Adress-Vorausfüllung
+  // (siehe BookingForm `profileAddress`-Prop). Bei Gast-Buchungen bleibt
+  // `customer === null` und das Form startet leer.
+  const { customer } = useCustomer();
+
+  // Defensive Lese-Helper: Backend liefert die Adressfelder evtl. noch nicht
+  // (Migration noch nicht deployed). Wir lesen sie via index-cast und fallen
+  // auf null zurück, damit der Crash nie das Form blockiert.
+  const profileAddress = useMemo(() => {
+    if (!customer) return null;
+    const c = customer as unknown as Record<string, unknown>;
+    const street = typeof c.streetAndNumber === 'string' ? c.streetAndNumber : null;
+    const zip = typeof c.postalCode === 'string' ? c.postalCode : null;
+    const city = typeof c.city === 'string' ? c.city : null;
+    if (!street && !zip && !city) return null;
+    return { streetAndNumber: street, postalCode: zip, city };
+  }, [customer]);
+  const isLoggedInWithoutAddress = Boolean(customer) && !profileAddress;
 
   // === IT3-Modus: Datum + Zeit ===
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -371,6 +391,14 @@ export function BookingClient() {
             setSelectedTimeSlot(null);
           }}
           rebookToken={isRebookMode ? rebookToken : null}
+          // IT9 / US-IT9-02: Vorausfüllung für eingeloggte Kunden.
+          profileAddress={profileAddress}
+          showProfileAddressHint={isLoggedInWithoutAddress && !isRebookMode}
+          defaultEmail={customer?.email ?? null}
+          defaultName={
+            customer ? `${customer.firstName} ${customer.lastName}`.trim() : null
+          }
+          defaultPhone={customer?.phone ?? null}
           onSubmitted={() => {
             if (isRebookMode) {
               void loadLegacySlots();

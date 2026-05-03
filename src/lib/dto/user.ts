@@ -60,6 +60,13 @@ export const selectCustomerUserPublic = () =>
     // Hinweis: passwordHash kommt mit, damit Mapper `hasPassword` ableiten
     // kann — aber NICHT in der Response. Mapper muss explizit raus-mappen.
     passwordHash: true,
+    // IT9 / US-IT9-02 — Default-Adresse des Kunden. ALLE Customer-API-Pfade,
+    // die `toCustomerPublic()` aufrufen (login, register, oauth-finalize,
+    // /me), bekommen diese Felder. Drei MÜSSEN gemeinsam im Select sein,
+    // sonst wirft `CustomerUserPublicSchema.parse()` mit `Required`.
+    streetAndNumber: true,
+    postalCode: true,
+    city: true,
     createdAt: true,
     // BEWUSST AUSGESCHLOSSEN (F3-Erweiterung IT7):
     //   passwordHash:           im Select, NIE in Response (Mapper raus).
@@ -88,6 +95,11 @@ export const selectCustomerUserAdmin = () =>
     // IT6 / US-IT6-07 — interne Felder, NUR Admin:
     adminNote: true,
     adminRating: true,
+    // IT9 / US-IT9-02 — Tom darf die Adresse im Admin-Drawer LESEN
+    // (read-only). Edit-Pfad bleibt customer-only.
+    streetAndNumber: true,
+    postalCode: true,
+    city: true,
     createdAt: true,
     updatedAt: true,
   }) satisfies Prisma.CustomerUserSelect;

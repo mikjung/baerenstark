@@ -29,6 +29,7 @@ import { ApiClientError, registerCustomer } from '@/lib/api-client';
 import {
   CUSTOMER_PASSWORD_MAX_LENGTH,
   CUSTOMER_PASSWORD_MIN_LENGTH,
+  ZipCodeSchema,
   type CustomerRegisterInput,
 } from '@/lib/schemas';
 
@@ -63,6 +64,31 @@ const RegisterFormSchema = z
       .trim()
       .max(40, 'Telefonnummer ist zu lang')
       .optional(),
+    // IT9 / US-IT9-02 — Adressfelder optional bei der Registrierung.
+    // Wenn ein Feld leer bleibt, senden wir es als undefined (Backend
+    // akzeptiert das via `.optional()`). Wenn es ausgefüllt ist, müssen
+    // die Längen-/PLZ-Constraints stimmen.
+    streetAndNumber: z
+      .string()
+      .trim()
+      .max(100, 'Adresse ist zu lang')
+      .optional()
+      .or(z.literal('')),
+    postalCode: z
+      .string()
+      .trim()
+      .optional()
+      .or(z.literal(''))
+      .refine(
+        (v) => !v || ZipCodeSchema.safeParse(v).success,
+        { message: 'PLZ muss 5 Ziffern enthalten' },
+      ),
+    city: z
+      .string()
+      .trim()
+      .max(100, 'Ort ist zu lang')
+      .optional()
+      .or(z.literal('')),
     password: z
       .string()
       .min(
@@ -163,6 +189,9 @@ export function RegisterForm() {
       lastName: '',
       email: '',
       phone: '',
+      streetAndNumber: '',
+      postalCode: '',
+      city: '',
       password: '',
       passwordConfirm: '',
       privacyAccepted: false,
@@ -178,12 +207,21 @@ export function RegisterForm() {
     setSubmitting(true);
     try {
       // Phone-Feld leer → undefined (Schema akzeptiert optional null/undef).
+      // IT9 / US-IT9-02: Adressfelder ebenfalls leer → undefined; das Backend
+      // ignoriert die Felder dann komplett (additive Optional-Felder im
+      // CustomerRegisterSchema).
+      const trimmedStreet = values.streetAndNumber?.trim();
+      const trimmedZip = values.postalCode?.trim();
+      const trimmedCity = values.city?.trim();
       const payload: CustomerRegisterInput = {
         email: values.email,
         password: values.password,
         firstName: values.firstName,
         lastName: values.lastName,
         phone: values.phone && values.phone.trim() !== '' ? values.phone : undefined,
+        streetAndNumber: trimmedStreet ? trimmedStreet : undefined,
+        postalCode: trimmedZip ? trimmedZip : undefined,
+        city: trimmedCity ? trimmedCity : undefined,
         privacyAccepted: true,
       };
       const created = await registerCustomer(payload);
@@ -256,6 +294,54 @@ export function RegisterForm() {
         error={errors.phone?.message}
         {...register('phone')}
       />
+
+      {/*
+        IT9 / US-IT9-02 — Adress-Section. Komplett optional bei der
+        Registrierung. Hinweistext erklärt den Nutzen, ohne Druck. Wenn der
+        Kunde die Adresse hier ausfüllt, ist sie später beim Buchen automatisch
+        vorausgefüllt (siehe BookingForm).
+      */}
+      <fieldset className="rounded-lg border border-baerenstark-sand bg-baerenstark-cream/40 p-4">
+        <legend className="px-1 text-sm font-medium text-baerenstark-bark">
+          Deine Adresse (optional)
+        </legend>
+        <p className="mb-3 text-xs text-baerenstark-bark/70">
+          Wird für Terminbuchungen benötigt — du kannst sie auch später im
+          Profil ergänzen.
+        </p>
+        <div className="space-y-3">
+          <Input
+            label="Straße & Hausnummer"
+            autoComplete="street-address"
+            placeholder="Musterstraße 12"
+            error={errors.streetAndNumber?.message}
+            {...register('streetAndNumber')}
+          />
+          <div className="grid grid-cols-3 gap-3">
+            <div className="col-span-1">
+              <Input
+                label="PLZ"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={5}
+                autoComplete="postal-code"
+                placeholder="64283"
+                error={errors.postalCode?.message}
+                {...register('postalCode')}
+              />
+            </div>
+            <div className="col-span-2">
+              <Input
+                label="Ort"
+                autoComplete="address-level2"
+                placeholder="Darmstadt"
+                error={errors.city?.message}
+                {...register('city')}
+              />
+            </div>
+          </div>
+        </div>
+      </fieldset>
 
       <div>
         <Input
