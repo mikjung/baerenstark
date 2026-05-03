@@ -19,8 +19,8 @@ export const metadata: Metadata = {
 export default function ResetPasswordPage() {
   return (
     <AuthCardShell
-      title="Neues Passwort setzen"
-      subtitle="Wähle ein sicheres Passwort für dein Konto."
+      title="Neues Passwort festlegen"
+      subtitle="Wählen Sie ein sicheres Passwort für Ihr Konto."
     >
       <Suspense
         fallback={

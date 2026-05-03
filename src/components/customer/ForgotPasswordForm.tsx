@@ -26,17 +26,18 @@ import {
   CustomerForgotPasswordSchema,
   type CustomerForgotPasswordInput,
 } from '@/lib/schemas';
+import { toast } from '@/lib/toast';
 
 function mapApiErrorMessage(err: ApiClientError): string {
   switch (err.code) {
     case 'RATE_LIMITED':
-      return 'Zu viele Anfragen. Bitte später erneut versuchen.';
+      return 'Zu viele Versuche. Bitte versuchen Sie es in einer Stunde erneut oder rufen Sie uns an: 0157-74787512.';
     case 'VALIDATION_ERROR':
-      return err.message || 'Bitte eine gültige E-Mail-Adresse angeben.';
+      return err.message || 'Bitte geben Sie eine gültige E-Mail-Adresse ein.';
     case 'NETWORK_ERROR':
-      return 'Verbindung zum Server fehlgeschlagen. Bitte Internetverbindung prüfen.';
+      return 'Wir konnten den Server nicht erreichen. Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.';
     default:
-      return 'Anfrage fehlgeschlagen. Bitte später erneut versuchen.';
+      return 'Wir konnten den Reset-Link gerade nicht senden. Bitte versuchen Sie es in einer Minute erneut.';
   }
 }
 
@@ -61,11 +62,15 @@ export function ForgotPasswordForm() {
     try {
       await forgotPassword(values);
       setSubmittedEmail(values.email);
+      // IT10 / Spec §2.2 Punkt 4: zusätzlicher Erfolgs-Toast.
+      toast.success('Falls die Adresse registriert ist, ist die E-Mail unterwegs.');
     } catch (err) {
       if (err instanceof ApiClientError) {
         setServerError(mapApiErrorMessage(err));
       } else {
-        setServerError('Anfrage fehlgeschlagen. Bitte erneut versuchen.');
+        setServerError(
+          'Wir konnten den Reset-Link gerade nicht senden. Bitte versuchen Sie es in einer Minute erneut.',
+        );
       }
       setSubmitting(false);
     }
@@ -74,13 +79,12 @@ export function ForgotPasswordForm() {
   if (submittedEmail) {
     return (
       <div className="space-y-4">
-        <Banner tone="success" title="Anfrage erhalten" role="status">
-          Falls ein Konto mit der Adresse <strong>{submittedEmail}</strong>{' '}
-          existiert, haben wir dir einen Reset-Link geschickt. Bitte prüfe dein
-          Postfach (auch den Spam-Ordner). Der Link ist 1 Stunde gültig.
+        <Banner tone="success" title="Bitte prüfen Sie Ihr Postfach" role="status">
+          Falls <strong>{submittedEmail}</strong> registriert ist, finden Sie
+          dort einen Link zum Zurücksetzen. Der Link ist 1 Stunde gültig.
         </Banner>
         <p className="text-sm text-baerenstark-bark/80">
-          Keine E-Mail erhalten?{' '}
+          Falscher Tippfehler?{' '}
           <button
             type="button"
             onClick={() => {
@@ -88,7 +92,7 @@ export function ForgotPasswordForm() {
             }}
             className="text-baerenstark-wood underline-offset-2 hover:underline"
           >
-            Erneut anfordern
+            Erneut versuchen
           </button>
         </p>
         <p className="text-sm">
@@ -106,12 +110,12 @@ export function ForgotPasswordForm() {
   return (
     <form onSubmit={onSubmit} noValidate className="space-y-4">
       <p className="text-sm text-baerenstark-bark/80">
-        Gib die E-Mail-Adresse deines Kontos ein. Wir schicken dir einen Link,
-        mit dem du dein Passwort zurücksetzen kannst.
+        Geben Sie die E-Mail-Adresse Ihres Kontos ein. Wir schicken Ihnen einen
+        Link zum Zurücksetzen.
       </p>
 
       <Input
-        label="E-Mail"
+        label="E-Mail-Adresse"
         type="email"
         autoComplete="email"
         required
@@ -126,7 +130,7 @@ export function ForgotPasswordForm() {
       )}
 
       <Button type="submit" isLoading={submitting} className="w-full">
-        Reset-Link anfordern
+        {submitting ? 'Wird gesendet…' : 'Link anfordern'}
       </Button>
 
       <p className="text-center text-sm">

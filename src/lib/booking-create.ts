@@ -20,9 +20,26 @@ import { getBufferConfig } from './buffer-config';
 
 export class BookingConflictError extends Error {
   readonly code: 'CONFLICT' | 'BUFFER_BLOCKED';
-  constructor(message: string, code: 'CONFLICT' | 'BUFFER_BLOCKED' = 'CONFLICT') {
+  /**
+   * IT10 / STRUCT-3 — optionaler semantischer Subcode für die HTTP-Response.
+   * Wird in `src/app/api/bookings/route.ts` als `error.subcode` weitergegeben.
+   *
+   * Aktuell gesetzt:
+   *   - `'BOOKING_SLOT_TAKEN'` bei Overlap-Verstoß (Race-Condition zwischen
+   *     Slot-Anzeige und Submit). Frontend mapped primär auf diesen Subcode.
+   *
+   * Buffer-Konflikte (`code: 'BUFFER_BLOCKED'`) liefern KEINEN Subcode —
+   * sie sind kein „Slot belegt"-Race, sondern eine harte Verfügbarkeitsregel.
+   */
+  readonly subcode?: string;
+  constructor(
+    message: string,
+    code: 'CONFLICT' | 'BUFFER_BLOCKED' = 'CONFLICT',
+    subcode?: string,
+  ) {
     super(message);
     this.code = code;
+    this.subcode = subcode;
     this.name = 'BookingConflictError';
   }
 }
@@ -85,9 +102,12 @@ export async function createBookingWithOverlapCheck(
         select: { id: true },
       });
       if (overlapping) {
+        // IT10 / STRUCT-3: Slot-Konflikt → Subcode `BOOKING_SLOT_TAKEN`.
+        // FE-Mapping (verbindlich, contracts/api-routes.md §24.3.1).
         throw new BookingConflictError(
-          'Dieses Zeitfenster wurde gerade gebucht. Bitte wählen Sie ein anderes.',
+          'Dieser Termin wurde inzwischen leider von jemand anderem gebucht. Bitte wählen Sie einen anderen Slot.',
           'CONFLICT',
+          'BOOKING_SLOT_TAKEN',
         );
       }
 
@@ -152,9 +172,13 @@ export async function createBookingWithOverlapCheck(
     },
     {
       // SQLite: Serializable ≈ BEGIN IMMEDIATE (single-writer-Lock).
+      // IT10 / US-IT10-03: defensiv erhöht (5s→10s, 2s→4s), um seltene
+      // libSQL/Turso-Latenz-Spitzen aus Vercel zu absorbieren ohne P2028.
+      // ARCHITECTURE_IT10.md §1.3 (Hypothese 4) erlaubt diesen Eingriff
+      // explizit — klein und lokal.
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      timeout: 5000,
-      maxWait: 2000,
+      timeout: 10000,
+      maxWait: 4000,
     },
   );
 

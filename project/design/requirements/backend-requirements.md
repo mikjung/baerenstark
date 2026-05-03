@@ -452,3 +452,215 @@ Endpoint Dev/Prod).
 
 Pressure (§12.2) — 6 Tests: Rate-Limits, parallele Reset-Token-Race,
 Garbage-Token, Facebook-No-Email-Path.
+
+---
+
+# Backend Requirements — Iteration 10 (Bug-Triage & Customer-Self-Service)
+
+> **Quelle der Wahrheit:** `ARCHITECTURE_IT10.md`. Vertrags-Schemas:
+> `contracts/api-routes.md` §24, `contracts/zod-schemas.ts` (unverändert),
+> `contracts/schema.prisma` (unverändert).
+
+## Overview
+
+Iteration 10 enthält drei Bug-Fixes (Konfig + Migrations-Drift) und zwei
+Features, die backend-seitig **keine neuen Endpoints** und **keine
+Schema-Änderungen** erfordern. Backend-Aufgaben in IT10:
+
+1. **Konfig-Audit** in Vercel (US-IT10-01).
+2. **Prod-Migrations-Drift beseitigen** (US-IT10-02 + US-IT10-03).
+3. **Stack-Trace-Diagnose** auf den drei Bug-Endpoints, nur falls die
+   Hypothese „verschlafene Migration" sich als falsch erweist.
+4. **Reuse-Verifikation** der bestehenden Endpoints für US-IT10-05
+   (Anfragen-Übersicht + Profil-Pre-Fill).
+
+## Tech Stack (unverändert)
+
+- Next.js 14 App Router · Prisma · SQLite (libSQL/Turso in Prod)
+- NextAuth/Auth.js · Resend · Zod · bcryptjs
+
+## Story Coverage (Iteration 10)
+
+| Story        | Backend-Deliverable                                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| US-IT10-01   | ENV-Audit + Resend-Domain-Verifikation; Vercel-Logs prüfen für Mail-Fehler. **Kein Code-Change** im Endpoint erwartet.                                |
+| US-IT10-02   | `prisma migrate deploy` gegen Prod-DB. Falls Stack-Trace anderes zeigt: zielgenauer Patch in `src/app/api/admin/users/route.ts`.                       |
+| US-IT10-03   | `prisma migrate deploy` gegen Prod-DB. Falls Stack-Trace Tx-Timeout zeigt: `timeout`/`maxWait` in `src/lib/booking-create.ts` erhöhen. **Plus:** STRUCT-3-Fix — Slot-Konflikt-Antwort liefert `subcode: 'BOOKING_SLOT_TAKEN'` (siehe unten). |
+| US-IT10-04   | Keine neuen Endpoints — bestehender `POST /api/bookings` wird vom Modal aufgerufen. Backend muss aber `POST /api/bookings` mit Submit ohne Service-Vorauswahl auf der Page korrekt handhaben (geltender Vertrag bleibt: `service` ist Pflichtfeld im Body, leer → `400 VALIDATION_ERROR field: 'service'`). |
+| US-IT10-05   | Keine Backend-Änderungen — `GET /api/customer/bookings(/:id)` und `GET /api/customer/me` decken Anforderung. **Reuse-Audit** durch Engineer.            |
+| Querschnitt  | **STRUCT-1-Fix:** `internalError()`-Logging-Härtung (siehe Logging/Observability). Verbindlich in IT10. |
+
+## Bug-Fix-Aktionen im Detail
+
+### US-IT10-01 — Passwort-Reset-Mail
+
+**Endpoints (unverändert):**
+
+- `POST /api/customer/forgot-password` (siehe api-routes.md §23.3).
+- `POST /api/customer/reset-password` (siehe api-routes.md §23.3).
+
+**Aktionen:**
+
+1. **ENV-Audit Vercel Production:**
+   - `MAIL_FROM` gesetzt? (Pflicht — Default-Fallback `onboarding@resend.dev` ist nicht produktionstauglich.)
+   - `RESEND_API_KEY` gesetzt und kein Placeholder (`re_xxxxxxxxxxxx`)?
+   - `MAIL_TO_ADMIN`, `NEXTAUTH_URL`, `NEXT_PUBLIC_BASE_URL` gesetzt?
+2. **Resend-Dashboard:** Absender-Domain verifiziert (SPF + DKIM)?
+3. **Vercel-Logs:** Filter auf `[forgot-password] reset mail failed:` — wenn Resend einen Fehler zurückgibt, wird er aktuell nur als `console.warn` geloggt.
+4. **Optional, Backlog:** Diagnose-Endpoint `GET /api/admin/diagnose/mail` (Admin-only, ENV-Gated) für künftige Mail-Health-Checks. **Nicht im IT10-Scope** ohne PM-Bestätigung.
+
+**Akzeptanztest:** Reset-Mail kommt innerhalb 2 Minuten an verifizierter E-Mail an, Link gültig 1h, single-use.
+
+### US-IT10-02 — Admin-Nutzerliste
+
+**Endpoint (unverändert):** `GET /api/admin/users?q=&page=&pageSize=&sort=` (api-routes.md §22.4).
+
+**Aktionen:**
+
+1. Prüfen, ob Migration `20260503163821_add_customer_address` in Prod-DB angewendet ist (`SELECT * FROM _prisma_migrations` oder Turso-Console).
+2. Falls fehlend: `prisma migrate deploy` gegen Prod ziehen.
+3. Vercel-Logs auf `P2022` (column does not exist) prüfen.
+4. Falls Migration vorhanden und Bug bleibt: zielgenauer Patch (z. B. `selectCustomerUserAdmin()`-Audit, `_count.bookings`-Sort-Fallback).
+
+**Akzeptanztest:** Admin sieht Liste oder Empty-State `Keine Kunden registriert.` ohne Fehlerbanner.
+
+### US-IT10-03 — Booking-POST
+
+**Endpoint (im Request unverändert, in der Error-Response erweitert):** `POST /api/bookings` (api-routes.md §2 + §15 + §21.3 + §24.3.1).
+
+**Aktionen:**
+
+1. Prüfen, ob alle IT5+IT9-Migrationen in Prod-DB angewendet sind.
+2. Falls fehlend: `prisma migrate deploy` gegen Prod.
+3. Vercel-Logs auf `P2022` oder `P2028` (Tx-Timeout) prüfen.
+4. Falls Tx-Timeout: `timeout: 5000 → 10000`, `maxWait: 2000 → 4000` in `src/lib/booking-create.ts`. Architektur-Eingriff klein und lokal.
+5. Falls anderer Fehler: zielgenauer Patch.
+6. **Neu (STRUCT-3-Fix, verbindlich):** Slot-Konflikt-Antwort um `subcode: 'BOOKING_SLOT_TAKEN'` erweitern. Siehe nächster Abschnitt.
+
+**Akzeptanztest:** Anonymer Kunde kann Buchung absenden, Eintrag erscheint in `/admin/bookings` mit Status `Offen`, Tom erhält Benachrichtigungs-Mail an `MAIL_TO_ADMIN`.
+
+#### STRUCT-3-Fix — Subcode `BOOKING_SLOT_TAKEN` für Slot-Konflikte
+
+**Pflicht-Implementation in IT10:**
+
+- `POST /api/bookings`-Slot-Konflikt-Antwort liefert ab IT10 zusätzlich zum `code: 'CONFLICT'` einen `subcode: 'BOOKING_SLOT_TAKEN'`, wenn der Konflikt aus dem Partial-Unique-Index oder dem Serializable-Tx-Overlap-Check stammt.
+- Vollständiger Vertrag siehe `contracts/api-routes.md` §24.3.1.
+- **Code-Eingriffe:**
+  1. `src/lib/booking-create.ts` — bei `OverlapError` und beim `P2002`-Catch (Unique-Constraint) `subcode: 'BOOKING_SLOT_TAKEN'` an den ApiError-Helper weitergeben.
+  2. `src/app/api/bookings/route.ts` — `conflict()`-Helper aus `src/lib/api.ts` um optionalen `subcode`-Parameter erweitern.
+  3. `contracts/zod-schemas.ts` — `ApiErrorSchema` um `subcode: z.string().optional()` ergänzen (additiv, rückwärts-kompatibel).
+- **Geltungsbereich:** Nur `POST /api/bookings`. Andere Buchungs-Endpoints (z. B. künftige `POST /api/customer/bookings`) müssen die Regel sinngemäß übernehmen.
+- **Test:** Engineer schreibt einen API-Test, der zwei parallele POSTs auf den gleichen Slot triggert und beim zweiten Request prüft: `status === 409`, `body.error.subcode === 'BOOKING_SLOT_TAKEN'`, `body.error.field === 'date'`.
+
+## Feature-Backend-Notizen
+
+### US-IT10-04 — Quick-Booking-Modal (Backend-Reuse)
+
+- **Wiederverwendete Endpoints (alle unverändert):**
+  - `GET /api/availability/calendar`
+  - `GET /api/slots/available?date=YYYY-MM-DD[&duration=NNN]`
+  - `POST /api/bookings`
+  - `POST /api/upload`
+
+- **Verbindlich:** Backend-Verträge bleiben Single-Source-Of-Truth. FE schickt im Modal-Pfad weiterhin `date`, `startTime`, `endTime`, `durationMinutes`, plus Customer-Felder, plus `addressStreet/addressZip/addressCity` und `privacyAccepted`.
+
+- **Keine** neuen Felder im Request-Body. **Keine** neue Auth-Logik.
+
+### US-IT10-05 — Customer-Self-Service (Backend-Reuse)
+
+- **Wiederverwendete Endpoints (alle unverändert):**
+  - `GET /api/customer/bookings` (api-routes.md §12)
+  - `GET /api/customer/bookings/:id` (api-routes.md §12)
+  - `GET /api/customer/me` (api-routes.md §11)
+  - `POST /api/bookings`
+
+- **Reuse-Audit (Engineer):**
+  - **Status-Liste:** `BookingStatus` muss alle in der Story geforderten Werte liefern (`PENDING`, `CONFIRMED`, `REJECTED`, `CANCELLED`, `COUNTER_PROPOSED`, `COMPLETED`). Verifikation in `prisma/schema.prisma` und `customer-bookings`-DTO. **Im Bestand bereits vollständig** — keine Aktion erwartet.
+  - **Detail-Endpoint:** Engineer prüft, ob `GET /api/customer/bookings/:id` alle in AC3 (Teil A) geforderten Felder liefert: Datum, Uhrzeit, Service, Beschreibung, Adresse, Status, Anhänge. Bei Lücken: zielgenaue Erweiterung.
+  - **Profil-Endpoint:** `GET /api/customer/me` liefert seit IT9 bereits `streetAndNumber/postalCode/city/firstName/lastName/email/phone`. Verifikation reicht.
+
+- **Keine** neuen Endpoints. **Keine** neuen Validation-Schemas.
+
+## Schema / Migrations
+
+**Keine** neue Migration in `prisma/migrations/` für IT10.
+
+**Aber:** Engineer **muss** Prod-Migrations-Stand prüfen und ggf. nachziehen (siehe Bug-Aktionen oben).
+
+## Sicherheit / Authorization
+
+Unverändert.
+
+- `POST /api/customer/forgot-password`, `POST /api/customer/reset-password`: keine Auth (Token = Authority, IP+Email-Rate-Limits).
+- `GET /api/admin/users`: `requireAdmin()` (ACTIVE-Status-Check).
+- `POST /api/bookings`: keine Auth (Gast-Buchung erlaubt); eingeloggter Customer wird automatisch verknüpft (`customerId` aus Session).
+- `GET /api/customer/bookings(/:id)`: `customer-session`-Cookie Pflicht.
+- `GET /api/customer/me`: `customer-session`-Cookie Pflicht.
+
+## Logging / Observability (verbindlich für IT10 — STRUCT-1-Fix)
+
+QA-Befund STRUCT-1: Aktuell mappt `internalError(err)` in `src/lib/api.ts` jeden unbekannten Fehler auf eine generische 500-Antwort, ohne den Stack-Trace oder Prisma-Error-Code zu loggen. Das macht künftige Migrations-Drift-Bugs (Symptomatik US-IT10-02/-03) unsichtbar.
+
+**Verbindliche Backend-Regel ab IT10:**
+
+1. **Jeder API-Route-Handler MUSS unbekannte Errors loggen.** Konkret: `try/catch` im Handler, Fehler an `internalError(err)` aus `src/lib/api.ts` weiterreichen — der Helper erledigt das Logging zentral.
+2. **`internalError()` (in `src/lib/api.ts`) wird so erweitert, dass jeder unbekannte Error mit folgenden Feldern als `console.error` geschrieben wird:**
+   - Marker `[internal_error]` (zur Vercel-Filterung).
+   - Endpoint/Route-Identifier (Request-URL oder Handler-Name aus dem Stack).
+   - Fehler-Klasse (`err?.name`).
+   - Fehler-Message (`err?.message`).
+   - Stack-Trace (`err?.stack`).
+3. **Prisma-Errors MÜSSEN spezifisch erkannt und mit zusätzlichem Marker geloggt werden** (kein generischer 500-ohne-Log mehr):
+   - `PrismaClientKnownRequestError` (z. B. `P2022` Column missing, `P2002` Unique-Constraint, `P2025` Record not found, `P2028` Tx-Timeout) → Log-Marker `[prisma_error]` mit `code` und `meta`.
+   - `PrismaClientInitializationError` → Log-Marker `[prisma_init_error]`.
+   - HTTP-Antwort bleibt eine generische 500 mit `code: 'INTERNAL_ERROR'` — **kein** Stack-Trace oder Prisma-Code im Response-Body (Sicherheit).
+4. **Frontend-Verhalten unverändert** — User sieht weiterhin nur eine generische Fehler-Microcopy. Diagnose ausschließlich serverseitig im Vercel-Function-Log.
+5. **`forgot-password`-Mail-Fehler:** Bestehender `console.warn`-Log bleibt. Optional zusätzlich strukturiertes Tagging mit `request_id` aus `x-vercel-id` (nicht zwingend für IT10, aber wenn sowieso im Helper berührt: gerne mitnehmen).
+
+**Aufwand-Erwartung:** ~2 h Engineer (Erweiterung in `internalError()`, Prisma-Klassen-Erkennung, Stichprobe in 2–3 Routes prüfen).
+
+**Akzeptanztest:** Engineer triggert künstlich einen `P2022` (lokal Spalte droppen oder Mock-Throw). Vercel-Function-Logs zeigen einen strukturierten Eintrag mit `[prisma_error] P2022 …`. Frontend zeigt weiterhin nur „Interner Serverfehler".
+
+## File Inventory (Backend)
+
+**Verbindlich (STRUCT-3 + STRUCT-1):**
+
+```
+src/lib/api.ts                             (UPDATE — internalError() Logging-Härtung [STRUCT-1])
+src/lib/api.ts                             (UPDATE — conflict()-Helper akzeptiert optionalen subcode-Parameter [STRUCT-3])
+src/lib/booking-create.ts                  (UPDATE — Overlap/P2002 → subcode 'BOOKING_SLOT_TAKEN' weitergeben [STRUCT-3])
+src/app/api/bookings/route.ts              (UPDATE — Konflikt-Antworten geben subcode mit [STRUCT-3])
+contracts/zod-schemas.ts                   (UPDATE — ApiErrorSchema um optionales subcode-Feld erweitern [STRUCT-3])
+```
+
+**Bedingt (nur falls Stack-Traces das verlangen):**
+
+```
+src/lib/booking-create.ts                  (UPDATE — Tx-Timeout-Erhöhung, falls P2028)
+src/app/api/admin/users/route.ts           (UPDATE — falls Mapping-Fehler)
+src/app/api/bookings/route.ts              (UPDATE — falls neuer Edge-Case sichtbar)
+.env.example                               (UPDATE — Inline-Kommentar zu MAIL_FROM, falls hilfreich)
+```
+
+**Wenn die Migrations-Drift-Hypothese stimmt:** außer den verbindlichen STRUCT-3/STRUCT-1-Eingriffen **keine** weiteren Code-Änderungen, nur `prisma migrate deploy` in Prod.
+
+## Test-Plan
+
+- Smoke (Pflicht):
+  - S1: Forgot-Password End-to-End mit verifizierter Test-E-Mail (Mail kommt an, Reset funktioniert).
+  - S2: `GET /api/admin/users` mit `q=` und ohne, mit `sort=lastName_asc` und `sort=bookingCount_desc`.
+  - S3: `POST /api/bookings` als Gast mit vollständigem Body.
+  - S4: `POST /api/bookings` als eingeloggter Kunde mit gefülltem Profil (Adresse aus Profil übernommen).
+  - S5: `POST /api/bookings` als eingeloggter Kunde **ohne** Profil-Adresse + ohne Adress-Body → 400 `address_required`.
+- Reuse:
+  - R1: `GET /api/customer/bookings` liefert alle Status-Werte korrekt für einen Test-Kunden mit gemischten Buchungen.
+  - R2: `GET /api/customer/me` liefert Profil-Felder vollständig (Pre-Fill-Quelle).
+- Pressure:
+  - P1: `POST /api/bookings` 11× in 1h von gleicher IP → letzter Request `RATE_LIMITED`.
+  - P2: Forgot-Password 4× von gleicher IP in 15 min → letzter Request `RATE_LIMITED`.
+  - P3 (STRUCT-3): Zwei parallele `POST /api/bookings` auf denselben Slot innerhalb < 100 ms → erster Request `201`, zweiter Request `409` mit `error.subcode === 'BOOKING_SLOT_TAKEN'`, `error.field === 'date'`.
+- Logging (STRUCT-1):
+  - L1: Künstlich `P2022` triggern (z. B. lokal Spalte droppen oder `prisma.$queryRaw` mit unbekannter Spalte) → Vercel/Local-Log enthält `[prisma_error]`-Marker mit Code `P2022` und Stack-Trace; HTTP-Antwort bleibt generische 500.
+  - L2: Beliebiger `throw new Error('xy')` im Handler → Log enthält `[internal_error]`-Marker mit Stack; HTTP-Antwort generische 500.
+
+

@@ -15,10 +15,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { ErrorState } from '@/components/ui/ErrorState';
 import { Input } from '@/components/ui/Input';
+import { PaginationControls } from '@/components/ui/PaginationControls';
 import { SkeletonCard } from '@/components/ui/Skeleton';
+import { UsersIcon } from '@/components/ui/icons';
 import { ApiClientError } from '@/lib/api-client';
 import { fetchAdminUsers } from '@/lib/api-client-it6';
 import { formatDateShort } from '@/lib/format';
@@ -34,7 +37,9 @@ const SORT_OPTIONS: ReadonlyArray<{ value: Sort; label: string }> = [
   { value: 'adminRating_desc', label: 'Rating ↓' },
 ];
 
-const PAGE_SIZE = 25;
+// IT10 / Spec §3.4 — Pagination-Page-Size auf 20 (Mobile = "Mehr laden",
+// Desktop = "Vor/Zurück").
+const PAGE_SIZE = 20;
 
 type LoadStatus = 'loading' | 'ready' | 'error';
 
@@ -129,12 +134,6 @@ export function UserTable() {
 
   return (
     <div className="space-y-4">
-      {errorMessage && (
-        <Banner tone="error" role="alert" title="Fehler">
-          {errorMessage}
-        </Banner>
-      )}
-
       <div className="flex flex-wrap gap-3">
         <div className="flex-1 min-w-[240px]">
           <Input
@@ -174,14 +173,32 @@ export function UserTable() {
         </div>
       </div>
 
-      {status === 'loading' ? (
+      {status === 'error' ? (
+        <ErrorState
+          title="Wir konnten die Nutzerliste nicht laden."
+          body={
+            errorMessage ??
+            'Das passiert manchmal bei einer langsamen Verbindung. Bitte versuchen Sie es erneut.'
+          }
+          onRetry={() => void load()}
+          secondaryHint="Bei wiederholtem Fehler bitte Entwicklung kontaktieren."
+        />
+      ) : status === 'loading' ? (
         <SkeletonCard />
       ) : visibleUsers.length === 0 ? (
-        <div className="rounded-lg border border-baerenstark-sand bg-white p-8 text-center text-sm text-baerenstark-bark/70">
-          {debouncedQuery
-            ? `Keine Treffer für „${debouncedQuery}".`
-            : 'Noch keine Kunden registriert.'}
-        </div>
+        debouncedQuery ? (
+          <EmptyState
+            icon={<UsersIcon size={28} />}
+            title={`Keine Treffer für „${debouncedQuery}".`}
+            body="Bitte prüfen Sie Ihre Schreibweise oder löschen Sie die Suche, um alle Kunden zu sehen."
+          />
+        ) : (
+          <EmptyState
+            icon={<UsersIcon size={28} />}
+            title="Noch keine Kunden registriert."
+            body="Sobald sich Kunden auf der Seite registrieren, erscheinen sie hier."
+          />
+        )
       ) : (
         <div className="overflow-x-auto rounded-lg border border-baerenstark-sand bg-white">
           <table className="w-full text-sm">
@@ -235,28 +252,24 @@ export function UserTable() {
         </div>
       )}
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between gap-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={page <= 1}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-          >
-            ← Zurück
-          </Button>
-          <span className="text-sm text-baerenstark-bark/70">
-            Seite {page} von {totalPages} · {total} Einträge
-          </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={page >= totalPages}
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-          >
-            Weiter →
-          </Button>
-        </div>
+      {status !== 'error' && total > 0 && (
+        <PaginationControls
+          currentPage={page}
+          totalPages={totalPages}
+          pageSize={PAGE_SIZE}
+          totalItems={total}
+          itemLabelSingular="Kunde"
+          itemLabelPlural="Kunden"
+          isLoading={status === 'loading'}
+          onPageChange={(p) => setPage(p)}
+          // Mobile: "Mehr laden" — bei Tabellen-Layout im Admin-Portal greifen
+          // wir aufs Page-Jump-Verhalten zurück (Tabelle wechselt komplett),
+          // weil die Admin-Spec auf Desktop ohnehin Pflicht ist. Mobile-Nutzer
+          // nutzen den "Mehr laden"-Pfad, der `setPage(page+1)` triggert
+          // (statt cumulativ — vereinfachender Trade-off, kein Datenverlust).
+          onLoadMore={() => setPage((p) => Math.min(totalPages, p + 1))}
+          hasMore={page < totalPages}
+        />
       )}
 
       <UserDetailDrawer

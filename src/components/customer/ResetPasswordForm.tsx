@@ -35,12 +35,13 @@ function mapApiErrorMessage(err: ApiClientError): {
     case 'GONE':
       return {
         message:
-          'Dieser Link ist nicht mehr gültig oder wurde bereits verwendet. Bitte fordere einen neuen Reset-Link an.',
+          'Dieser Link ist abgelaufen oder ungültig. Bitte fordern Sie einen neuen an.',
         showResetLink: true,
       };
     case 'RATE_LIMITED':
       return {
-        message: 'Zu viele Anfragen. Bitte später erneut versuchen.',
+        message:
+          'Zu viele Versuche. Bitte versuchen Sie es in einer Stunde erneut.',
         showResetLink: false,
       };
     case 'VALIDATION_ERROR':
@@ -51,12 +52,15 @@ function mapApiErrorMessage(err: ApiClientError): {
     case 'NETWORK_ERROR':
       return {
         message:
-          'Verbindung zum Server fehlgeschlagen. Bitte Internetverbindung prüfen.',
+          'Wir konnten den Server nicht erreichen. Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.',
         showResetLink: false,
       };
     default:
+      // IT10 §1.2 — kein „Interner Serverfehler" mehr; freundliche Microcopy
+      // mit Telefonnummer.
       return {
-        message: 'Passwort-Reset fehlgeschlagen. Bitte später erneut versuchen.',
+        message:
+          'Da ist etwas schiefgegangen. Bitte versuchen Sie es erneut oder rufen Sie uns an: 0157-74787512.',
         showResetLink: false,
       };
   }
@@ -90,14 +94,15 @@ export function ResetPasswordForm() {
   if (!token) {
     return (
       <div className="space-y-4">
-        <Banner tone="error" title="Link unvollständig" role="alert">
-          Der Reset-Link ist unvollständig. Bitte fordere einen neuen Link an.
+        <Banner tone="error" title="Dieser Link ist nicht mehr gültig" role="alert">
+          Reset-Links sind nur 1 Stunde gültig und können nur einmal verwendet
+          werden. Bitte fordern Sie einen neuen Link an.
         </Banner>
         <Link
           href="/konto/passwort-vergessen"
           className="inline-flex w-full items-center justify-center rounded-lg bg-baerenstark-wood px-5 py-2.5 text-base font-medium text-baerenstark-cream transition-colors hover:bg-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent"
         >
-          Neuen Reset-Link anfordern
+          Neuen Link anfordern
         </Link>
       </div>
     );
@@ -129,8 +134,8 @@ export function ResetPasswordForm() {
   return (
     <form onSubmit={onSubmit} noValidate className="space-y-4">
       <p className="text-sm text-baerenstark-bark/80">
-        Wähle ein neues Passwort für dein Konto. Es muss mindestens{' '}
-        {CUSTOMER_PASSWORD_MIN_LENGTH} Zeichen haben.
+        Das Passwort muss mindestens {CUSTOMER_PASSWORD_MIN_LENGTH} Zeichen lang
+        sein.
       </p>
 
       <input type="hidden" {...register('token')} value={token} readOnly />
@@ -173,7 +178,7 @@ export function ResetPasswordForm() {
       )}
 
       <Button type="submit" isLoading={submitting} className="w-full">
-        Passwort ändern
+        {submitting ? 'Wird gespeichert…' : 'Passwort ändern'}
       </Button>
 
       <p className="text-center text-sm">

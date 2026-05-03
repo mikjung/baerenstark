@@ -217,6 +217,21 @@ Iteration 3 nutzt zwei Formate parallel:
 }
 ```
 
+**Optionales Feld `subcode` (seit IT10):** Für Konflikt-Antworten kann zusätzlich zum Top-Level-`code` ein semantischer Subcode mitgeliefert werden, z. B.:
+
+```json
+{
+  "error": {
+    "code": "CONFLICT",
+    "subcode": "BOOKING_SLOT_TAKEN",
+    "message": "Dieser Termin wurde inzwischen leider von jemand anderem gebucht. Bitte wählen Sie einen anderen Slot.",
+    "field": "date"
+  }
+}
+```
+
+Frontend-Mapping liest, wenn vorhanden, primär `subcode` (siehe `frontend-requirements.md` §1.5).
+
 | Code                     | HTTP | Bedeutung                                                                  |
 | ------------------------ | ---- | -------------------------------------------------------------------------- |
 | `VALIDATION_ERROR`       | 400  | Eingaben sind ungültig (Zod-Fehler).                                       |
@@ -231,6 +246,12 @@ Iteration 3 nutzt zwei Formate parallel:
 | `RATE_LIMITED`           | 429  | Rate-Limit überschritten. `Retry-After`-Header gesetzt.                    |
 | `MAIL_FAILED`            | 502  | Resend-Versand fehlgeschlagen.                                             |
 | `INTERNAL_ERROR`         | 500  | Unerwarteter Server-Fehler.                                                |
+
+**Subcodes (seit IT10):**
+
+| Subcode                  | Top-Level-Code | HTTP | Bedeutung / Wo                                                              |
+| ------------------------ | -------------- | ---- | --------------------------------------------------------------------------- |
+| `BOOKING_SLOT_TAKEN`     | `CONFLICT`     | 409  | `POST /api/bookings`: Zeitfenster ist zwischen Slot-Anzeige und Submit von einem anderen Kunden belegt worden (Race-Condition). FE-Mapping → UX-Microcopy „Slot belegt".  |
 
 ---
 
@@ -356,9 +377,11 @@ Eingangsbestätigung an den Kunden — beide fire-and-forget nach 201-Response.
 **Fehler:**
 - 400 `VALIDATION_ERROR` (inkl. Modus-Konflikt, "Sonstiges"-Description-Länge).
 - 404 `NOT_FOUND` — `slotId` oder `attachmentIds` nicht gefunden.
-- 409 `CONFLICT` — Slot/Timeslot bereits aktiv gebucht **oder** Tag ist
-  nicht verfügbar (DayOverride/Template inaktiv).
+- 409 `CONFLICT` mit `subcode: 'BOOKING_SLOT_TAKEN'` (seit IT10) — Slot/Timeslot bereits aktiv gebucht (Race-Condition zwischen Slot-Anzeige und Submit). `field: 'date'`.
+- 409 `CONFLICT` (ohne `subcode`) — Tag ist nicht verfügbar (DayOverride/Template inaktiv); `field: 'date'`.
 - 429 `RATE_LIMITED`.
+
+**IT10-Hinweis (verbindlich):** Wenn der Konflikt durch den Partial-Unique-Index `uniq_active_booking_per_timeslot` oder den Serializable-Tx-Overlap-Check ausgelöst wird, MUSS die 409-Antwort `subcode: 'BOOKING_SLOT_TAKEN'` enthalten. Andere 409-Konflikte (Tag inaktiv) liefern keinen `subcode`. Frontend mapped primär auf `subcode`; defensiver Fallback bei fehlendem `subcode`: `code === 'CONFLICT' && field === 'date'` wird wie `BOOKING_SLOT_TAKEN` behandelt.
 
 ---
 
@@ -3622,4 +3645,140 @@ Die in IT6 §22 Zeile 14 verzeichnete Aussage „Folgende Endpunkte werden
 **gelöscht** (404 nach IT6): …" wird mit IT7 **aufgehoben**. Alle
 sechs Customer-Auth-Endpoints sind ab IT7 wieder vollständige
 Implementierungen mit den oben spezifizierten Verträgen.
+
+---
+
+## 24. Iteration 10 — Bug-Triage & Customer-Self-Service (US-IT10-01 bis US-IT10-05)
+
+**Stand:** 2026-05-03
+**Vollständige Architektur:** `ARCHITECTURE_IT10.md`
+
+**Zusammenfassung:** Iteration 10 enthält **keine neuen Endpoints** und **keine Schema-Änderungen**. Drei Bug-Fixes adressieren bestehende Endpoints (Konfig + Migrations-Drift), zwei Features sind reine Frontend-Erweiterungen, die bestehende Endpoints wiederverwenden.
+
+### 24.1 US-IT10-01 — Passwort-Reset-Mail (Bug-Fix)
+
+**Endpoint:** `POST /api/customer/forgot-password` (siehe §23.3) und `POST /api/customer/reset-password` (siehe §23.3) — **kein Vertrag-Change**.
+
+**Ursachen-Hypothesen (Architekt):**
+
+1. ENV-Variable `MAIL_FROM` in Prod nicht gesetzt → `fromAddress()` fällt auf `onboarding@resend.dev` zurück, das nur an verifizierte Test-Empfänger zustellt. **Höchstwahrscheinlich.**
+2. Resend-Absender-Domain nicht verifiziert → Mail-Send schlägt silent fehl, Endpoint antwortet trotzdem `200` (Email-Enumeration-Schutz).
+3. `NEXTAUTH_URL` falsch → Reset-Link unbenutzbar.
+
+**Aktion:** ENV-Variablen in Vercel prüfen/setzen, Resend-Domain verifizieren. Kein Code-Eingriff erwartet.
+
+**ENV-Pflicht in Prod (Reminder):**
+
+| Variable                | Pflicht | Beschreibung                                                          |
+| ----------------------- | ------- | --------------------------------------------------------------------- |
+| `MAIL_FROM`             | ja      | Bärenstark-Absender, Resend-Domain muss verifiziert sein.             |
+| `RESEND_API_KEY`        | ja      | Echter Key, kein Placeholder `re_xxxxxxxxxxxx`.                       |
+| `MAIL_TO_ADMIN`         | ja      | Empfänger der Booking-Admin-Mails (Default `hausservice-baerenstark@outlook.com`). |
+| `NEXTAUTH_URL`          | ja      | Base-URL für Reset-/Verify-Links (z. B. `https://www.baerenstark-hausservice.app`). |
+| `NEXT_PUBLIC_BASE_URL`  | ja      | Wird als Fallback für `publicBaseUrl()` in Mail-Templates genutzt.    |
+
+### 24.2 US-IT10-02 — Admin-Nutzerliste lädt nicht (Bug-Fix)
+
+**Endpoint:** `GET /api/admin/users?q=&page=&pageSize=&sort=` (siehe §22.4) — **kein Vertrag-Change**. Response-Shape bleibt `{ data: { items: CustomerUserAdmin[]; total; page; pageSize } }` (IT9-Format).
+
+**Ursachen-Hypothese (Architekt):** IT9-Migration `20260503163821_add_customer_address` möglicherweise nicht in Prod-DB deployed → `selectCustomerUserAdmin()` selektiert `streetAndNumber/postalCode/city`, was Prisma `P2022` (column does not exist) wirft → 500.
+
+**Aktion:** `prisma migrate deploy` gegen Prod-DB ausführen. Kein Code-Eingriff erwartet.
+
+### 24.3 US-IT10-03 — Buchungsanfrage absenden schlägt fehl (Bug-Fix)
+
+**Endpoint:** `POST /api/bookings` (siehe §2 + §15 + §21.3) — **kein Vertrag-Change** im Body, **aber** kleine Erweiterung der Error-Response (siehe 24.3.1).
+
+**Ursachen-Hypothese (Architekt):** Identisch zu US-IT10-02 — Migrations-Drift. IT9 hat `customer_users.streetAndNumber/postalCode/city` ergänzt; der Adress-Pflicht-Pfad in `POST /api/bookings` (Z. 229–256) liest diese Spalten aus dem Profil — fehlende Migration → 500.
+
+**Aktion:** `prisma migrate deploy` gegen Prod-DB ausführen. Falls weiterhin Fehler: Vercel-Function-Logs auf Prisma-Error-Code prüfen.
+
+#### 24.3.1 Slot-Konflikt-Subcode `BOOKING_SLOT_TAKEN` (seit IT10, verbindlich)
+
+**Hintergrund:** Die UX-Spec für IT10 (§1.5, §5.2 Pkt. 6) referenziert den Code `BOOKING_SLOT_TAKEN` für die „Slot inzwischen belegt"-Microcopy im Quick-Booking-Modal und im klassischen Buchungsformular. Vor IT10 lieferte der Endpoint nur `code: 'CONFLICT'` (oder `OVERLAP`), wodurch das FE-Mapping nicht griff.
+
+**Verbindliche Festlegung:**
+
+- HTTP-Status für Slot-Konflikte bleibt **`409`**.
+- Top-Level-`error.code` bleibt **`CONFLICT`** (rückwärts-kompatibel).
+- **Neu:** `error.subcode = 'BOOKING_SLOT_TAKEN'` MUSS gesetzt werden, wenn der Konflikt durch:
+  - den Partial-Unique-Index `uniq_active_booking_per_timeslot` ausgelöst wurde, oder
+  - den Serializable-Tx-Overlap-Check in `src/lib/booking-create.ts` ausgelöst wurde.
+- `error.field = 'date'` bleibt unverändert.
+- Vollständige Beispiel-Antwort:
+
+  ```json
+  {
+    "error": {
+      "code": "CONFLICT",
+      "subcode": "BOOKING_SLOT_TAKEN",
+      "message": "Dieser Termin wurde inzwischen leider von jemand anderem gebucht. Bitte wählen Sie einen anderen Slot.",
+      "field": "date"
+    }
+  }
+  ```
+
+- **Andere 409-Konflikte** auf `POST /api/bookings` (Tag ist nicht verfügbar, weil DayOverride/Template inaktiv) liefern weiterhin `code: 'CONFLICT'` **ohne** `subcode`.
+- Frontend-Mapping (verbindlich): primär auf `error.subcode === 'BOOKING_SLOT_TAKEN'` prüfen; Fallback bei fehlendem `subcode`: `code === 'CONFLICT' && field === 'date'` wird wie `BOOKING_SLOT_TAKEN` behandelt.
+
+**Geltungsbereich:** Aktuell nur `POST /api/bookings`. Sollte in einer künftigen Iteration ein zweiter Buchungs-Endpoint (z. B. `POST /api/customer/bookings`) eingeführt werden, gilt diese Regel sinngemäß.
+
+**Code-Touchpoints (Hinweis für Engineer):**
+
+- `src/lib/booking-create.ts` — bei Overlap-Verstoß und beim P2002-Catch des Unique-Constraint-Verstoßes `subcode: 'BOOKING_SLOT_TAKEN'` mitgeben.
+- `src/app/api/bookings/route.ts` — `conflict()`-Helper-Aufruf um Subcode erweitern.
+- `contracts/zod-schemas.ts` `ApiErrorSchema` — optionales `subcode: z.string().optional()` ergänzen.
+
+### 24.4 US-IT10-04 — Quick-Booking-Modal (Feature, FE-only)
+
+**Wiederverwendete Endpoints (alle unverändert):**
+
+- `GET /api/availability/calendar` (§22.2)
+- `GET /api/slots/available` (§3 + §21.4)
+- `POST /api/bookings` (§2 — siehe 24.3.1 für `BOOKING_SLOT_TAKEN`)
+- `POST /api/upload` (§4)
+
+**Vertrag-Änderungen:** keine im Request-Body. Frontend reicht den vorausgewählten Slot als Component-Prop ans Modal.
+
+**Service-Auswahl-Hinweis (STRUCT-4-Fix):** Der Modal-Submit-Body MUSS wie bisher `service` (= `serviceId`, ein Slug aus `SERVICES`) enthalten. Da das Modal seit IT10 ohne Service-Vorauswahl auf der Page geöffnet werden kann, bietet das Modal-Form selbst die Service-Auswahl als Pflichtfeld an (UX-Detail siehe `ux-spec-iteration-10.md` §5). Backend-Validation unverändert: leerer Service → `400 VALIDATION_ERROR` mit `field: 'service'`.
+
+### 24.5 US-IT10-05 — Customer-Self-Service (Feature, FE-orientiert)
+
+**Wiederverwendete Endpoints (alle unverändert):**
+
+| Endpoint                                  | Verwendung                                                                  |
+| ----------------------------------------- | --------------------------------------------------------------------------- |
+| `GET /api/customer/bookings`              | Anfragen-Übersicht auf `/konto`. Response liefert `{ upcoming, past }`.     |
+| `GET /api/customer/bookings/:id`          | Detailseite einer Anfrage (Datum, Uhrzeit, Service, Beschreibung, Adresse, Status, Anhänge). |
+| `GET /api/customer/me`                    | Profil-Daten für Pre-Fill (Name, Email, Telefon, Adresse).                   |
+| `POST /api/bookings`                      | Buchungs-Anlage — unverändert; Profildaten kommen via FE-Pre-Fill in den Body. |
+
+**Vertrag-Änderungen:** keine.
+
+**FE-Mapping Profil → Booking-Form (verbindlich):**
+
+| Profil-Feld (CustomerUser)   | Booking-Form-Feld (CreateBookingSchema)  |
+| ---------------------------- | ---------------------------------------- |
+| `firstName + ' ' + lastName` | `customerName`                           |
+| `email`                      | `customerEmail`                          |
+| `phone`                      | `customerPhone`                          |
+| `streetAndNumber`            | `addressStreet`                          |
+| `postalCode`                 | `addressZip`                             |
+| `city`                       | `addressCity`                            |
+
+Das Profil bleibt nach dem Submit unangetastet (Booking-Adresse ist Auftrags-Snapshot, Profil-Adresse customer-owned).
+
+### 24.6 Story-zu-Endpoint-Matrix (Iteration 10)
+
+| Story        | Endpoints                                                                                       | Pages / UI                                                          |
+| ------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| US-IT10-01   | `POST /api/customer/forgot-password`, `POST /api/customer/reset-password` (Konfig-Fix)         | `/konto/passwort-vergessen`, `/konto/passwort-zuruecksetzen`        |
+| US-IT10-02   | `GET /api/admin/users` (Migrations-Fix)                                                         | `/admin/users`                                                      |
+| US-IT10-03   | `POST /api/bookings` (Migrations-Fix)                                                           | `/buchung`                                                          |
+| US-IT10-04   | (Reuse: `GET /api/availability/calendar`, `GET /api/slots/available`, `POST /api/bookings`)    | `/buchung` (mit Modal-Wrapper)                                      |
+| US-IT10-05   | (Reuse: `GET /api/customer/bookings(/:id)`, `GET /api/customer/me`, `POST /api/bookings`)      | `/konto`, `/konto/anfragen/:id`, `/buchung` (mit Pre-Fill)          |
+
+### 24.7 Rate-Limits
+
+Keine Änderungen gegenüber IT7. Rate-Limits aus §23.5 + §20 + §21.9 bleiben in Kraft.
 

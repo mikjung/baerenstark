@@ -149,6 +149,6 @@ export async function GET(req: NextRequest): Promise<Response> {
       past: past.map(toCustomerBooking),
     });
   } catch (err) {
-    return internalError(err);
+    return internalError(err, 'GET /api/customer/bookings');
   }
 }

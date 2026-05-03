@@ -14,6 +14,7 @@
     "postinstall": "prisma generate",
     "test": "tsx --env-file=.env.local tests/smoke.ts 2>/dev/null || tsx tests/smoke.ts",
     "test:diagnose": "tsx tests/diagnose-verdict.test.ts",
+    "test:it10": "tsx --env-file=.env.local tests/it10-backend.test.ts 2>/dev/null || tsx tests/it10-backend.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

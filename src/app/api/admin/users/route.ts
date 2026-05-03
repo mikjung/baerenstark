@@ -133,6 +133,6 @@ export async function GET(req: NextRequest): Promise<Response> {
     });
   } catch (err) {
     if (err instanceof ZodError) return zodErrorResponse(err);
-    return internalError(err);
+    return internalError(err, 'GET /api/admin/users');
   }
 }

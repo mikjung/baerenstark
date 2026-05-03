@@ -1068,6 +1068,11 @@ Eine professionelle, mobiloptimierte Website für Bärenstark Hausservice, die B
 | US-IT7-02  | Google OAuth reparieren                       | Must Have    | Iteration 7                          |
 | US-IT7-03  | Facebook OAuth reparieren                     | Must Have    | Iteration 7                          |
 | US-IT7-05  | Passwort-Reset-Flow E2E (Kunden)              | Must Have    | Iteration 7                          |
+| US-IT10-01 | Passwort-Reset E-Mail funktioniert nicht      | Must Have    | Iteration 10                         |
+| US-IT10-02 | Admin-Nutzerliste lädt nicht                  | Must Have    | Iteration 10                         |
+| US-IT10-03 | Buchungsanfrage kann nicht abgesendet werden  | Must Have    | Iteration 10                         |
+| US-IT10-04 | Kalender-Quick-Booking Modal                  | Should Have  | Iteration 10                         |
+| US-IT10-05 | Kunden-Dashboard Self-Service                 | Should Have  | Iteration 10                         |
 | US-09      | Instagram-Feed einbinden                      | Should Have  | Backlog                              |
 | US-10      | Kundenbewertungen anzeigen                    | Should Have  | Ersetzt durch US-22                  |
 | US-11      | Bestätigungs-E-Mail an Kunden                 | Should Have  | Ersetzt durch US-24                  |
@@ -2332,3 +2337,710 @@ Usability-Heuristiken, aus der ein neues Backlog für gezielte UX-Verbesserungen
 entsteht. Keine Story für IT9 — wird nach IT9-Abschluss separat initiiert.
 
 **Priorität:** Must Have | **Story Points:** 3
+
+---
+
+## UX-Backlog — aus dem UX-Review vom 2026-05-03
+
+Am 2026-05-03 hat ein UX/UI-Senior ein vollständiges Heuristik-Review der Bärenstark-App durchgeführt (Methode: Quellcode-Sichtung + Nielsen-Heuristiken + projektspezifische Achsen Conversion, Admin-Effizienz, Accessibility). Das Review-Dokument liegt unter `UX_REVIEW.md` im Projekt-Root. Die folgenden Stories sind direkt aus den Findings abgeleitet und stellen den UX-Backlog für Iteration 10 und darüber hinaus dar — Tom entscheidet pro Sprint, welche Stories er zieht.
+
+---
+
+### Bucket A — Trust + Conversion
+
+*Niedrigstes Risiko: rein additive UI-Änderungen, keine API-Vertrags-Änderungen. Empfohlen als IT10.*
+
+---
+
+#### US-UX-A-01: Vertrauensleiste oberhalb des Buchungs-Kalenders
+
+**Als** potenzieller Kunde auf `/buchung`
+**möchte ich** direkt unter der Überschrift eine kompakte Leiste mit Sterne-Schnitt, Bewertungsanzahl, dem Hinweis „Persönlich von Tom Siefert" und einem Telefon-CTA sehen,
+**damit** ich Vertrauen schöpfe, bevor ich einen Termin wähle, und nicht ohne Orientierung vor dem Kalender stehe.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/buchung` auf, **When** die Seite geladen ist, **Then** sehe ich direkt unterhalb der H1 eine Trust-Bar mit Bewertungs-Schnitt (`REVIEWS_AVERAGE`), Bewertungsanzahl (`REVIEWS_COUNT`) und einem klickbaren Telefon-Link — noch bevor der Kalender sichtbar wird.
+- **Given** ich nutze ein Smartphone, **When** ich die Trust-Bar sehe, **Then** ist der Telefon-Button als Touch-Target mindestens 44 × 44 px groß und direkt wählbar.
+
+**Aufwand:** S | **Priorität:** P0
+**Datei-Referenz:** `src/app/buchung/page.tsx:19–31`, neue Komponente `BookingTrustBar.tsx`, Daten aus `lib/reviews.ts`
+
+---
+
+#### US-UX-A-02: Adress-Hinweis für eingeloggte Kunden vor dem Kalender
+
+**Als** eingeloggter Kunde ohne hinterlegte Adresse
+**möchte ich** bereits ganz oben auf der Buchungsseite einen gut sichtbaren Hinweis mit direktem Link zu meinem Profil sehen,
+**damit** ich nicht erst nach Auswahl von Tag, Dauer und Slot am Ende des Formulars erfahre, dass meine Adresse fehlt.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt und mein Konto hat keine Adresse, **When** ich `/buchung` aufrufe, **Then** erscheint direkt unter der H1 (oberhalb des Kalenders) ein gelber Hinweis-Banner mit dem Text „Deine Adresse fehlt noch" und einem Link „Adresse jetzt ergänzen" zu `/konto`.
+- **Given** ich bin eingeloggt und mein Konto hat eine vollständige Adresse, **When** ich `/buchung` aufrufe, **Then** erscheint dieser Banner nicht.
+
+**Aufwand:** S | **Priorität:** P0
+**Datei-Referenz:** `src/app/buchung/BookingClient.tsx` (oberhalb von `<section aria-labelledby="calendar-heading">`), `BookingForm.tsx:475–491` (bisherige Position)
+
+---
+
+#### US-UX-A-03: Designsystem-Tokens für Feedback-Farben konsolidieren
+
+**Als** Tom
+**möchte ich** konsistente Marken-konforme Farben für alle Status-Banner, Fehler-Felder und Buttons,
+**damit** Fehler-Meldungen und Erfolgs-Hinweise zum Holz-/Beige-Design passen und die App professionell und einheitlich wirkt.
+
+**Akzeptanzkriterien:**
+
+- **Given** ein Fehler-Banner wird angezeigt, **When** ich es auf jeder Seite sehe, **Then** nutzt es das Token `error` (`#B23A3A`) statt generisches `red-700` — gleiches gilt für `warning`, `success`, `info` jeweils mit Marken-kalibrierter Sättigung.
+- **Given** die Tokens in `tailwind.config.ts` eingetragen sind, **When** `Banner.tsx`, `Button.tsx` (danger-Variante) und `Input.tsx` (Error-State) gerendert werden, **Then** referenzieren alle drei die neuen semantischen Tokens statt Tailwind-Default-Farben.
+
+**Aufwand:** S | **Priorität:** P0
+**Datei-Referenz:** `tailwind.config.ts`, `src/components/ui/Banner.tsx:5–10`, `src/components/ui/Button.tsx:20`, `src/components/ui/Input.tsx:71`
+
+---
+
+#### US-UX-A-04: Telefon-Icon im Mobile-Header sichtbar machen
+
+**Als** mobiler Besucher (insbesondere telefon-affine Kunden 50+)
+**möchte ich** auf jeder Seite im Mobile-Header einen sichtbaren Telefon-Icon-Button haben,
+**damit** ich Tom direkt anrufen kann, ohne erst zum Footer scrollen zu müssen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich besuche die Seite auf einem Smartphone (Viewport < 1024 px), **When** der Header geladen ist, **Then** sehe ich neben dem Logo einen Telefon-Icon-Button (44 × 44 px Tap-Target) der `tel:0157-74787512` öffnet — ohne die Nummer auszuschreiben.
+- **Given** ich besuche die Seite auf einem Desktop (Viewport ≥ 1024 px), **When** der Header geladen ist, **Then** ist der Icon-Button ausgeblendet und der bisherige Text-Telefon-Link bleibt sichtbar.
+
+**Aufwand:** S | **Priorität:** P0
+**Datei-Referenz:** `src/components/layout/Header.tsx:35` (`hidden ... lg:inline-flex`)
+
+---
+
+#### US-UX-A-05: Buchungs-Erfolg auf dedizierte Bestätigungsseite umleiten
+
+**Als** Kunde, der eine Buchungsanfrage erfolgreich abgesendet hat,
+**möchte ich** auf eine eigene Bestätigungsseite weitergeleitet werden, die mir zeigt, was als nächstes passiert,
+**damit** ich sicher bin, dass meine Buchung eingegangen ist, und nicht vor einem halb-gefüllten Formular stehe.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich habe das Buchungsformular vollständig ausgefüllt und abgesendet, **When** die Server-Antwort „Erfolg" zurückgibt, **Then** werde ich auf `/buchung/bestaetigt` weitergeleitet — das Formular mit den vorherigen Eingaben ist nicht mehr sichtbar.
+- **Given** ich lande auf `/buchung/bestaetigt`, **When** die Seite lädt, **Then** sehe ich eine klare Bestätigungsmeldung, ein Vertrauenssignal (z. B. Tom-Foto oder Bärenstark-Icon) und einen „Was passiert als Nächstes?"-Abschnitt, der erklärt, wann Tom sich meldet.
+
+**Aufwand:** S | **Priorität:** P1
+**Datei-Referenz:** `src/app/buchung/BookingForm.tsx:172–194` (bisherige Inline-Erfolgsanzeige), `/buchung/bestaetigt`-Route existiert bereits
+
+---
+
+#### US-UX-A-06: Service-Karten mit zwei sichtbaren CTAs ausstatten
+
+**Als** Besucher auf der Service-Übersicht
+**möchte ich** auf jeder Service-Karte sowohl einen „Mehr erfahren"- als auch einen „Direkt buchen"-Button sehen,
+**damit** ich nicht erst das Detail-Modal öffnen, lesen und schließen muss, um zur Buchung zu gelangen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich sehe die Service-Übersicht, **When** die Karten geladen sind, **Then** hat jede Karte zwei sichtbare Aktionen: „Mehr erfahren" (öffnet das bisherige Modal) und „Direkt buchen" (navigiert zu `/buchung?service=<slug>`).
+- **Given** ich klicke „Direkt buchen" auf einer Service-Karte, **When** der Buchungs-Flow lädt, **Then** ist der entsprechende Service vorausgewählt (bestehende `?service=`-Query-Logik greift).
+
+**Aufwand:** S | **Priorität:** P1
+**Datei-Referenz:** `src/components/services/ServiceGrid.tsx:36–80`
+
+---
+
+#### US-UX-A-07: scroll-margin-top für Buchungs-Sektionen einbauen
+
+**Als** mobiler Kunde im Buchungs-Flow
+**möchte ich** nach jeder Auswahl zur nächsten Sektion scrollen, ohne dass deren Überschrift hinter dem Sticky-Header versteckt wird,
+**damit** ich immer sehe, was im nächsten Schritt von mir erwartet wird.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich wähle einen Tag im Kalender aus, **When** der Flow automatisch zur nächsten Sektion scrollt, **Then** ist die Sektions-H2 vollständig sichtbar — nicht vom Sticky-Header (`position: sticky; top: 0`) verdeckt.
+- **Given** der CSS `scroll-margin-top` ist gesetzt, **When** ich auf allen Abschnitten (`#calendar-heading`, `#duration-heading`, `#slot-heading`, `#form-heading`) prüfe, **Then** beträgt der Wert mindestens 5 rem.
+
+**Aufwand:** S | **Priorität:** P1
+**Datei-Referenz:** `src/app/buchung/BookingClient.tsx:267–414`, `src/components/layout/Header.tsx:8`
+
+---
+
+### Bucket B — Buchungs-Flow neu denken
+
+*Mittleres Risiko: betrifft die kritischste Kunden-Reise. Aufbauend auf Bucket A; gute QA-Pässe erforderlich.*
+
+---
+
+#### US-UX-B-01: Buchungs-Flow als sichtbaren Stepper mit Auswahl-Pill umbauen
+
+**Als** Kunde im Buchungs-Flow (besonders auf Mobile)
+**möchte ich** oben einen Stepper sehen, der meinen Fortschritt anzeigt, und eine kompakte Auswahl-Zusammenfassung, die meine bisherigen Entscheidungen festhält,
+**damit** ich weiß, wo ich im Prozess stehe und was ich bereits gewählt habe, ohne zurückscrollen zu müssen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich befinde mich auf `/buchung`, **When** ich eine Auswahl treffe (Tag, Dauer oder Slot), **Then** aktualisiert sich ein Sticky-Stepper oben sofort und zeigt den aktuellen Schritt hervorgehoben an (z. B. „Tag → Dauer → Slot → Daten").
+- **Given** ich habe Tag und Dauer gewählt, **When** ich zum Slot-Schritt komme, **Then** zeigt eine Auswahl-Pill oben „Mo 12. Mai · 2 Stunden" dauerhaft sichtbar — auch wenn ich nach unten scrolle.
+- **Given** ein Schritt noch nicht relevant ist, **When** ich die Seite betrachte, **Then** ist dieser Abschnitt eingeklappt (Disclosure) — die Seite ist nicht eine lange scrollbare Seite mit allen vier Sektionen gleichzeitig.
+
+**Aufwand:** M | **Priorität:** P1
+**Datei-Referenz:** `src/app/buchung/BookingClient.tsx:196–221`, neue Komponente `components/booking/BookingStepper.tsx`
+
+---
+
+#### US-UX-B-02: Mobile Tap-Targets systemisch auf 44 px hochziehen
+
+**Als** mobiler Nutzer (Tom auf der Baustelle, ältere Kunden mit größeren Fingern)
+**möchte ich**, dass alle interaktiven Elemente mindestens 44 × 44 px Klickfläche haben,
+**damit** ich nicht versehentlich den falschen Button treffe und Fehlklicks reduziert werden.
+
+**Akzeptanzkriterien:**
+
+- **Given** `Button` size="sm" wird gerendert, **When** ich die Höhe messe, **Then** ist die Mindesthöhe 44 px (`min-h-[44px]`) — nicht mehr ~32 px wie aktuell.
+- **Given** Slot-Kacheln im `TimeSlotPicker` werden im 2-Spalten-Grid angezeigt, **When** ich den Abstand messe, **Then** beträgt der Gap mindestens `gap-3` (12 px) statt `gap-2` (8 px) — ausreichend für Daumen-Trennschärfe.
+
+**Aufwand:** M | **Priorität:** P1
+**Datei-Referenz:** `src/components/ui/Button.tsx:24` (size="sm"), `src/components/booking/TimeSlotPicker.tsx:202–211`
+
+---
+
+#### US-UX-B-03: Datenschutz-Checkbox im Buchungsformular mit 44-px-Klickfläche
+
+**Als** Kunde am Ende des Buchungsformulars
+**möchte ich** die Datenschutz-Checkbox bequem antippen können,
+**damit** ich auf Mobile nicht mehrfach tippen muss, weil die Checkbox zu klein ist.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich befinde mich auf dem Buchungsformular (Step 4), **When** ich zur Datenschutz-Checkbox scrolle, **Then** ist die gesamte `<label>`-Fläche klickbar und mindestens 44 px hoch.
+- **Given** ich nutze einen Screen-Reader, **When** ich zur Checkbox navigiere, **Then** wird sie als Checkbox mit korrekter Beschriftung angesagt — keine rein visuelle Darstellung.
+
+**Aufwand:** S | **Priorität:** P1
+**Datei-Referenz:** `src/app/buchung/BookingForm.tsx:564–571`
+
+---
+
+#### US-UX-B-04: Status-Icons in Banner für farbenblinde Nutzbarkeit ergänzen
+
+**Als** Nutzer mit Rot-Grün-Schwäche
+**möchte ich** in Hinweis-Banners neben der Farbe auch ein Icon sehen, das den Typ der Meldung klar macht,
+**damit** ich nicht allein auf Farbunterscheidung angewiesen bin.
+
+**Akzeptanzkriterien:**
+
+- **Given** ein Fehler-Banner angezeigt wird, **When** ich ihn sehe, **Then** enthält er ein `<AlertTriangle>`-Icon (oder äquivalent) links neben dem Text — zusätzlich zur Hintergrundfarbe.
+- **Given** ein Erfolgs-Banner angezeigt wird, **When** ich ihn sehe, **Then** enthält er ein `<CheckCircle>`-Icon links neben dem Text — zusätzlich zur Hintergrundfarbe.
+
+**Aufwand:** S | **Priorität:** P1
+**Datei-Referenz:** `src/components/ui/Banner.tsx:24`
+
+---
+
+### Bucket C — Admin-Effizienz
+
+*Mittleres Risiko: mehrere zusammenhängende Änderungen am Admin-Bereich. Empfohlen als zusammenhängendes Release mit kurzem Walkthrough für Tom.*
+
+---
+
+#### US-UX-C-01: Admin-Navigation auf eine einzige Sektions-Leiste konsolidieren
+
+**Als** Tom im Admin-Bereich
+**möchte ich** eine einzige klare Navigationsleiste haben, die alle Bereiche auflistet,
+**damit** ich nicht zwischen fünf Quick-Links oben und vier Tabs darunter wählen muss und „Bewertungen" nicht zweimal auftaucht.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne `/admin`, **When** die Seite geladen ist, **Then** sehe ich genau eine horizontale Navigationsleiste (sticky) mit allen Bereichen — die separaten Quick-Link-Buttons existieren nicht mehr parallel.
+- **Given** ich navigiere zwischen Bereichen, **When** ich auf einen Navigations-Eintrag klicke, **Then** wechselt der Inhalt darunter ohne Seitenwechsel — kein doppelter Bewertungs-Eintrag.
+
+**Aufwand:** S–M | **Priorität:** P0
+**Datei-Referenz:** `src/components/admin/AdminDashboard.tsx:62–96`
+
+---
+
+#### US-UX-C-02: Admin-Dashboard als „Was muss ich heute tun?"-Ansicht
+
+**Als** Tom
+**möchte ich** auf `/admin` sofort sehen, welche Buchungen meine Aufmerksamkeit brauchen (neue Anfragen, fällige Bestätigungen, unbearbeitete Items > 24 h),
+**damit** ich nicht durch Tabs suchen muss, um meinen Arbeitstag zu starten.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne `/admin`, **When** offene Buchungsanfragen existieren, **Then** sehe ich ganz oben eine „Heute zu erledigen"-Sektion mit diesen Anfragen und einem visuellen Indikator (z. B. roter Punkt), wenn eine Anfrage mehr als 24 Stunden ohne Reaktion ist.
+- **Given** keine offenen Anfragen vorliegen, **When** ich `/admin` öffne, **Then** zeigt die „Heute zu erledigen"-Sektion den Leerstand freundlich an — kein leerer Container.
+
+**Aufwand:** M–L | **Priorität:** P1
+**Datei-Referenz:** `src/components/admin/AdminDashboard.tsx`, `UpcomingBookingsList.tsx`, evtl. neue `AdminInbox.tsx`
+
+---
+
+#### US-UX-C-03: Admin-Buchungskarten komprimieren — primäre Aktion herausstellen
+
+**Als** Tom in der Buchungsverwaltung
+**möchte ich** auf jeder Buchungskarte sofort die wichtigste Aktion erkennen (z. B. „Bestätigen" bei PENDING),
+**damit** ich schnell entscheiden kann und nicht jede Karte komplett lesen muss, um den richtigen Button zu finden.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich sehe eine PENDING-Buchung in der Admin-Tabelle, **When** die Karte gerendert wird, **Then** ist der primäre Aktion-Button (z. B. „Bestätigen") prominent (groß, oben rechts) — Sekundäres (Mail erneut, Preis-Editor, Counter-Proposal) ist hinter einem „…"-Menü oder Detail-Drawer ausgeblendet.
+- **Given** ich öffne das Detail-Menü oder den Drawer, **When** alle Informationen angezeigt werden, **Then** sehe ich alle bisherigen Informationen vollständig — kein Datenverlust durch die Komprimierung.
+
+**Aufwand:** M | **Priorität:** P1
+**Datei-Referenz:** `src/components/admin/BookingTable.tsx:258–535`, `PaymentEditor.tsx`, `FinalPriceEditor.tsx`
+
+---
+
+#### US-UX-C-04: Verfügbarkeits-Konfiguration mit Inline-Hilfe und klarer Struktur
+
+**Als** Tom in der Verfügbarkeitsverwaltung
+**möchte ich** zu jedem Konfigurationsbereich (Buffer, Wochenvorlage, Tages-Überschreibungen) einen erklärenden Titel und kurzen Hilfetext sehen,
+**damit** ich als Nicht-Techniker verstehe, was jede Einstellung bewirkt.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne den Verfügbarkeits-Tab, **When** die Seite lädt, **Then** sehe ich mindestens drei klar benannte Sektionen mit je einer kurzen Erklärung, z. B. „Puffer zwischen Aufträgen — wie viel Pause Tom zwischen zwei Buchungen braucht".
+- **Given** ich eine Sektion aufklappe (Collapsible) oder den Tab wechsle, **When** der Inhalt erscheint, **Then** ist er thematisch geschlossen — kein Vermischen von Buffer-Config und Tages-Überschreibungen in einer langen `<hr />`-getrennten Liste.
+
+**Aufwand:** M | **Priorität:** P2
+**Datei-Referenz:** `src/components/admin/WeeklyAvailabilityForm.tsx:21–30`
+
+---
+
+#### US-UX-C-05: Adresse und Maps-Link in der „Bevorstehende Termine"-Liste
+
+**Als** Tom auf dem Weg zum Kunden
+**möchte ich** in der Liste der bevorstehenden Termine direkt die Kunden-Adresse sehen und per Tap in Maps öffnen können,
+**damit** ich keine Buchungskarte aufklappen muss, um die Zieladresse zu kopieren.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich sehe die „Bevorstehende Termine"-Liste, **When** ein Termin eine Kunden-Adresse hat, **Then** wird die Adresse direkt in der Zeile angezeigt, und ein Tap auf die Adresse öffnet sie in der Karten-App des Geräts (`geo:`-URI oder Maps-URL).
+- **Given** ein Termin hat keine hinterlegte Adresse, **When** die Liste angezeigt wird, **Then** erscheint ein Hinweis „Keine Adresse hinterlegt" — kein leerer Platz.
+
+**Aufwand:** S | **Priorität:** P1
+**Datei-Referenz:** `src/components/admin/UpcomingBookingsList.tsx:107–137`
+
+---
+
+#### US-UX-C-06: Zeitfenster-Formular einklappbar machen
+
+**Als** Tom in der Zeitfensterverwaltung
+**möchte ich** das „Neues Zeitfenster anlegen"-Formular nicht dauerhaft aufgeklappt sehen,
+**damit** ich bei vielen bestehenden Slots nicht jedes Mal an der Form vorbeiscrollen muss, um zur Liste zu gelangen.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne den Zeitfenster-Tab, **When** die Seite lädt, **Then** ist das Formular eingeklappt und ein Button „+ Neues Zeitfenster anlegen" ist sichtbar.
+- **Given** ich klicke auf „+ Neues Zeitfenster anlegen", **When** das Formular aufklappt, **Then** scrollt die Ansicht sanft zum Formular und ich kann direkt mit der Eingabe beginnen.
+
+**Aufwand:** S | **Priorität:** P2
+**Datei-Referenz:** `src/components/admin/SlotForm.tsx:114–187`
+
+---
+
+### Bucket D — Designsystem-Reife
+
+*Niedrig–mittleres Risiko. Kann parallel zu Bucket A/B/C laufen; nicht conversion-kritisch, zahlt auf Wartbarkeit ein.*
+
+---
+
+#### US-UX-D-01: Polymorphes Button-Komponente — alle Inline-Buttons migrieren
+
+**Als** Tom
+**möchte ich** überall auf der Seite gleich aussehende Buttons und Links, unabhängig davon ob sie navigieren oder eine Aktion auslösen,
+**damit** die App visuell kohärent wirkt und zukünftige Design-Anpassungen an einer Stelle gemacht werden können.
+
+**Akzeptanzkriterien:**
+
+- **Given** `Button.tsx` wird erweitert, **When** ein Entwickler `<Button as="a" href="…">` verwendet, **Then** rendert es ein natives `<a>` mit allen Button-Styles — keine eigene Tailwind-Klassen-Kette nötig.
+- **Given** die Migration abgeschlossen ist, **When** ich Hero-CTA, Header-„Termin buchen"-Link, „Jetzt bezahlen"-Link in `CustomerBookingCard` und OAuth-Buttons in `LoginForm` vergleiche, **Then** haben alle dieselbe Höhe, denselben Hover-State und dasselbe Fokus-Ring-Verhalten.
+
+**Aufwand:** M | **Priorität:** P2
+**Datei-Referenz:** `src/components/ui/Button.tsx`, `Hero.tsx:33–39`, `Header.tsx:28–33`, `CustomerBookingCard.tsx:215–220`, `LoginForm.tsx:209–238`
+
+---
+
+#### US-UX-D-02: Datums-Formatierungs-Helfer konsolidieren
+
+**Als** Entwickler (und indirekt als Tom, der überall dasselbe Datumsformat sieht)
+**möchte ich** eine einzige zentrale Format-API mit benannten Modi (`'date-short'`, `'date-long'`, `'date-time'`, `'range'`) statt sechs konkurrierender Helfer-Funktionen,
+**damit** Datums-Darstellungen im gesamten Projekt konsistent sind und Änderungen nur an einer Stelle gemacht werden müssen.
+
+**Akzeptanzkriterien:**
+
+- **Given** die neue zentrale `format(date, mode)`-Funktion existiert, **When** sie mit jedem der vier Modi aufgerufen wird, **Then** gibt sie ein korrekt formatiertes deutsches Datum zurück — gleich wie die bisherigen Helfer.
+- **Given** alle Verbraucher-Komponenten migriert sind, **When** ich nach `formatBerlinDateShort`, `formatDateShort`, `formatDateTime`, `formatSlotRange`, `formatSlotRangeCompact` und der lokalen `formatDate` in `UpcomingBookingsList.tsx` suche, **Then** finden sich keine Aufrufe dieser alten Helfer mehr.
+
+**Aufwand:** M | **Priorität:** P2
+**Datei-Referenz:** `src/lib/` (mehrere Helfer), `UpcomingBookingsList.tsx:21–32`, `DayOverrideManager.tsx:44–48`
+
+---
+
+#### US-UX-D-03: Kalender-Komponenten konsolidieren
+
+**Als** Entwickler
+**möchte ich** nur eine Kalender-Implementierung im Buchungs-Flow statt zwei parallele (`BookingCalendar.tsx` FullCalendar-basiert und `Calendar.tsx` Legacy),
+**damit** Bugfixes und Design-Änderungen am Kalender nicht doppelt gepflegt werden müssen.
+
+**Akzeptanzkriterien:**
+
+- **Given** die Konsolidierung abgeschlossen ist, **When** der Buchungs-Flow die Kalender-Komponente nutzt, **Then** gibt es genau eine Kalender-Implementierung — `Calendar.tsx` ist entweder entfernt oder klar als „Re-Booking only" dokumentiert und nicht mehr im Haupt-Flow eingebunden.
+- **Given** die konsolidierte Komponente verwendet wird, **When** ich Regressionstest des Buchungs-Flows durchführe, **Then** funktioniert die Slot-Auswahl wie vor der Konsolidierung — keine Funktionalitätsverlust.
+
+**Aufwand:** M | **Priorität:** P2
+**Datei-Referenz:** `src/components/booking/BookingCalendar.tsx` (FullCalendar), `src/components/ui/Calendar.tsx` (Legacy)
+
+---
+
+### Empfehlung für Tom — was als nächstes ziehen?
+
+**IT10 — Bucket A komplett (empfohlen):**
+US-UX-A-01, US-UX-A-02, US-UX-A-03, US-UX-A-04, US-UX-A-05, US-UX-A-06, US-UX-A-07
+
+Begründung: Bucket A enthält ausschließlich additive UI-Änderungen — kein API-Vertrag wird berührt, kein bestehender Flow wird umgebaut. Die Stories adressieren direkt die Conversion-Schwachstellen (Vertrauen im Buchungs-Flow, Adress-Frust, Fehler-Design, Mobile-Telefon-Erreichbarkeit). Niedriges Risiko, sichtbare Wirkung nach einem Sprint.
+
+**Parallel lauffähig — Bucket D:**
+US-UX-D-01, US-UX-D-02, US-UX-D-03 können gleichzeitig zu Bucket A oder B bearbeitet werden. Sie berühren keine User-sichtbaren Flows, sondern das Fundament. Empfohlen: D-01 und D-02 parallel zu IT10 starten, damit das Designsystem für den Stepper-Umbau (Bucket B) bereit ist.
+
+**Reihenfolge-Abhängigkeiten:**
+- US-UX-A-03 (Token-Konsolidierung) sollte vor US-UX-B-04 (Banner-Icons) abgeschlossen sein — B-04 baut auf den semantischen Tokens auf.
+- US-UX-D-01 (polymorphes Button) sollte vor dem großen Stepper-Umbau (US-UX-B-01) fertig sein — der Stepper nutzt Button-Varianten intensiv.
+- US-UX-D-02 (Format-Helfer) und US-UX-D-03 (Kalender-Konsolidierung) haben keine harten Vorbedingungen, aber erleichtern die spätere Wartung von Bucket C.
+
+**Bucket B und C:**
+Bucket B (Stepper) folgt auf Bucket A — man hat dann bereits Trust-Signale oben, jetzt kommt die Reise selbst. Bucket C (Admin) hat den längsten Atem und kann als separater Sprint nach Bucket B folgen. Tom sollte Bucket C zusammen mit einem kurzen Walkthrough ausrollen, da sich die Admin-Ansicht grundlegend ändert.
+
+*Diese Empfehlung ist eine Orientierung — Tom entscheidet die Priorisierung eigenständig pro Sprint.*
+
+---
+
+## Iteration 10 — Bug-Triage & Customer-Self-Service
+
+### Kontext
+
+Nach dem Go-Live von Iteration 9 hat Tom fünf Punkte aus dem Live-Test gemeldet:
+drei kritische Bugs, die Kernfunktionen blockieren (Passwort-Reset, Admin-Nutzerliste,
+Anfrage-Absenden), ein UX-Wunsch für ein Kalender-Quick-Booking-Modal und eine
+Self-Service-Funktion für das Kunden-Dashboard (eigene Anfragen + Vorausfüllung des
+Formulars). Die drei Bug-Stories deuten auf konkrete Implementierungs-Defekte hin
+(E-Mail-Versand, Admin-API-Endpoint, Buchungs-API-Endpoint), die der Solution Architect
+in der Analyse-Phase diagnostizieren muss, bevor die Implementierung beginnt.
+
+Iteration 10 adressiert ausschließlich die fünf gemeldeten Punkte.
+
+---
+
+#### US-IT10-01: Passwort-Reset per E-Mail funktioniert nicht (Bug-Fix)
+
+> **Kritischer Bug — E-Mail-Versand-Defekt.** Tom hat als Kunde den „Passwort
+> vergessen"-Flow getestet. Nach Eingabe der E-Mail-Adresse bleibt die Reset-E-Mail
+> aus. Der Fehler liegt wahrscheinlich im Resend-Aufruf (fehlende ENV-Variable,
+> falscher API-Key in Produktion, falsche Absender-Domain) oder im Token-Speicher-
+> /Abruf-Flow. Der Endpoint `/api/customer/forgot-password` wurde in IT7 (US-IT7-05)
+> wiederhergestellt — entweder wurde er in IT9 versehentlich beschädigt oder die
+> Produktions-Konfiguration fehlt.
+>
+> **Aktuelles Verhalten:** Kunde klickt „Passwort vergessen", gibt E-Mail ein —
+> keine E-Mail kommt an, kein sichtbarer Fehler in der UI.
+> **Erwartetes Verhalten:** Innerhalb von 2 Minuten erhält der Kunde eine
+> deutschsprachige Reset-E-Mail via Resend mit einem gültigen (1 Stunde) Single-Use-Link.
+
+**Als** Kunde
+**möchte ich** nach Klick auf „Passwort vergessen" zuverlässig eine Reset-E-Mail
+erhalten,
+**damit** ich mein Passwort zurücksetzen und mich wieder einloggen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe `/konto/passwort-vergessen` auf und gebe meine registrierte
+  E-Mail-Adresse ein,
+  **When** ich auf „Link anfordern" klicke,
+  **Then** erhalte ich innerhalb von 2 Minuten eine E-Mail mit einem gültigen
+  Passwort-Reset-Link — unabhängig von der Umgebung (Produktion und lokale
+  Entwicklung).
+
+- **Given** der Entwickler analysiert den Fehler-Pfad (Vercel-Logs, Resend-Dashboard,
+  ENV-Vars `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `NEXTAUTH_URL`),
+  **When** die Ursache identifiziert ist,
+  **Then** ist sie im PR dokumentiert: fehlende ENV-Var, ungültiger API-Key,
+  nicht-autorisierte Absender-Domain oder Code-Defekt im Token-Flow.
+
+- **Given** der Fix eingespielt ist und ein Kunde den Reset-Link empfängt,
+  **When** er auf den Link klickt,
+  **Then** sieht er das Formular `/konto/passwort-zuruecksetzen` mit zwei Feldern —
+  der Link ist gültig (max. 1 Stunde) und single-use.
+
+- **Given** ein Kunde gibt auf der Reset-Seite ein neues Passwort (mind. 8 Zeichen)
+  ein und bestätigt es,
+  **When** er auf „Passwort ändern" klickt,
+  **Then** wird das Passwort gespeichert, der Token invalidiert und er wird zu
+  `/konto/login` mit der Meldung „Passwort erfolgreich geändert" weitergeleitet.
+
+- **Given** ein abgelaufener oder bereits verwendeter Reset-Link aufgerufen wird,
+  **When** die Seite lädt,
+  **Then** erscheint die Meldung „Dieser Link ist nicht mehr gültig. Bitte fordern
+  Sie einen neuen Reset-Link an." — kein unbehandelter Fehler.
+
+**Hinweis für den Architect:** Diagnose-Reihenfolge: (1) Vercel-Logs zum Zeitpunkt des
+Forgot-Password-Requests prüfen — gibt der Endpoint einen 500 zurück oder antwortet er
+200 ohne E-Mail zu verschicken? (2) Resend-Dashboard auf fehlgeschlagene Sends prüfen.
+(3) ENV-Vars `RESEND_API_KEY`, `RESEND_FROM_EMAIL` und `NEXTAUTH_URL` in Vercel auf
+Korrektheit prüfen. (4) Absender-Domain in Resend auf Verifizierungsstatus prüfen.
+
+**Klassifikation:** Bug-Fix
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT10-02: Admin-Portal — Nutzerliste lädt nicht (Bug-Fix)
+
+> **Kritischer Bug — Admin-API-Endpoint-Defekt.** Tom ruft im Admin-Portal die
+> Nutzerverwaltung auf (Route `/admin/users`). Die Seite zeigt die Fehlermeldung
+> „Interner Serverfehler. Bitte später erneut versuchen." — die Kundenliste wird
+> nicht geladen. US-IT9-01 hat einen ähnlichen Crash auf `/admin/users` behoben;
+> es ist möglich, dass der Fix unvollständig war, ein Regressionsfall vorliegt oder
+> ein anderer API-Endpunkt fehlschlägt (z. B. `/api/admin/users` oder ein
+> Prisma-Query-Timeout in Produktion).
+>
+> **Aktuelles Verhalten:** `/admin/users` zeigt „Interner Serverfehler. Bitte später
+> erneut versuchen." — kein Laden der Kundenliste.
+> **Erwartetes Verhalten:** Die Seite lädt die Kundenliste korrekt. Bei leerer DB
+> erscheint ein leerer Zustand mit Text „Keine Kunden registriert."
+
+**Als** Admin (Tom)
+**möchte ich** im Admin-Portal die Liste aller registrierten Nutzer fehlerfrei
+aufrufen können,
+**damit** ich Kundendaten einsehen und verwalten kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin als Admin eingeloggt und rufe `/admin/users` auf,
+  **When** die Seite lädt,
+  **Then** sehe ich entweder die Kundenliste oder — bei leerer Datenbank — den
+  Text „Keine Kunden registriert." — die Fehlermeldung „Interner Serverfehler"
+  erscheint nicht mehr.
+
+- **Given** der Entwickler analysiert den Fehler (Vercel-Logs, Server-Response des
+  API-Endpoints, Prisma-Query-Trace),
+  **When** die Ursache identifiziert ist,
+  **Then** ist sie im PR dokumentiert: z. B. Prisma-Exception, ungültiger
+  Datenzugriff auf `undefined`, fehlende Null-Prüfung, Auth-Guard-Problem oder
+  Timeout.
+
+- **Given** der Fix eingespielt ist und mindestens ein Kunde in der Datenbank
+  existiert,
+  **When** Tom `/admin/users` aufruft,
+  **Then** werden mindestens Name (oder E-Mail), Registrierungsdatum und Status
+  des Kunden angezeigt.
+
+- **Given** der API-Endpunkt für die Nutzerliste aufgerufen wird,
+  **When** die Response zurückkommt,
+  **Then** sind keine admin-internen Felder (`adminNote`, `adminRating`,
+  `passwordHash`) in der UI sichtbar — nur die für den Admin vorgesehenen
+  Felder.
+
+- **Given** der Crash behoben ist,
+  **When** der CI-Build läuft,
+  **Then** ist `next build` ohne Typ- oder Laufzeitfehler in der betreffenden
+  Route erfolgreich.
+
+**Hinweis für den Architect:** Da IT9 (US-IT9-01) denselben Pfad bereits einmal
+repariert hat, zuerst prüfen: (1) Wurde die IT9-Reparatur korrekt deployed? Vercel-
+Deployment-Log prüfen. (2) Gibt es einen separaten API-Endpunkt (`GET /api/admin/users`),
+der fehlschlägt — unabhängig von der Page-Route? (3) Prisma Studio lokal gegen Produkt-
+ions-DB-Dump prüfen, ob die Query korrekt ausgeführt werden kann.
+
+**Klassifikation:** Bug-Fix
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT10-03: Buchungsanfrage kann nicht abgesendet werden (Bug-Fix)
+
+> **Kritischer Bug — Buchungs-API-Endpoint-Defekt.** Beim Absenden einer Buchungsanfrage
+> erscheint die Fehlermeldung „Anfrage konnte nicht gesendet werden. Interner
+> Serverfehler. Bitte später erneut versuchen." — die Anfrage erreicht Tom nicht, kein
+> Eintrag erscheint im Admin-Portal, keine Bestätigungs-E-Mail wird versendet. Dieser
+> Fehler ist ein direkter Blocker für Toms Geschäftsbetrieb: kein Neukunde kann eine
+> Anfrage stellen. Ähnliche Defekte wurden in Iteration 2 (BUG US-04) und Iteration 3
+> (BUG IT3) bereits behoben — es ist möglich, dass eine spätere Änderung (z. B. in IT9)
+> eine Regression eingeführt hat.
+>
+> **Aktuelles Verhalten:** Formular wird ausgefüllt und abgesendet → Fehlermeldung
+> „Interner Serverfehler" → kein Eintrag im Admin-Portal, keine E-Mail an Tom.
+> **Erwartetes Verhalten:** Nach erfolgreichem Absenden erscheint die Anfrage sofort
+> im Admin-Portal, Tom erhält eine Benachrichtigungs-E-Mail, der Kunde wird auf
+> `/buchung/bestaetigt` weitergeleitet oder sieht eine Erfolgsmeldung.
+
+**Als** Kunde
+**möchte ich** eine Buchungsanfrage erfolgreich absenden können,
+**damit** Tom meine Anfrage erhält und wir einen Termin vereinbaren können.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich fülle das Buchungsformular vollständig aus (Name, E-Mail, Telefon,
+  Adresse, Service, Datum/Zeitslot, Dauer) und klicke auf „Absenden",
+  **When** der Request den Server erreicht und erfolgreich verarbeitet wird,
+  **Then** erscheint eine Erfolgsmeldung oder ich werde auf `/buchung/bestaetigt`
+  weitergeleitet — keine Fehlermeldung „Interner Serverfehler".
+
+- **Given** die Buchungsanfrage erfolgreich abgesendet wurde,
+  **When** Tom das Admin-Portal öffnet,
+  **Then** erscheint die neue Anfrage mit Status „Offen" (PENDING) in der
+  Buchungsübersicht.
+
+- **Given** die Buchungsanfrage erfolgreich verarbeitet wurde,
+  **When** das System die Benachrichtigung versendet,
+  **Then** erhält Tom eine Benachrichtigungs-E-Mail an `hausservice-baerenstark@outlook.com`
+  mit den Anfragedetails (Kundenname, Service, Datum, Kontaktdaten).
+
+- **Given** der Entwickler den Fehler-Pfad analysiert (Vercel-Logs, HTTP-Response
+  des Booking-Endpoints, Prisma-Trace, E-Mail-Versand-Log),
+  **When** die Ursache identifiziert ist,
+  **Then** ist sie im PR dokumentiert: Prisma-Validierungsfehler, fehlende
+  Pflichtfelder in der Request-Payload, Resend-Fehler, fehlerhafte Middleware oder
+  unbehandelter Edge-Case im Booking-Handler.
+
+- **Given** der Fix eingespielt ist und ein Kunde das Formular mit gültigen Daten
+  absendet,
+  **When** ein Pflichtfeld fehlt oder ungültig ist,
+  **Then** erscheint eine verständliche deutschsprachige Inline-Fehlermeldung am
+  betreffenden Feld — kein generischer 500-Fehler.
+
+**Hinweis für den Architect:** Diagnose-Reihenfolge: (1) Vercel-Logs des
+Booking-POST-Endpoints analysieren — welcher Fehler tritt auf (Prisma-Exception,
+Zod-Validierungsfehler, TypeError)? (2) Prüfen, ob alle Felder der aktuellen Payload
+(inkl. IT9-Erweiterungen wie `streetAndNumber`, `postalCode`, `city`, `durationMinutes`)
+im Prisma-Schema und Zod-Schema korrekt abgebildet sind. (3) Resend-Aufruf isoliert
+testen. (4) Prüfen, ob eine Prisma-Migration nach IT9 fehlt (Schema-Mismatch).
+
+**Klassifikation:** Bug-Fix
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-IT10-04: Kalender-Quick-Booking — Modal statt Seitennavigation (Neues Feature)
+
+> **UX-Verbesserung.** Tom wünscht sich, dass nach Auswahl eines Datum/Zeitfensters
+> im Kalender-Widget kein Seitenwechsel stattfindet, sondern direkt ein
+> Popup/Modal erscheint, in dem alle Anfrageformular-Felder ausgefüllt werden können.
+> Das reduziert den Kontext-Wechsel und soll die Conversion erhöhen.
+
+**Als** Kunde auf der Buchungsseite
+**möchte ich** nach Auswahl eines Zeitslots im Kalender ein Modal sehen, in dem ich
+alle Buchungsfelder direkt ausfüllen kann,
+**damit** ich den Buchungs-Flow ohne Seitennavigation abschließen und schneller
+buchen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich rufe die Buchungsseite auf und der Kalender ist geladen,
+  **When** ich auf einen verfügbaren Zeitslot klicke (Datum + Uhrzeit ausgewählt),
+  **Then** öffnet sich ein Modal/Popup mit dem vollständigen Buchungsformular —
+  Datum und Uhrzeit sind bereits vorausgefüllt.
+
+- **Given** das Modal geöffnet ist,
+  **When** ich alle Pflichtfelder (Name, E-Mail, Telefon, Adresse, Service,
+  Beschreibung) ausfülle und auf „Anfrage absenden" klicke,
+  **Then** wird die Buchungsanfrage abgesendet, das Modal schließt sich und eine
+  Erfolgsmeldung erscheint — kein Seitenwechsel notwendig.
+
+- **Given** das Modal geöffnet ist und ich auf „Schließen", den Hintergrund oder
+  die Escape-Taste klicke,
+  **When** die Schließ-Aktion ausgelöst wird,
+  **Then** schließt sich das Modal ohne Datenverlust (bereits eingetragene Felder
+  bleiben erhalten, wenn das Modal erneut geöffnet wird) — der Kalender ist
+  weiterhin sichtbar.
+
+- **Given** ich das Modal öffne und ein Pflichtfeld leer lasse,
+  **When** ich auf „Anfrage absenden" klicke,
+  **Then** erscheint eine Inline-Fehlermeldung direkt am betreffenden Feld —
+  das Modal bleibt offen.
+
+- **Given** ich das Modal auf einem Smartphone nutze,
+  **When** das Modal geöffnet ist,
+  **Then** ist es vollständig scrollbar, alle Felder erreichbar und der
+  Absenden-Button ohne horizontales Scrollen sichtbar.
+
+**Hinweis:** Das Modal kann auf der bestehenden `BookingForm`-Komponente aufgebaut
+werden — kein neues Formular notwendig, nur eine neue Wrapper-Logik (Dialog/Sheet).
+Vorausfüllen von Datum + Uhrzeit aus dem Kalender-State via Props. Die bestehende
+Seitennavigation bleibt als Fallback erhalten (für Nutzer ohne JavaScript oder bei
+direktem URL-Aufruf).
+
+**Klassifikation:** Neues Feature
+**Priorität:** Should Have | **Story Points:** 5
+
+---
+
+#### US-IT10-05: Kunden-Dashboard Self-Service — eigene Anfragen + Formular-Vorausfüllung (Neues Feature)
+
+> **UX-Verbesserung / Self-Service.** Tom wünscht zwei verbundene Funktionen für
+> eingeloggte Kunden: (a) eine Übersicht aller eigenen Anfragen mit aktuellem Status,
+> und (b) das Buchungsformular soll mit den bereits im Konto hinterlegten Daten
+> (Name, E-Mail, Telefon, Adresse) vorausgefüllt sein, damit die Buchung so einfach
+> wie möglich ist. Für (a) existiert bereits die Grundlage aus US-26 (IT4) — diese
+> Story prüft und ergänzt fehlende Funktionalität; für (b) ist das Vorausfüllen eine
+> neue Integration zwischen Kunden-Session und Buchungsformular.
+
+**Als** eingeloggter Kunde
+**möchte ich** alle meine eigenen Buchungsanfragen mit aktuellem Status sehen und
+beim Buchen ein mit meinen Profildaten vorausgefülltes Formular vorfinden,
+**damit** ich meinen Buchungsstatus jederzeit nachverfolgen und neue Anfragen
+schnell und ohne Datenneuerfassung stellen kann.
+
+**Akzeptanzkriterien:**
+
+**Teil A — Anfragen-Übersicht:**
+
+- **Given** ich bin eingeloggt und rufe `/konto` auf,
+  **When** die Seite geladen ist,
+  **Then** sehe ich eine Liste aller meiner Buchungsanfragen mit mindestens:
+  Datum/Uhrzeit, Service, Status-Badge auf Deutsch (Offen / Bestätigt /
+  Abgelehnt / Storniert / Gegenvorschlag ausstehend) und dem Erstellungsdatum
+  der Anfrage.
+
+- **Given** ich habe noch keine Buchungsanfragen gestellt,
+  **When** ich `/konto` aufrufe,
+  **Then** erscheint der Hinweis „Sie haben noch keine Anfragen" mit einem
+  CTA-Button „Jetzt erste Anfrage stellen".
+
+- **Given** ich klicke auf einen Eintrag in der Anfragen-Übersicht,
+  **When** die Detailseite lädt,
+  **Then** sehe ich alle Buchungsdetails: Datum, Uhrzeit, Service, Beschreibung,
+  Adresse, Status und — falls vorhanden — hochgeladene Dateien.
+
+**Teil B — Formular-Vorausfüllung:**
+
+- **Given** ich bin eingeloggt und öffne das Buchungsformular (direkt oder über
+  das Quick-Booking-Modal aus US-IT10-04),
+  **When** das Formular geladen ist,
+  **Then** sind die Felder Name, E-Mail, Telefon sowie Straße & Hausnummer, PLZ
+  und Ort mit den in meinem Konto hinterlegten Werten vorausgefüllt.
+
+- **Given** mein Konto hat keine Adresse hinterlegt,
+  **When** das Buchungsformular lädt,
+  **Then** bleiben die Adressfelder leer und ein Hinweis „Adresse in Ihrem
+  Profil hinterlegen" mit Link zu `/konto` ist sichtbar — das Formular kann
+  dennoch ausgefüllt und abgesendet werden (Adresse als Pflichtfeld im Formular,
+  nicht im Profil).
+
+- **Given** ich bin eingeloggt, die Formularfelder sind vorausgefüllt und ich
+  ändere einen Wert im Formular,
+  **When** ich das Formular absende,
+  **Then** wird der geänderte Wert für diese Buchung verwendet — die Profildaten
+  im Konto werden nicht automatisch überschrieben.
+
+- **Given** ich bin nicht eingeloggt und öffne das Buchungsformular,
+  **When** das Formular geladen ist,
+  **Then** sind alle Felder leer (kein Vorausfüllen) — das Formular funktioniert
+  unverändert als Gastbuchung.
+
+**Hinweis:** Teil A baut auf US-26 (IT4) auf — prüfen, ob die bestehende
+`/konto`-Übersicht bereits alle geforderten Status-Badges und Detailfelder zeigt,
+oder ob Ergänzungen nötig sind. Teil B erfordert, dass beim Laden des Buchungsformulars
+die Kunden-Session ausgelesen und die Profildaten als Default-Values übergeben werden
+(`useSession` oder Server-Side-Props). Profildaten im Konto werden nicht durch das
+Formular-Absenden geändert (keine ungewollten Überschreibungen).
+
+**Klassifikation:** Neues Feature
+**Priorität:** Should Have | **Story Points:** 5

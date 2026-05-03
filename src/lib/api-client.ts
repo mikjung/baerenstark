@@ -72,13 +72,27 @@ export class ApiClientError extends Error {
   status: number;
   code: ApiErrorCode;
   field?: string;
+  /**
+   * IT10 (ARCHITECTURE_IT10 §9.1, STRUCT-3): optionaler Subcode für feinere
+   * Diagnose. Backend ergänzt z. B. `subcode: 'BOOKING_SLOT_TAKEN'` bei
+   * Slot-Konflikten. Frontend mapped primär auf `subcode`, mit Fallback auf
+   * `code === 'CONFLICT'` + `field === 'date'` für Rückwärts-Kompatibilität.
+   */
+  subcode?: string;
 
-  constructor(status: number, code: ApiErrorCode, message: string, field?: string) {
+  constructor(
+    status: number,
+    code: ApiErrorCode,
+    message: string,
+    field?: string,
+    subcode?: string,
+  ) {
     super(message);
     this.name = 'ApiClientError';
     this.status = status;
     this.code = code;
     this.field = field;
+    this.subcode = subcode;
   }
 }
 
@@ -143,12 +157,18 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
         `Server-Fehler (HTTP ${response.status}). Bitte später erneut versuchen.`,
       );
     }
-    const errorPayload = parsed as ApiError;
+    const errorPayload = parsed as ApiError & { error?: { subcode?: string } };
     const code = (errorPayload?.error?.code ?? 'INTERNAL_ERROR') as ApiErrorCode;
     const message =
       errorPayload?.error?.message ?? `Server-Fehler (HTTP ${response.status})`;
     const field = errorPayload?.error?.field;
-    throw new ApiClientError(response.status, code, message, field);
+    // IT10 — Subcode bewusst optional aus dem rohen Body lesen (auch wenn das
+    // ApiErrorSchema ihn aktuell nicht typisiert — siehe ARCHITECTURE_IT10 §9.1).
+    const rawSubcode =
+      typeof errorPayload?.error?.subcode === 'string'
+        ? errorPayload.error.subcode
+        : undefined;
+    throw new ApiClientError(response.status, code, message, field, rawSubcode);
   }
 
   if (parseFailed) {
@@ -565,10 +585,17 @@ export async function createDayOverride(
     // ignore — wir prüfen unten ob OK
   }
   if (!response.ok) {
-    const err = parsed as ApiError | null;
+    const err = parsed as (ApiError & { error?: { subcode?: string } }) | null;
     const code = (err?.error?.code ?? 'INTERNAL_ERROR') as ApiErrorCode;
     const message = err?.error?.message ?? `Server-Fehler (HTTP ${response.status})`;
-    throw new ApiClientError(response.status, code, message, err?.error?.field);
+    const sub = typeof err?.error?.subcode === 'string' ? err.error.subcode : undefined;
+    throw new ApiClientError(
+      response.status,
+      code,
+      message,
+      err?.error?.field,
+      sub,
+    );
   }
   const body = parsed as
     | { data: DayOverride; warning?: { code: string; message: string; affectedBookingCount: number } }

@@ -19,7 +19,7 @@ export default function ForgotPasswordPage() {
   return (
     <AuthCardShell
       title="Passwort zurücksetzen"
-      subtitle="Wir schicken dir einen Link per E-Mail."
+      subtitle="Geben Sie die E-Mail-Adresse Ihres Kontos ein. Wir schicken Ihnen einen Link zum Zurücksetzen."
     >
       <ForgotPasswordForm />
     </AuthCardShell>

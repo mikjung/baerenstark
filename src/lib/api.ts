@@ -11,10 +11,20 @@
  *   RATE_LIMITED     429
  *   MAIL_FAILED      502
  *   INTERNAL_ERROR   500
+ *
+ * IT10 / STRUCT-3 — Subcode-Support:
+ *   `apiError({ code: 'CONFLICT', subcode: 'BOOKING_SLOT_TAKEN', ... })`
+ *   rendert `error.subcode` in der Response. Frontend liest primär den
+ *   Subcode (siehe contracts/api-routes.md §24.3.1).
+ *
+ * IT10 / STRUCT-1 — Logging-Härtung:
+ *   `internalError(err)` loggt jeden unbekannten Fehler mit Stack-Trace
+ *   und (bei Prisma-Errors) `code` + `meta`. HTTP-Antwort bleibt generisch.
  */
 
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
+import { Prisma } from '@prisma/client';
 
 export type ApiErrorCode =
   | 'VALIDATION_ERROR'
@@ -89,16 +99,28 @@ export interface ApiErrorOptions {
   code: ApiErrorCode;
   message: string;
   field?: string;
+  /**
+   * Optionaler semantischer Subcode (seit IT10 / STRUCT-3).
+   * Aktuell verwendet: `BOOKING_SLOT_TAKEN` für 409 CONFLICT auf
+   * `POST /api/bookings`, wenn der Konflikt aus dem Partial-Unique-Index
+   * `uniq_active_booking_per_timeslot` oder dem Serializable-Tx-Overlap-
+   * Check stammt. Frontend mapped primär auf den Subcode.
+   * Vertrag: contracts/api-routes.md §2 + §24.3.1.
+   */
+  subcode?: string;
   status?: number;
   headers?: Record<string, string>;
 }
 
 export function apiError(opts: ApiErrorOptions): NextResponse {
   const status = opts.status ?? STATUS_BY_CODE[opts.code];
-  const body: { error: { code: string; message: string; field?: string } } = {
+  const body: {
+    error: { code: string; message: string; field?: string; subcode?: string };
+  } = {
     error: { code: opts.code, message: opts.message },
   };
   if (opts.field) body.error.field = opts.field;
+  if (opts.subcode) body.error.subcode = opts.subcode;
 
   const headers = new Headers({ 'Cache-Control': 'no-store' });
   if (opts.headers) {
@@ -138,12 +160,58 @@ export function zodErrorResponse(err: ZodError): NextResponse {
 }
 
 /**
- * Default-Handler für unerwartete Fehler. Loggt den Fehler serverseitig,
- * schickt aber generische 500-Response.
+ * Default-Handler für unerwartete Fehler. Loggt den Fehler strukturiert
+ * serverseitig, schickt aber generische 500-Response (kein Stack/Code-
+ * Leak im Response-Body).
+ *
+ * IT10 / STRUCT-1 — Logging-Härtung:
+ *   - Alle unbekannten Errors loggen mit `[internal_error]`-Marker, plus
+ *     Klasse, Message und Stack-Trace.
+ *   - Prisma-Known-Request-Errors zusätzlich mit `[prisma_error]`-Marker
+ *     und `code` + `meta` (z. B. P2022 Column missing, P2002 Unique-
+ *     Constraint, P2025 Record not found, P2028 Tx-Timeout).
+ *   - Prisma-Initialization-Errors mit `[prisma_init_error]`-Marker.
+ *
+ * @param err - der gefangene Fehler.
+ * @param context - optionaler Endpoint-Marker (z. B. `'POST /api/bookings'`),
+ *   landet als Tag im Log-Eintrag und erleichtert die Vercel-Filterung.
  */
-export function internalError(err: unknown): NextResponse {
-  // eslint-disable-next-line no-console
-  console.error('[api] internal error:', err);
+export function internalError(err: unknown, context?: string): NextResponse {
+  const tag = context ? ` ${context}` : '';
+  const errAny = err as
+    | { name?: string; message?: string; stack?: string; code?: string; meta?: unknown }
+    | null
+    | undefined;
+  const name = errAny?.name ?? typeof err;
+  const message = errAny?.message ?? String(err);
+  const stack = errAny?.stack ?? '';
+
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[prisma_error]${tag} code=${err.code} name=${err.name} message=${message}`,
+      { meta: err.meta, stack },
+    );
+  } else if (err instanceof Prisma.PrismaClientInitializationError) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[prisma_init_error]${tag} name=${err.name} message=${message}`,
+      { stack },
+    );
+  } else if (err instanceof Prisma.PrismaClientValidationError) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[prisma_error]${tag} kind=validation name=${err.name} message=${message}`,
+      { stack },
+    );
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[internal_error]${tag} name=${name} message=${message}`,
+      { stack },
+    );
+  }
+
   return apiError({
     code: 'INTERNAL_ERROR',
     message: 'Interner Serverfehler. Bitte später erneut versuchen.',

@@ -20,6 +20,7 @@ import { useSearchParams } from 'next/navigation';
 import { BookingForm } from '@/components/booking/BookingForm';
 import { Calendar } from '@/components/booking/Calendar';
 import { BookingCalendar } from '@/components/booking/BookingCalendar';
+import { QuickBookingModal } from '@/components/booking/QuickBookingModal';
 import { SlotList } from '@/components/booking/SlotList';
 import {
   TimeSlotPicker,
@@ -90,6 +91,11 @@ export function BookingClient() {
   // === IT3-Modus: Datum + Zeit ===
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<SelectedTimeSlot | null>(null);
+
+  // === IT10 / US-IT10-04: Quick-Booking-Modal ===
+  const [isQuickBookingOpen, setIsQuickBookingOpen] = useState(false);
+  // Force-Reload für TimeSlotPicker (nach erfolgreichem Submit aus dem Modal).
+  const [slotReloadToken, setSlotReloadToken] = useState(0);
 
   // === IT5: Dauer-Auswahl ===
   const [durationMinutes, setDurationMinutes] = useState<number | null>(null);
@@ -214,6 +220,14 @@ export function BookingClient() {
 
   function handleTimeSlotSelect(slot: SelectedTimeSlot) {
     setSelectedTimeSlot(slot);
+    // IT10 / US-IT10-04: Bei normalem (non-rebook) Buchungs-Flow öffnet
+    // der Slot-Klick das QuickBookingModal — der Inline-Form-Pfad bleibt
+    // als JS-Off-Fallback erhalten und wird via Smooth-Scroll trotzdem
+    // zugänglich (Spec §5.1).
+    if (!isRebookMode) {
+      setIsQuickBookingOpen(true);
+      return;
+    }
     setTimeout(() => {
       document
         .getElementById('booking-form-section')
@@ -344,6 +358,10 @@ export function BookingClient() {
 
         {selectedDate && showTimeSlotPicker && (
           <TimeSlotPicker
+            // `key` erzwingt Remount nach erfolgreichem Submit aus dem
+            // QuickBookingModal — damit ist der gerade gebuchte Slot sofort
+            // als belegt sichtbar.
+            key={`${selectedDate}-${slotReloadToken}`}
             date={selectedDate}
             duration={durationMinutes}
             selectedSlot={selectedTimeSlot}
@@ -412,6 +430,38 @@ export function BookingClient() {
           }}
         />
       </section>
+
+      {/* IT10 / US-IT10-04 — Quick-Booking-Modal */}
+      {!isRebookMode && (
+        <QuickBookingModal
+          isOpen={isQuickBookingOpen}
+          onClose={() => setIsQuickBookingOpen(false)}
+          selectedTimeSlot={selectedTimeSlot}
+          defaultService={initialService ?? pickedService}
+          defaultValues={{
+            customerName: customer
+              ? `${customer.firstName} ${customer.lastName}`.trim()
+              : null,
+            customerEmail: customer?.email ?? null,
+            customerPhone: customer?.phone ?? null,
+            addressStreet: profileAddress?.streetAndNumber ?? null,
+            addressZip: profileAddress?.postalCode ?? null,
+            addressCity: profileAddress?.city ?? null,
+          }}
+          onSlotChange={() => {
+            // Modal schließt sich, Scroll zurück zum Slot-Picker.
+            setTimeout(() => {
+              document
+                .getElementById('slot-list-section')
+                ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 50);
+          }}
+          onSubmitSuccess={() => {
+            setSelectedTimeSlot(null);
+            setSlotReloadToken((n) => n + 1);
+          }}
+        />
+      )}
     </div>
   );
 }

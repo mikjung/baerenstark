@@ -107,6 +107,6 @@ export async function GET(
       updatedAt: booking.updatedAt.toISOString(),
     });
   } catch (err) {
-    return internalError(err);
+    return internalError(err, 'GET /api/customer/bookings/:id');
   }
 }

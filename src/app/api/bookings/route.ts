@@ -160,7 +160,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 
     return apiSuccess(data);
   } catch (err) {
-    return internalError(err);
+    return internalError(err, 'GET /api/bookings');
   }
 }
 
@@ -420,19 +420,29 @@ export async function POST(req: NextRequest): Promise<Response> {
         bookingCancelToken = created.cancelToken;
       } catch (err) {
         if (err instanceof BookingConflictError) {
+          // IT10 / STRUCT-3: subcode 'BOOKING_SLOT_TAKEN' bei Slot-Race,
+          // kein Subcode bei BUFFER_BLOCKED. `field: 'date'` damit das
+          // FE-Mapping greift (`code === 'CONFLICT' && field === 'date'`).
           return apiError({
             code: 'CONFLICT',
             message: err.message,
+            field: err.subcode === 'BOOKING_SLOT_TAKEN' ? 'date' : undefined,
+            subcode: err.subcode,
           });
         }
         if (
           err instanceof Prisma.PrismaClientKnownRequestError &&
           err.code === 'P2002'
         ) {
+          // IT10 / STRUCT-3: P2002 auf dem Partial-Unique-Index
+          // `uniq_active_booking_per_timeslot` ist die zweite Verteidigungs-
+          // linie der Race-Condition → ebenfalls subcode 'BOOKING_SLOT_TAKEN'.
           return apiError({
             code: 'CONFLICT',
             message:
-              'Dieses Zeitfenster wurde gerade gebucht. Bitte wählen Sie ein anderes.',
+              'Dieser Termin wurde inzwischen leider von jemand anderem gebucht. Bitte wählen Sie einen anderen Slot.',
+            field: 'date',
+            subcode: 'BOOKING_SLOT_TAKEN',
           });
         }
         throw err;
@@ -467,10 +477,15 @@ export async function POST(req: NextRequest): Promise<Response> {
           err instanceof Prisma.PrismaClientKnownRequestError &&
           err.code === 'P2002'
         ) {
+          // IT10 / STRUCT-3: konsistente Subcode-Antwort auch im Slot-Modus,
+          // falls künftig ein Unique-Constraint auf der Slot-Booking-Beziehung
+          // den Race auffängt. FE-Mapping bleibt einheitlich.
           return apiError({
             code: 'CONFLICT',
             message:
-              'Dieses Zeitfenster wurde gerade gebucht. Bitte wählen Sie ein anderes.',
+              'Dieser Termin wurde inzwischen leider von jemand anderem gebucht. Bitte wählen Sie einen anderen Slot.',
+            field: 'date',
+            subcode: 'BOOKING_SLOT_TAKEN',
           });
         }
         throw err;
@@ -529,6 +544,6 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   } catch (err) {
     if (err instanceof ZodError) return zodErrorResponse(err);
-    return internalError(err);
+    return internalError(err, 'POST /api/bookings');
   }
 }

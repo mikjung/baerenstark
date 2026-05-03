@@ -7,6 +7,21 @@
  *
  * Pfad in der Live-App: src/lib/schemas.ts (synchron mit dieser Datei).
  *
+ * Änderungen v1.7.0 (Iteration 10 — Bug-Triage & Customer-Self-Service,
+ * 2026-05-03 — siehe `ARCHITECTURE_IT10.md`):
+ *   **Keine Schema-Änderungen.** Iteration 10 enthält drei Bug-Fixes
+ *   (Konfig + Migrations-Drift, kein API-Vertrag betroffen) sowie zwei
+ *   Frontend-Features (Quick-Booking-Modal, Customer-Self-Service mit
+ *   Form-Pre-Fill), die ausschließlich bestehende Schemas wiederverwenden.
+ *   - US-IT10-04: Kein neues Schema. `CreateBookingSchema` /
+ *     `BookingFormSchema` decken Quick-Booking-Modal ab (FE reicht
+ *     `selectedTimeSlot` als Component-Prop ans Form).
+ *   - US-IT10-05: Kein neues Schema. Pre-Fill-Mapping
+ *     `CustomerUser.{firstName,lastName,email,phone,streetAndNumber,
+ *     postalCode,city}` → `BookingFormInput.{customerName,customerEmail,
+ *     customerPhone,addressStreet,addressZip,addressCity}` ist
+ *     FE-Logik (siehe `frontend-requirements.md` Iteration 10).
+ *
  * Änderungen v1.6.1 (QA-Revision nach `QA_DESIGN_REVIEW_IT6.md`,
  * 2026-05-03 — verbindlich, siehe `ARCHITECTURE_IT6.md` Anhang B):
  *   - **F3 (DTO-Leak strukturell):** `CustomerUserPublicSchema`,
@@ -1582,6 +1597,18 @@ export const ApiErrorSchema = z.object({
     ]),
     message: z.string(),
     field: z.string().optional(),
+    /**
+     * Optionaler semantischer Subcode (seit IT10 / STRUCT-3).
+     *
+     * Aktuell vergebene Subcodes:
+     *   - `BOOKING_SLOT_TAKEN` — `code: 'CONFLICT'`, HTTP 409,
+     *     `POST /api/bookings`. Race-Condition zwischen Slot-Anzeige
+     *     und Submit (siehe contracts/api-routes.md §24.3.1).
+     *
+     * Frontend-Mapping (verbindlich): primär `error.subcode`; Fallback
+     * bei fehlendem Subcode: `code === 'CONFLICT' && field === 'date'`.
+     */
+    subcode: z.string().optional(),
   }),
 });
 export type ApiError = z.infer<typeof ApiErrorSchema>;

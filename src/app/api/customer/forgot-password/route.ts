@@ -179,6 +179,6 @@ export async function POST(req: NextRequest): Promise<Response> {
       await sleep(LATENCY_FLOOR_MS - elapsed);
     }
     if (err instanceof ZodError) return zodErrorResponse(err);
-    return internalError(err);
+    return internalError(err, 'POST /api/customer/forgot-password');
   }
 }

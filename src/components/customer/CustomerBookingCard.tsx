@@ -23,10 +23,9 @@ import { Badge } from '@/components/ui/Badge';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { BookingStatusBadge } from '@/components/customer/BookingStatusBadge';
 import { ApiClientError, cancelCustomerBooking } from '@/lib/api-client';
 import {
-  PORTAL_STATUS_LABEL,
-  PORTAL_STATUS_TONE,
   formatBerlinDateLong,
   formatCentsAsEuro,
   formatTimeRange,
@@ -121,9 +120,7 @@ export function CustomerBookingCard({
             )}
           </p>
         </div>
-        <Badge tone={PORTAL_STATUS_TONE[booking.status]}>
-          {PORTAL_STATUS_LABEL[booking.status]}
-        </Badge>
+        <BookingStatusBadge status={booking.status} />
       </header>
 
       {booking.description && (
@@ -188,6 +185,15 @@ export function CustomerBookingCard({
       )}
 
       <div className="flex flex-wrap items-center gap-2">
+        {/* IT10 / US-IT10-05 — Detail-Link */}
+        <Link
+          href={`/konto/anfragen/${encodeURIComponent(booking.id)}`}
+          aria-label={`Details zur Anfrage vom ${dateLabel} ansehen`}
+          className="inline-flex items-center gap-1 text-sm text-baerenstark-wood underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
+        >
+          Details ansehen →
+        </Link>
+
         {/* Stornieren-Button (US-27) — nur wenn isCancellable */}
         {booking.isCancellable && (
           <Button

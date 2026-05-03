@@ -30,7 +30,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     }
     return apiSuccess(toCustomerPublic(user));
   } catch (err) {
-    return internalError(err);
+    return internalError(err, 'GET /api/customer/me');
   }
 }
 
@@ -85,6 +85,6 @@ export async function PATCH(req: NextRequest): Promise<Response> {
     return apiSuccess(toCustomerPublic(updated));
   } catch (err) {
     if (err instanceof ZodError) return zodErrorResponse(err);
-    return internalError(err);
+    return internalError(err, 'PATCH /api/customer/me');
   }
 }

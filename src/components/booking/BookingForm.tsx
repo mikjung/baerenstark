@@ -22,6 +22,7 @@ import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { FileUpload } from './FileUpload';
 import {
@@ -110,6 +111,8 @@ export function BookingForm({
   const [status, setStatus] = useState<FormStatus>({ kind: 'idle' });
   const [rebookSubmitting, setRebookSubmitting] = useState(false);
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+  // IT10 / Spec §4.4 — Reset-Bestätigung gegen versehentliches Reset auf Mobile.
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
 
   const initialService = isValidDefaultService(defaultService) ? defaultService : undefined;
 
@@ -289,6 +292,17 @@ export function BookingForm({
         setStatus({ kind: 'network' });
         return;
       }
+      // IT10 / ARCHITECTURE_IT10 §9.1 (STRUCT-3) — Slot-Belegt-Erkennung primär
+      // über `subcode`, Fallback über `code === 'CONFLICT'/'OVERLAP'` mit
+      // `field === 'date'`.
+      const isSlotTaken =
+        err.subcode === 'BOOKING_SLOT_TAKEN' ||
+        ((err.code === 'CONFLICT' || err.code === 'OVERLAP') && err.field === 'date');
+      if (isSlotTaken) {
+        setStatus({ kind: 'conflict' });
+        onSubmitted();
+        return;
+      }
       if (err.code === 'CONFLICT') {
         setStatus({ kind: 'conflict' });
         onSubmitted();
@@ -325,13 +339,23 @@ export function BookingForm({
           return;
         }
       }
+      // IT10 §1.2 / §4.2 — generische 4xx/5xx-Fehler bekommen die freundliche
+      // Brand-Microcopy mit Telefon-CTA. Niemals „Interner Serverfehler".
+      if (err.status >= 500 || err.code === 'INTERNAL_ERROR') {
+        setStatus({
+          kind: 'error',
+          message:
+            'Wir konnten Ihre Anfrage gerade nicht speichern. Bitte versuchen Sie es erneut oder rufen Sie uns an: 0157-74787512.',
+        });
+        return;
+      }
       setStatus({ kind: 'error', message: err.message });
       return;
     }
     setStatus({
       kind: 'error',
       message:
-        'Es ist ein unerwarteter Fehler aufgetreten. Bitte erneut versuchen oder direkt anrufen.',
+        'Wir konnten Ihre Anfrage gerade nicht speichern. Bitte versuchen Sie es erneut oder rufen Sie uns an: 0157-74787512.',
     });
   }
 
@@ -379,11 +403,22 @@ export function BookingForm({
 
       {status.kind === 'conflict' && (
         <div className="mb-5">
-          <Banner tone="error" title="Zeitfenster nicht mehr verfügbar" role="alert">
-            <p>
-              Dieses Zeitfenster wurde gerade von jemand anderem gebucht. Bitte
-              wähle einen anderen freien Termin aus der Liste.
+          <Banner tone="warning" title="Termin nicht mehr verfügbar" role="alert">
+            <p className="mb-3">
+              Dieser Termin wurde inzwischen leider von jemand anderem gebucht.
+              Bitte wählen Sie einen anderen Slot.
             </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                setStatus({ kind: 'idle' });
+                onClearSelection();
+              }}
+            >
+              Anderen Slot wählen
+            </Button>
           </Banner>
         </div>
       )}
@@ -392,8 +427,8 @@ export function BookingForm({
         <div className="mb-5">
           <Banner tone="warning" title="Zu viele Anfragen" role="alert">
             <p>
-              Du hast in kurzer Zeit zu viele Anfragen gesendet. Bitte versuche
-              es in ein paar Minuten erneut.
+              Zu viele Anfragen in kurzer Zeit. Bitte warten Sie einen Moment
+              und versuchen Sie es erneut.
             </p>
           </Banner>
         </div>
@@ -596,10 +631,7 @@ export function BookingForm({
           <Button
             type="button"
             variant="ghost"
-            onClick={() => {
-              reset();
-              setAttachmentIds([]);
-            }}
+            onClick={() => setResetConfirmOpen(true)}
             disabled={isBusy}
           >
             Zurücksetzen
@@ -609,6 +641,21 @@ export function BookingForm({
           {rebookToken ? 'Neuen Termin senden' : 'Anfrage absenden'}
         </Button>
       </div>
+
+      <ConfirmDialog
+        open={resetConfirmOpen}
+        title="Möchten Sie alle Eingaben verwerfen?"
+        description="Bereits eingetragene Felder gehen verloren — Datum und Slot bleiben erhalten."
+        confirmLabel="Ja, zurücksetzen"
+        cancelLabel="Abbrechen"
+        variant="danger"
+        onConfirm={() => {
+          reset();
+          setAttachmentIds([]);
+          setResetConfirmOpen(false);
+        }}
+        onCancel={() => setResetConfirmOpen(false)}
+      />
     </form>
   );
 }

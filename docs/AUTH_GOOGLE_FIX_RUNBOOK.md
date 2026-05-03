@@ -8,6 +8,11 @@ Meta-Developer-App), unterstützt vom Backend-Engineer.
 > `docs/GOOGLE_OAUTH_SETUP_GUIDE.md` (IT9 / US-IT9-04).** Dieses Runbook hier
 > ist Engineer-Sprache; der Setup-Guide ist Schritt-für-Schritt auf Deutsch
 > ohne Fachbegriffe.
+>
+> **Für Facebook-Setup gibt es analog `docs/FACEBOOK_OAUTH_SETUP_GUIDE.md`**
+> — gleiche Struktur, gleiche Tonalität, mit den Facebook-spezifischen
+> Schritten (App im Meta Developer Portal anlegen, Privacy-Policy-URL
+> Pflicht, App von „Entwicklung" auf „Live" schalten).
 
 > **Iteration 7 Update:** Es gibt jetzt einen Self-Service-Diagnose-Endpoint
 > `GET /api/auth/diagnose`. Der zeigt dir live, welche ENV-Vars gesetzt sind,
