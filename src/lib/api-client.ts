@@ -805,39 +805,70 @@ export async function uploadFile(
   file: File,
   options?: UploadFileOptions,
 ): Promise<UploadResponse> {
+  const tag = `[upload ${file.name}]`;
+  console.info(tag, 'Phase 1 — requestUploadToken', {
+    size: file.size,
+    type: file.type,
+  });
+
   // Phase 1 — Token-Anfrage.
   const tokenResp = await requestUploadToken({
     filename: file.name,
     contentType: file.type,
     sizeBytes: file.size,
   });
+  console.info(tag, 'Phase 1 OK — token received', {
+    blobPath: tokenResp.blobPath,
+    attachmentId: tokenResp.attachmentId,
+  });
 
   // Phase 2 — Direct-Upload Browser → Vercel Blob.
-  // `@vercel/blob/client.put()` nimmt den vom Server signierten Token entgegen
-  // und lädt direkt zur Blob-URL hoch. Kein Server-Function-Body involviert.
+  // 60-Sekunden-Timeout: wenn der Upload still hängt (z.B. CORS-Issue,
+  // Store-Mismatch, Network-Drop), wirft AbortError statt unendlich zu warten.
+  console.info(tag, 'Phase 2 — put() to Vercel Blob');
+  const timeoutAbort = new AbortController();
+  const userAbort = options?.signal;
+  const timeoutId = setTimeout(() => {
+    console.warn(tag, 'Phase 2 TIMEOUT after 60s');
+    timeoutAbort.abort();
+  }, 60_000);
+  if (userAbort) {
+    if (userAbort.aborted) timeoutAbort.abort();
+    else userAbort.addEventListener('abort', () => timeoutAbort.abort(), { once: true });
+  }
+
   let blob: { url: string };
   try {
     blob = await put(tokenResp.blobPath, file, {
       access: 'public',
       token: tokenResp.token,
       contentType: file.type,
-      // Multipart wird vom SDK ab größeren Dateien automatisch gewählt.
-      // Wir lassen den Default — funktioniert für Bilder + Videos sauber.
       onUploadProgress: options?.onProgress
-        ? (progress) =>
+        ? (progress) => {
+            console.debug(tag, 'progress', progress.percentage + '%');
             options.onProgress!({
               loaded: progress.loaded,
               total: progress.total,
               percentage: progress.percentage,
-            })
+            });
+          }
         : undefined,
-      abortSignal: options?.signal,
+      abortSignal: timeoutAbort.signal,
     });
+    console.info(tag, 'Phase 2 OK — blob url', blob.url);
   } catch (err) {
-    // `put()` wirft eigene Error-Klassen (BlobAccessError, BlobNotFoundError,
-    // ...). Wir mappen sie auf NETWORK_ERROR / RATE_LIMITED, damit das UI
-    // einen einheitlichen Pfad hat. Das User-Cancel via AbortSignal werfen
-    // wir transparent weiter — der Caller unterdrückt den Listing-Eintrag.
+    console.error(tag, 'Phase 2 FAILED', {
+      name: err instanceof Error ? err.constructor.name : typeof err,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    if (userAbort?.aborted) throw err;
+    if (timeoutAbort.signal.aborted && !userAbort?.aborted) {
+      throw new ApiClientError(
+        0,
+        'NETWORK_ERROR',
+        'Upload-Verbindung zeitüberschritten (60 s). Bitte erneut versuchen.',
+      );
+    }
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw err;
     }
@@ -846,12 +877,17 @@ export async function uploadFile(
         ? err.message
         : 'Datei konnte nicht hochgeladen werden.';
     throw new ApiClientError(0, 'NETWORK_ERROR', message);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   // Phase 3 — Confirm-Step. Trägt die finale `blob.url` am Attachment-Record
   // nach. Bei VALIDATION_ERROR / CONFLICT bekommt der User die normale
   // Server-Fehlermeldung.
-  return confirmUploadAttachment(tokenResp.attachmentId, blob.url);
+  console.info(tag, 'Phase 3 — confirmUploadAttachment');
+  const result = await confirmUploadAttachment(tokenResp.attachmentId, blob.url);
+  console.info(tag, 'Phase 3 OK — attachment confirmed');
+  return result;
 }
 
 // ---------------------------------------------------------------------------
