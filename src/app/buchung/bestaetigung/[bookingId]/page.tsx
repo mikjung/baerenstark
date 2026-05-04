@@ -109,6 +109,12 @@ export default async function BookingConfirmationPage({
       startTime={result.data.startTime}
       status={result.data.status}
       isFresh={isFresh}
+      customerName={result.data.customerName ?? null}
+      // IT12-Bugfix BUG-002: Backend (geplant Phase 4) liefert bei Token-Auth
+      // optional `customerEmail`. Wenn vorhanden zeigt die Konto-Card sie an;
+      // wenn nicht, fällt sie auf die alte Microcopy zurück.
+      customerEmail={result.data.customerEmail ?? null}
+      confirmationToken={token ?? null}
     />
   );
 }

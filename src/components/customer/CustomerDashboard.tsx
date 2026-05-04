@@ -69,10 +69,15 @@ export function CustomerDashboard({ customer, justVerified }: CustomerDashboardP
       setPastPage(1);
     } catch (err) {
       setStatus('error');
+      // IT12-S06 / ux-spec §3.6.1: Niemals technische Server-Strings wie
+      // „Interner Serverfehler" oder „INTERNAL_ERROR" zeigen — immer
+      // freundliche Brand-Microcopy mit Retry- und Telefon-Fallback.
+      const isServerError =
+        err instanceof ApiClientError && (err.status >= 500 || err.code === 'INTERNAL_ERROR');
       setErrorMessage(
-        err instanceof ApiClientError
-          ? err.message
-          : 'Wir konnten Ihre Anfragen nicht laden. Bitte versuchen Sie es erneut.',
+        isServerError || !(err instanceof ApiClientError)
+          ? 'Bitte versuchen Sie es in einer Minute erneut oder rufen Sie uns an: 0157-74787512.'
+          : err.message,
       );
     }
   }, []);

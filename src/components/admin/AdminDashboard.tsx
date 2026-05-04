@@ -1,23 +1,40 @@
 'use client';
 
-import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { signOut } from 'next-auth/react';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { AdminSlotManager } from './AdminSlotManager';
 import { BookingTable } from './BookingTable';
-import { ReviewModerationTable } from './ReviewModerationTable';
 import { UpcomingBookingsList } from './UpcomingBookingsList';
 import { WeeklyAvailabilityForm } from './WeeklyAvailabilityForm';
 import { ApiClientError, fetchAdminReviews } from '@/lib/api-client';
 
-type Tab = 'bookings' | 'slots' | 'availability' | 'reviews';
+type Tab = 'bookings' | 'slots' | 'availability';
+
+function parseTab(value: string | null): Tab {
+  return value === 'slots' || value === 'availability' || value === 'bookings'
+    ? value
+    : 'bookings';
+}
 
 export function AdminDashboard() {
-  const [tab, setTab] = useState<Tab>('bookings');
-  const [pendingReviewCount, setPendingReviewCount] = useState<number | null>(null);
+  // IT12-S14: Tab kann via `?tab=…`-Query gesetzt werden (Sidebar-Links).
+  const searchParams = useSearchParams();
+  const initialTab = parseTab(searchParams?.get('tab') ?? null);
+  const [tab, setTab] = useState<Tab>(initialTab);
 
-  // Lazy-Load Pending-Review-Count fürs Tab-Badge.
+  // Reagiere auf Query-Änderung (z. B. wenn Sidebar-Link erneut geklickt wird).
+  useEffect(() => {
+    const next = parseTab(searchParams?.get('tab') ?? null);
+    setTab(next);
+  }, [searchParams]);
+  // IT12-S14: Pending-Review-Count nicht mehr im Dashboard verwendet
+  // (Tab entfernt — siehe Sidebar). Wir lassen den Fetch dennoch, falls
+  // Tom später ein Notification-Pattern wünscht.
+  const [, setPendingReviewCount] = useState<number | null>(null);
+
+  // Lazy-Load Pending-Review-Count (Reserve für künftige Notification-UX).
   useEffect(() => {
     let cancelled = false;
     fetchAdminReviews()
@@ -27,8 +44,6 @@ export function AdminDashboard() {
       })
       .catch((err) => {
         if (cancelled) return;
-        // Wenn der Endpoint noch nicht existiert (Backend noch nicht deployed),
-        // ignorieren wir den Fehler still.
         if (err instanceof ApiClientError && err.status === 404) {
           setPendingReviewCount(null);
         }
@@ -39,7 +54,7 @@ export function AdminDashboard() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-12">
+    <div>
       <header className="mb-8 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="font-serif text-3xl font-bold text-baerenstark-bark sm:text-4xl">
@@ -59,16 +74,9 @@ export function AdminDashboard() {
         </Button>
       </header>
 
-      <nav
-        aria-label="IT6 Verwaltungsbereiche"
-        className="mb-6 flex flex-wrap gap-2 text-sm"
-      >
-        <QuickLink href="/admin/calendar">Kalender</QuickLink>
-        <QuickLink href="/admin/admins">Admins</QuickLink>
-        <QuickLink href="/admin/users">Nutzer</QuickLink>
-        <QuickLink href="/admin/analytics">Analytics</QuickLink>
-        <QuickLink href="/admin/reviews">Bewertungen</QuickLink>
-      </nav>
+      {/* IT12-S14: QuickLinks-Block entfernt — Navigation läuft jetzt
+          ausschließlich über die Sidebar (`AdminSidebar` mit 3 Gruppen).
+          „Bewertungen" darf in der Admin-Page DOM nur einmal vorkommen. */}
 
       <UpcomingBookingsList />
 
@@ -86,33 +94,16 @@ export function AdminDashboard() {
         <TabButton active={tab === 'availability'} onClick={() => setTab('availability')}>
           Verfügbarkeit
         </TabButton>
-        <TabButton
-          active={tab === 'reviews'}
-          onClick={() => setTab('reviews')}
-          badge={pendingReviewCount && pendingReviewCount > 0 ? pendingReviewCount : null}
-        >
-          Bewertungen
-        </TabButton>
+        {/* IT12-S14: Bewertungen-Tab entfernt — Duplikat zur Sidebar
+            "Auswertungen → Bewertungen" (acceptance-relevant). */}
       </div>
 
       <div role="tabpanel" aria-labelledby={tab}>
         {tab === 'bookings' && <BookingTable />}
         {tab === 'slots' && <AdminSlotManager />}
         {tab === 'availability' && <WeeklyAvailabilityForm />}
-        {tab === 'reviews' && <ReviewModerationTable />}
       </div>
     </div>
-  );
-}
-
-function QuickLink({ href, children }: { href: string; children: React.ReactNode }) {
-  return (
-    <Link
-      href={href}
-      className="inline-flex min-h-[44px] items-center rounded-md border border-baerenstark-sand bg-white px-3 py-2 text-baerenstark-bark hover:border-baerenstark-wood hover:bg-baerenstark-cream/40 transition-colors"
-    >
-      {children}
-    </Link>
   );
 }
 

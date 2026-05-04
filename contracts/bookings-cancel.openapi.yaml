@@ -195,6 +195,18 @@ paths:
                       customerName:
                         type: string
                         description: Display-Name des Kunden (vom User selbst eingegeben)
+                      customerEmail:
+                        type: string
+                        nullable: true
+                        format: email
+                        description: |
+                          IT12 Bug-Fix BUG-002 (v12.1): Vom User eingegebene
+                          E-Mail-Adresse. Wird ausgeliefert, sobald der
+                          Endpoint via Token-Auth oder Cookie-Auth
+                          authorisiert wurde — sonst hätte der Endpoint
+                          bereits 401 geantwortet. Konsumenten (nur die
+                          Bestätigungsseite) nutzen sie zum Vorausfüllen
+                          der „Konto erstellen?"-Card (US-IT12-S05 AC2).
         '401':
           description: TOKEN_EXPIRED, TOKEN_INVALID oder UNAUTHORIZED
           content:

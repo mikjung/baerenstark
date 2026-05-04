@@ -50,6 +50,12 @@ import {
   signBookingConfirmationToken,
   signBookingCancellationToken,
 } from '@/lib/booking-tokens';
+import {
+  readIdempotencyKey,
+  lookupIdempotencyResponse,
+  storeIdempotencyResponse,
+} from '@/lib/idempotency';
+import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -187,7 +193,25 @@ export async function GET(req: NextRequest): Promise<Response> {
  *   8. attachmentIds verknüpfen, fire-and-forget Mail.
  */
 export async function POST(req: NextRequest): Promise<Response> {
+  // IT12 / US-IT12-11 (M8) — Idempotency-Key-Header lesen. Wenn vorhanden
+  // und ein gecachter Response existiert: cached Response zurück, kein
+  // neuer Insert.
+  const idempotencyKey = readIdempotencyKey(req.headers);
+
   try {
+    if (idempotencyKey) {
+      const cached = await lookupIdempotencyResponse(idempotencyKey);
+      if (cached) {
+        return NextResponse.json(cached.body, {
+          status: cached.status,
+          headers: {
+            'Cache-Control': 'no-store',
+            'Idempotency-Replay': '1',
+          },
+        });
+      }
+    }
+
     const ip = getClientIp(req.headers);
     const limit = await bookingLimiter.limit(`booking:${ip}`);
     if (!limit.success) {
@@ -619,20 +643,38 @@ export async function POST(req: NextRequest): Promise<Response> {
     try {
       revalidateTag('slots');
       revalidateTag('available-slots');
+      // IT12 / US-IT12-11 — neue Buchung soll sofort im Customer-Dashboard
+      // erscheinen. Server-Component `/konto` cached pro Tag — wir erzwingen
+      // einen Re-Fetch.
+      revalidateTag('customer-bookings');
+      revalidateTag('availability');
     } catch {
       /* ignore */
     }
 
-    return apiSuccess(
-      {
+    const successBody = {
+      data: {
         id: bookingId,
         status: bookingStatus,
         createdAt: bookingCreatedAt.toISOString(),
         confirmationToken,
         cancellationToken,
       },
-      201,
-    );
+    };
+
+    // IT12 / M8 — Cache-Speichern (best-effort, nicht-blockierend).
+    if (idempotencyKey) {
+      void storeIdempotencyResponse(idempotencyKey, {
+        status: 201,
+        body: successBody,
+        scope: customerSession?.customerId ?? data.customerEmail ?? undefined,
+      });
+    }
+
+    return NextResponse.json(successBody, {
+      status: 201,
+      headers: { 'Cache-Control': 'no-store' },
+    });
   } catch (err) {
     if (err instanceof ZodError) return zodErrorResponse(err);
     return internalError(err, 'POST /api/bookings');

@@ -19,13 +19,15 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Input, Select, Textarea } from '@/components/ui/Input';
+import { BookingSubmitButton, type BookingSubmitButtonState } from './BookingSubmitButton';
 import { FileUpload } from './FileUpload';
+import { PrefillNotice } from '@/components/forms/PrefillNotice';
 import {
   ApiClientError,
   createBooking,
@@ -120,13 +122,18 @@ export function BookingForm({
 
   const initialService = isValidDefaultService(defaultService) ? defaultService : undefined;
 
+  // IT12-S11: Idempotency-Key für POST /api/bookings. Wird pro Submit-Versuch
+  // einmal generiert und bei Retry wiederverwendet (Backend cached
+  // Response 24h, kein doppelter Insert). Ref, weil kein Re-Render nötig.
+  const idempotencyKeyRef = useRef<string | null>(null);
+
   const {
     register,
     handleSubmit,
     reset,
     setError,
     watch,
-    formState: { errors, isSubmitting },
+    formState: { errors, isSubmitting, isDirty },
   } = useForm<BookingFormInput>({
     resolver: zodResolver(BookingFormSchema),
     mode: 'onBlur',
@@ -157,10 +164,48 @@ export function BookingForm({
   const watchedService = watch('service');
   const isCustomService = watchedService === 'sonstiges';
 
-  // Service-Wechsel an den Parent kommunizieren (für Preis-Schätzung).
+  // IT12-S09: Service-Wechsel an Parent NUR melden, wenn sich der Service
+  // tatsächlich geändert hat. Vor dem Fix feuerte der Effect bei jedem
+  // RHF-Re-Render und triggerte ein Parent-State-Update → Layout-Shift →
+  // Browser-Scroll-Behavior wirkte wie ein Sprung.
+  const lastServiceRef = useRef<string | null | undefined>(initialService);
   useEffect(() => {
-    onServiceChange?.(watchedService ?? null);
+    if (watchedService !== lastServiceRef.current) {
+      lastServiceRef.current = watchedService;
+      onServiceChange?.(watchedService ?? null);
+    }
   }, [watchedService, onServiceChange]);
+
+  // IT12-S08: Wenn Profil-Defaults nachträglich eintreffen (z. B. weil
+  // `useCustomer()` initial `loading` ist) und das Form noch unangefasst
+  // ist, übernehmen wir die neuen Defaults via `reset()`. Sobald der
+  // Nutzer ein Feld berührt hat (`isDirty`), überschreiben wir nichts mehr.
+  useEffect(() => {
+    if (isDirty) return;
+    reset({
+      customerName: defaultName ?? '',
+      customerPhone: defaultPhone ?? '',
+      customerEmail: defaultEmail ?? '',
+      service: initialService,
+      description: '',
+      addressStreet: profileAddress?.streetAndNumber ?? '',
+      addressZip: profileAddress?.postalCode ?? '',
+      addressCity: profileAddress?.city ?? '',
+      durationMinutes: 60,
+      privacyAccepted: undefined as unknown as true,
+    });
+    // Wenn Defaults wechseln, lastServiceRef anpassen, damit kein
+    // unnötiger onServiceChange-Trigger feuert.
+    lastServiceRef.current = initialService;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    defaultName,
+    defaultEmail,
+    defaultPhone,
+    profileAddress?.streetAndNumber,
+    profileAddress?.postalCode,
+    profileAddress?.city,
+  ]);
 
   // Genau eine Selektion muss gesetzt sein.
   const hasSelection = Boolean(selectedSlot) || Boolean(selectedTimeSlot);
@@ -259,13 +304,26 @@ export function BookingForm({
       attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
     };
 
+    // IT12-S11: Idempotency-Key generieren (oder vorherigen wiederverwenden).
+    if (!idempotencyKeyRef.current) {
+      idempotencyKeyRef.current =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `bk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+
     // Debug-Hilfe (siehe BUG_BOOKING_IT3 Patch 5).
     if (process.env.NODE_ENV !== 'production') {
       console.log('[BookingForm] Submit payload:', payload);
     }
 
+    // IT12-S11: Defensives try/catch/finally — Loading-State wird im
+    // `finally` IMMER zurückgesetzt, falls es nicht schon `success` ist.
+    // Verhindert „Loader bleibt stehen"-Bug bei stillen Promise-Rejections.
     try {
-      const res = await createBooking(payload);
+      const res = await createBooking(payload, {
+        idempotencyKey: idempotencyKeyRef.current,
+      });
       // IT11 / US-IT11-03 — Erfolgs-Toast und Redirect zur Bestätigungsseite.
       toast.success(
         `Anfrage gesendet — Tom meldet sich innerhalb von 24h. Telefonisch erreichbar: ${CONTACT.phoneDisplay}`,
@@ -280,12 +338,19 @@ export function BookingForm({
       );
       setStatus({ kind: 'success' });
       onSubmitted();
+      // Idempotency-Key nach Erfolg verbrauchen — nächstes Submit
+      // (z. B. „Weitere Anfrage stellen") generiert einen neuen.
+      idempotencyKeyRef.current = null;
       const tokenQuery = res.confirmationToken
         ? `?token=${encodeURIComponent(res.confirmationToken)}&new=true`
         : '?new=true';
       router.push(`/buchung/bestaetigung/${encodeURIComponent(res.id)}${tokenQuery}`);
     } catch (err) {
       handleApiError(err);
+    } finally {
+      // Sicherheitsnetz: Falls handleApiError den Status nicht gesetzt hat,
+      // gehen wir aus 'submitting' zurück nach 'idle'. Bei 'success' bleiben.
+      setStatus((s) => (s.kind === 'submitting' ? { kind: 'idle' } : s));
     }
   });
 
@@ -486,6 +551,25 @@ export function BookingForm({
         </div>
       ) : (
         <>
+          {/* IT12-S08: Hinweis zeigen, wenn min. ein Feld vorausgefüllt ist
+              (Name, E-Mail, Telefon oder Adresse). Variant 'all' wenn alle
+              Profil-Felder gefüllt sind, sonst 'partial'. */}
+          {(() => {
+            const hasName = Boolean(defaultName);
+            const hasEmail = Boolean(defaultEmail);
+            const hasPhone = Boolean(defaultPhone);
+            const hasAddr = Boolean(profileAddress);
+            const filledCount =
+              (hasName ? 1 : 0) + (hasEmail ? 1 : 0) + (hasPhone ? 1 : 0) + (hasAddr ? 1 : 0);
+            if (filledCount === 0) return null;
+            const allFilled = hasName && hasEmail && hasPhone && hasAddr;
+            return (
+              <div className="mb-4">
+                <PrefillNotice variant={allFilled ? 'all' : 'partial'} />
+              </div>
+            );
+          })()}
+
           <div className="grid gap-4 sm:grid-cols-2">
             <Input
               label="Name"
@@ -657,9 +741,24 @@ export function BookingForm({
             Zurücksetzen
           </Button>
         )}
-        <Button type="submit" isLoading={isBusy}>
-          {rebookToken ? 'Neuen Termin senden' : 'Anfrage absenden'}
-        </Button>
+        {rebookToken ? (
+          <Button type="submit" isLoading={isBusy}>
+            Neuen Termin senden
+          </Button>
+        ) : (
+          <BookingSubmitButton
+            type="submit"
+            state={
+              (status.kind === 'submitting'
+                ? 'submitting'
+                : isBusy
+                  ? 'submitting'
+                  : 'idle') as BookingSubmitButtonState
+            }
+            idleLabel="Anfrage absenden"
+            submittingLabel="Anfrage wird gesendet…"
+          />
+        )}
       </div>
 
       <ConfirmDialog

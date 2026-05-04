@@ -21,6 +21,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { JsonLd } from '@/components/seo/JsonLd';
+import { ServiceDetailHero } from '@/components/services/ServiceDetailHero';
 import { serviceJsonLd } from '@/lib/seo/jsonLd';
 import {
   formatPrice,
@@ -180,22 +181,32 @@ export default function ServiceDetailPage({ params }: PageProps) {
     <>
       <JsonLd data={serviceJsonLd(info.slug)} />
 
-      {/* Hero */}
+      {/* Hero — IT12-S02: echtes Foto + kleines Icon neben H1.
+          Layout Mobile: Heading-Block (Icon-32 + h1) → Foto darunter.
+          Layout Desktop: Foto rechts (60% Breite), Heading + Body links. */}
       <section
         aria-labelledby="service-title"
         className="relative overflow-hidden bg-gradient-to-b from-baerenstark-cream to-baerenstark-sand/40"
       >
-        <div className="mx-auto grid max-w-6xl gap-8 px-4 py-12 sm:px-6 sm:py-16 md:grid-cols-[1fr_auto] md:items-center md:py-20">
-          <div>
+        <div className="mx-auto grid max-w-6xl gap-8 px-4 py-10 sm:px-6 sm:py-14 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] md:items-center md:py-20">
+          <div className="order-2 md:order-1">
             <p className="mb-3 text-sm font-semibold uppercase tracking-wider text-baerenstark-wood">
               Service in {CONTACT.region}
             </p>
-            <h1
-              id="service-title"
-              className="mb-3 font-serif text-3xl font-bold leading-tight text-baerenstark-bark sm:text-4xl md:text-5xl"
-            >
-              {info.label}
-            </h1>
+            <div className="mb-3 flex items-center gap-3 sm:gap-4">
+              <span
+                aria-hidden="true"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-baerenstark-sand bg-baerenstark-cream text-lg sm:h-10 sm:w-10 sm:text-xl"
+              >
+                {info.icon}
+              </span>
+              <h1
+                id="service-title"
+                className="font-serif text-2xl font-bold leading-tight text-baerenstark-bark sm:text-3xl md:text-4xl"
+              >
+                {info.label}
+              </h1>
+            </div>
             <p className="mb-2 text-base font-medium text-baerenstark-wood">
               {info.short}
             </p>
@@ -226,13 +237,13 @@ export default function ServiceDetailPage({ params }: PageProps) {
               </a>
             </div>
           </div>
-          <div className="hidden md:block">
-            <div
-              aria-hidden="true"
-              className="flex h-44 w-44 items-center justify-center rounded-2xl border border-baerenstark-sand bg-white/70 text-7xl shadow-card"
-            >
-              {info.icon}
-            </div>
+          <div className="order-1 md:order-2">
+            <ServiceDetailHero
+              serviceSlug={info.slug}
+              serviceName={info.label}
+              fallbackIcon={info.icon}
+              priority
+            />
           </div>
         </div>
       </section>

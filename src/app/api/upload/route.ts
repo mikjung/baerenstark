@@ -47,10 +47,26 @@ const ACCEPTED_TYPES: ReadonlySet<string> = new Set(UPLOAD_ACCEPTED_CONTENT_TYPE
 /**
  * Sanitize-Dateiname: erlaubte Zeichen [A-Za-z0-9._-], ungültige werden zu `_`.
  * Verhindert Pfad-Traversal und ungültige Blob-Pfade.
+ *
+ * IT12 / US-IT12-10: deutsche Umlaute werden VOR dem Whitelist-Filter
+ * transliteriert (ü→ue etc.), damit Dateien wie `grünfläche.jpg` nicht
+ * komplett zu `gr_nfl_che.jpg` werden — bessere UX im Admin-Drawer.
  */
+function transliterateUmlauts(name: string): string {
+  return name
+    .replace(/ä/g, 'ae')
+    .replace(/ö/g, 'oe')
+    .replace(/ü/g, 'ue')
+    .replace(/Ä/g, 'Ae')
+    .replace(/Ö/g, 'Oe')
+    .replace(/Ü/g, 'Ue')
+    .replace(/ß/g, 'ss');
+}
+
 function sanitizeFilename(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? 'upload';
-  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 200);
+  const transliterated = transliterateUmlauts(base);
+  const cleaned = transliterated.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 200);
   return cleaned || 'upload';
 }
 
@@ -247,10 +263,30 @@ export async function POST(req: NextRequest): Promise<Response> {
         contentType: f.type,
       });
     } catch (err) {
-      console.error('[upload] vercel blob put failed:', err);
+      // IT12 / US-IT12-10 — defensives Logging mit Kontext.
+      // Häufigste Ursachen in Production: BLOB_READ_WRITE_TOKEN expired,
+      // wrong store, Marketplace-Integration unvollständig.
+      const errAny = err as
+        | { name?: string; message?: string; code?: string; status?: number }
+        | null
+        | undefined;
+      console.error(
+        `[upload] vercel blob put failed: name=${errAny?.name ?? 'unknown'} ` +
+          `code=${errAny?.code ?? 'none'} status=${errAny?.status ?? 'none'} ` +
+          `path=${blobPath} contentType=${f.type} size=${f.size}`,
+        { message: errAny?.message ?? String(err) },
+      );
+      // Spezifische Fehlermeldung wenn der Token-Auth-Failure erkennbar ist.
+      const msg = errAny?.message ?? '';
+      const isAuth =
+        /unauthorized|forbidden|401|403/i.test(msg) ||
+        errAny?.status === 401 ||
+        errAny?.status === 403;
       return apiError({
         code: 'INTERNAL_ERROR',
-        message: 'Upload zum Speicher fehlgeschlagen. Bitte später erneut versuchen.',
+        message: isAuth
+          ? 'Datei-Upload aktuell nicht möglich (Storage-Konfiguration). Bitte den Administrator informieren.'
+          : 'Upload zum Speicher fehlgeschlagen. Bitte später erneut versuchen.',
         status: 502,
       });
     }

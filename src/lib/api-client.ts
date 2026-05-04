@@ -106,17 +106,24 @@ interface RequestOptions {
   /** Wenn true, wird body NICHT JSON-serialisiert (z.B. FormData für Uploads). */
   rawBody?: boolean;
   signal?: AbortSignal;
+  /** Optional zusätzliche Header (z. B. Idempotency-Key, IT12-S11). */
+  headers?: Record<string, string>;
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, rawBody = false, signal } = opts;
+  const { method = 'GET', body, rawBody = false, signal, headers: extraHeaders } = opts;
 
   let response: Response;
   try {
     const isJson = body && !rawBody;
+    const baseHeaders: Record<string, string> = {};
+    if (isJson) baseHeaders['Content-Type'] = 'application/json';
+    const mergedHeaders = extraHeaders
+      ? { ...baseHeaders, ...extraHeaders }
+      : baseHeaders;
     response = await fetch(path, {
       method,
-      headers: isJson ? { 'Content-Type': 'application/json' } : undefined,
+      headers: Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined,
       body: rawBody ? (body as BodyInit) : isJson ? JSON.stringify(body) : undefined,
       signal,
       credentials: 'same-origin',
@@ -256,6 +263,7 @@ export interface CreateBookingResponse {
  */
 export async function createBooking(
   payload: CreateBookingInput & { rebookToken?: string },
+  opts?: { idempotencyKey?: string },
 ): Promise<CreateBookingResponse> {
   const { rebookToken, ...rest } = payload;
   if (rebookToken) {
@@ -269,9 +277,15 @@ export async function createBooking(
     }
     return rebookViaToken(rebookToken, rest.slotId);
   }
+  const headers: Record<string, string> = {};
+  if (opts?.idempotencyKey) {
+    // IT12-S11 / ARCHITECTURE_IT12 §R.8 — Idempotency-Key als UUID-Header.
+    headers['Idempotency-Key'] = opts.idempotencyKey;
+  }
   const res = await request<DataEnvelope<CreateBookingResponse>>('/api/bookings', {
     method: 'POST',
     body: rest,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
   });
   return res.data;
 }
@@ -702,6 +716,12 @@ export async function loginCustomer(
     '/api/customer/login',
     { method: 'POST', body: payload },
   );
+  // IT12-S07: Customer-Sync-Event triggern, damit Header / useCustomer-
+  // Subscriber den frischen Auth-State sofort kennen.
+  if (typeof window !== 'undefined') {
+    // dynamic import vermeidet circular dep + SSR-Crash
+    import('./customer-sync').then((m) => m.emitCustomerChanged()).catch(() => {});
+  }
   return res.data;
 }
 
@@ -750,6 +770,10 @@ export async function logoutCustomer(): Promise<void> {
   await request<DataEnvelope<{ loggedOut: boolean }>>('/api/customer/logout', {
     method: 'POST',
   });
+  // IT12-S07: Customer-State-Subscriber refreshen.
+  if (typeof window !== 'undefined') {
+    import('./customer-sync').then((m) => m.emitCustomerChanged()).catch(() => {});
+  }
 }
 
 /**
@@ -779,6 +803,215 @@ export async function updateCustomerProfile(
     body: payload,
   });
   return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// IT12-S05 — Konto aus Gast-Buchung anlegen
+// ---------------------------------------------------------------------------
+
+export interface RegisterFromBookingRequest {
+  bookingId: string;
+  confirmationToken: string;
+  password: string;
+}
+
+export interface RegisterFromBookingResponse {
+  customerId: string;
+  linkedBookingsCount: number;
+}
+
+/**
+ * POST /api/customer/register-from-booking — Token-gated Self-Service
+ * Account-Creation aus einer existierenden Gast-Buchung. Backend leitet
+ * Email/Vorname/Nachname aus dem `confirmationToken` ab; das Frontend
+ * sendet sie NICHT mit (sonst ließe sich der Endpoint missbrauchen).
+ *
+ * Spec: ARCHITECTURE_IT12.md §R.4 Endpoint #1 + §5.
+ *
+ * Response 201 setzt direkt das `customer-session`-Cookie via Set-Cookie —
+ * kein separater Login-Call nötig. Frontend ruft danach
+ * `emitCustomerChanged()`.
+ */
+export async function registerFromBooking(
+  payload: RegisterFromBookingRequest,
+): Promise<RegisterFromBookingResponse> {
+  const res = await request<RegisterFromBookingResponse>(
+    '/api/customer/register-from-booking',
+    { method: 'POST', body: payload },
+  );
+  // Bestand: andere Endpoints liefern `{ data: ... }`. Backend-Vertrag
+  // §R.4 listet die Response ohne Envelope. Wir akzeptieren beide Formate.
+  if (res && typeof res === 'object' && 'data' in res) {
+    return (res as unknown as { data: RegisterFromBookingResponse }).data;
+  }
+  return res;
+}
+
+// ---------------------------------------------------------------------------
+// IT12-S15 — Marketing-E-Mails (Admin-Seite, ARCHITECTURE_IT12.md §R.4)
+// ---------------------------------------------------------------------------
+
+export interface MarketingRecipient {
+  customerId: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  bookedServices: string[];
+  completedBookingCount: number;
+  lastBookingAt: string | null;
+  unsubscribedAt: string | null;
+}
+
+export interface MarketingRecipientListResponse {
+  data: MarketingRecipient[];
+  total: number;
+  page: number;
+  limit: number;
+  /** Hilfsfeld für UI-Quota-Anzeige (Resend Free 100/Tag). */
+  dailyQuotaRemaining?: number;
+}
+
+export interface MarketingRecipientFilters {
+  service?: string; // Komma-getrennte Slugs
+  hasBooked?: boolean;
+  unsubscribed?: boolean;
+  search?: string;
+  page?: number;
+  limit?: number;
+  signal?: AbortSignal;
+}
+
+export async function fetchMarketingRecipients(
+  filters: MarketingRecipientFilters = {},
+): Promise<MarketingRecipientListResponse> {
+  const search = new URLSearchParams();
+  if (filters.service) search.set('service', filters.service);
+  if (typeof filters.hasBooked === 'boolean')
+    search.set('hasBooked', String(filters.hasBooked));
+  if (typeof filters.unsubscribed === 'boolean')
+    search.set('unsubscribed', String(filters.unsubscribed));
+  if (filters.search) search.set('search', filters.search);
+  if (filters.page) search.set('page', String(filters.page));
+  if (filters.limit) search.set('limit', String(filters.limit));
+  const qs = search.toString();
+  const path = qs
+    ? `/api/admin/marketing/recipients?${qs}`
+    : '/api/admin/marketing/recipients';
+  // Backend liefert { data, total, page, limit }. Kein Envelope-Wrap.
+  return request<MarketingRecipientListResponse>(path, { signal: filters.signal });
+}
+
+export interface CreateMarketingEmailRequest {
+  subject: string;
+  body: string;
+  recipientIds: string[];
+  filterServices?: string[];
+  status: 'draft' | 'send';
+}
+
+export interface MarketingEmailCreatedResponse {
+  id: string;
+  status: 'draft' | 'sent' | 'partial_failure' | 'failed';
+  intendedRecipients?: number | null;
+  actualRecipients?: number | null;
+  successCount?: number | null;
+  failureCount?: number | null;
+}
+
+export async function createMarketingEmail(
+  payload: CreateMarketingEmailRequest,
+): Promise<MarketingEmailCreatedResponse> {
+  return request<MarketingEmailCreatedResponse>('/api/admin/marketing/emails', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export interface MarketingEmailSendResponse {
+  id: string;
+  intendedRecipients: number;
+  actualRecipients: number;
+  successCount: number;
+  failureCount: number;
+  status: 'sent' | 'partial_failure' | 'failed';
+  failedRecipients?: { email: string; errorMessage: string }[];
+  /**
+   * IT12-Bugfix BUG-001: Backend (Phase 4) kann bei `422 INVALID_RECIPIENTS`
+   * eine Liste der ausgeschlossenen Empfänger im Error-Detail mitliefern;
+   * im Erfolgsfall ist es immer leer/undefined.
+   */
+  excludedRecipients?: { customerId: string; reason: string }[];
+}
+
+/**
+ * IT12-Bugfix BUG-001 — Send-Call sendet jetzt einen vollen Body
+ * `{ recipientIds, subject, body }` statt eines leeren POST. Backend
+ * akzeptiert (laut neuem `SendBodySchema`) `recipientIds` als Pflicht;
+ * `subject` und `body` werden mitgesendet, damit auch der finale Stand
+ * aus dem Composer (auch nach Edits, siehe FIND-002) übermittelt wird.
+ *
+ * Erwartete Backend-Antworten:
+ *   - 200 mit `MarketingEmailSendResponse`
+ *   - 400 VALIDATION_ERROR
+ *   - 413 RECIPIENT_CAP_EXCEEDED
+ *   - 422 INVALID_RECIPIENTS (Bestandskunden-Filter / Unsubscribe-Filter)
+ *   - 429 DAILY_QUOTA_EXCEEDED
+ *   - 502 RESEND_ERROR
+ */
+export interface SendMarketingEmailPayload {
+  recipientIds: string[];
+  subject: string;
+  body: string;
+}
+
+export async function sendMarketingEmail(
+  emailId: string,
+  payload: SendMarketingEmailPayload,
+): Promise<MarketingEmailSendResponse> {
+  return request<MarketingEmailSendResponse>(
+    `/api/admin/marketing/emails/${encodeURIComponent(emailId)}/send`,
+    { method: 'POST', body: payload },
+  );
+}
+
+export async function testSendMarketingEmail(
+  emailId: string,
+): Promise<{ ok: true; sentTo: string }> {
+  return request<{ ok: true; sentTo: string }>(
+    `/api/admin/marketing/emails/${encodeURIComponent(emailId)}/test-send`,
+    { method: 'POST' },
+  );
+}
+
+export interface MarketingEmailListItem {
+  id: string;
+  subject: string;
+  recipientCount: number;
+  successCount?: number;
+  failureCount?: number;
+  status: 'draft' | 'queued' | 'sending' | 'sent' | 'partial_failure' | 'failed';
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface MarketingEmailListResponse {
+  data: MarketingEmailListItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export async function fetchMarketingEmails(params?: {
+  page?: number;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<MarketingEmailListResponse> {
+  const search = new URLSearchParams();
+  if (params?.page) search.set('page', String(params.page));
+  if (params?.limit) search.set('limit', String(params.limit));
+  const qs = search.toString();
+  const path = qs ? `/api/admin/marketing/emails?${qs}` : '/api/admin/marketing/emails';
+  return request<MarketingEmailListResponse>(path, { signal: params?.signal });
 }
 
 // ---------------------------------------------------------------------------
@@ -830,6 +1063,15 @@ export interface BookingPublicSummary {
   status: BookingStatus;
   createdAt: string;
   customerName: string;
+  /**
+   * IT12-Bugfix BUG-002 — Optional: Backend kann bei Token-Auth
+   * (`?token=<confirmationToken>`) die E-Mail-Adresse des Kunden
+   * mitliefern, damit die „Konto erstellen?"-Card sie vorausgefüllt
+   * anzeigen kann. Wenn das Backend das (noch) nicht liefert, bleibt
+   * das Feld undefined und die Card fällt auf die ältere Microcopy
+   * zurück.
+   */
+  customerEmail?: string;
 }
 
 /**

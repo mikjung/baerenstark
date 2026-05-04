@@ -34,6 +34,7 @@ import {
   fetchSlots,
   type RebookInfoResponse,
 } from '@/lib/api-client';
+import { scrollIntoViewIfNeeded } from '@/lib/scroll-into-view';
 import { useCustomer } from '@/lib/use-customer';
 import type { SlotPublic } from '@/lib/schemas';
 import { SERVICE_LIST, type Service } from '@/lib/services';
@@ -72,7 +73,11 @@ export function BookingClient() {
   // IT9 / US-IT9-02: Eingeloggten Kunden laden für Adress-Vorausfüllung
   // (siehe BookingForm `profileAddress`-Prop). Bei Gast-Buchungen bleibt
   // `customer === null` und das Form startet leer.
-  const { customer } = useCustomer();
+  // IT12-S08: Render-Gate auf den Customer-Status — solange `loading`,
+  // zeigen wir ein leichtes Skeleton statt Form mit leeren Feldern, um
+  // den Race zwischen Form-Mount und `/api/customer/me`-Antwort zu
+  // entschärfen. RHF initialisiert `defaultValues` nur einmalig beim Mount.
+  const { status: customerStatus, customer } = useCustomer();
 
   // Defensive Lese-Helper: Backend liefert die Adressfelder evtl. noch nicht
   // (Migration noch nicht deployed). Wir lesen sie via index-cast und fallen
@@ -198,12 +203,9 @@ export function BookingClient() {
     if (selectedTimeSlot && selectedTimeSlot.date !== date) {
       setSelectedTimeSlot(null);
     }
-    // Sanft zur Dauer-Sektion scrollen
-    setTimeout(() => {
-      document
-        .getElementById('duration-section')
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 50);
+    // IT12-S04: scrollIntoViewIfNeeded — kein Scroll, wenn das Ziel
+    // bereits sichtbar ist.
+    setTimeout(() => scrollIntoViewIfNeeded('duration-section'), 50);
   }
 
   function handleDurationSelect(minutes: number) {
@@ -211,28 +213,20 @@ export function BookingClient() {
     // Wenn der Kunde die Dauer wechselt, den bisher gewählten Zeitslot fallen lassen
     // (der gehört zur alten Dauer und ist nicht mehr gültig).
     setSelectedTimeSlot(null);
-    setTimeout(() => {
-      document
-        .getElementById('slot-list-section')
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 50);
+    setTimeout(() => scrollIntoViewIfNeeded('slot-list-section'), 50);
   }
 
   function handleTimeSlotSelect(slot: SelectedTimeSlot) {
     setSelectedTimeSlot(slot);
     // IT10 / US-IT10-04: Bei normalem (non-rebook) Buchungs-Flow öffnet
-    // der Slot-Klick das QuickBookingModal — der Inline-Form-Pfad bleibt
-    // als JS-Off-Fallback erhalten und wird via Smooth-Scroll trotzdem
-    // zugänglich (Spec §5.1).
+    // der Slot-Klick das QuickBookingModal — KEIN scrollIntoView nötig
+    // (IT12-S04 Fix: Modal-Open hatte unnötigen Scroll-Jump getriggert).
     if (!isRebookMode) {
       setIsQuickBookingOpen(true);
       return;
     }
-    setTimeout(() => {
-      document
-        .getElementById('booking-form-section')
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 50);
+    // Nur im Rebook-Mode: zur Inline-Form scrollen, falls nicht sichtbar.
+    setTimeout(() => scrollIntoViewIfNeeded('booking-form-section'), 50);
   }
 
   // Im Re-Booking-Modus brauchen wir keine Dauer-Auswahl (Slot enthält die Zeit).
@@ -246,6 +240,21 @@ export function BookingClient() {
       setDurationMinutes(DEFAULT_DURATION_MINUTES);
     }
   }, [selectedDate, durationMinutes, isRebookMode]);
+
+  // IT12-S08: Während `useCustomer` initial lädt, zeigen wir ein
+  // unscheinbares Skeleton statt der ganzen Buchungs-Sektion — sonst
+  // würde RHF mit leeren Defaults mounten und der Customer würde seine
+  // Profildaten nie sehen. Maximal ein paar 100ms wahrnehmbar.
+  if (customerStatus === 'loading') {
+    return (
+      <div className="space-y-10" aria-busy="true">
+        <div className="h-72 animate-pulse rounded-2xl bg-baerenstark-sand/30" />
+        <div className="h-32 animate-pulse rounded-xl bg-baerenstark-sand/20" />
+        <div className="h-80 animate-pulse rounded-2xl bg-baerenstark-sand/20" />
+        <span className="sr-only">Buchungsformular wird geladen…</span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-10">
@@ -378,11 +387,8 @@ export function BookingClient() {
             onSelect={(slot) => {
               if (!slot.isBooked) {
                 setSelectedSlotId(slot.id);
-                setTimeout(() => {
-                  document
-                    .getElementById('booking-form-section')
-                    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }, 50);
+                // IT12-S04: Nur scrollen wenn Form nicht bereits sichtbar.
+                setTimeout(() => scrollIntoViewIfNeeded('booking-form-section'), 50);
               }
             }}
             onRetry={loadLegacySlots}
@@ -449,12 +455,9 @@ export function BookingClient() {
             addressCity: profileAddress?.city ?? null,
           }}
           onSlotChange={() => {
-            // Modal schließt sich, Scroll zurück zum Slot-Picker.
-            setTimeout(() => {
-              document
-                .getElementById('slot-list-section')
-                ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }, 50);
+            // Modal schließt sich, Scroll zurück zum Slot-Picker (nur falls
+            // nicht schon sichtbar — IT12-S04).
+            setTimeout(() => scrollIntoViewIfNeeded('slot-list-section'), 50);
           }}
           onSubmitSuccess={() => {
             setSelectedTimeSlot(null);

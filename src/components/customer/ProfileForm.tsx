@@ -23,6 +23,7 @@ import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { ApiClientError, updateCustomerProfile } from '@/lib/api-client';
+import { emitCustomerChanged } from '@/lib/customer-sync';
 import { ZipCodeSchema, type CustomerUserPublic } from '@/lib/schemas';
 
 const ProfileFormSchema = z.object({
@@ -130,6 +131,9 @@ export function ProfileForm({ initialCustomer }: ProfileFormProps) {
           ? 'Profil aktualisiert. Adresse wurde entfernt.'
           : 'Adresse gespeichert.',
       );
+      // IT12-S07: Header / andere Customer-State-Subscriber refreshen, damit
+      // der Login-Status nach dem Profil-Save nicht auf „Anmelden" flackert.
+      emitCustomerChanged();
     } catch (err) {
       if (err instanceof ApiClientError) {
         if (err.code === 'VALIDATION_ERROR' && err.field) {

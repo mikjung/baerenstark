@@ -63,6 +63,9 @@ model User {
   // IT6 / US-IT6-03 — moderierte Reviews:
   moderatedReviews Review[] @relation("ReviewModeratedBy")
 
+  // IT12 / US-IT12-15 — gesendete Marketing-Mails (Audit).
+  marketingEmailsSent MarketingEmail[] @relation("MarketingEmailSentBy")
+
   @@index([status])
   @@map("users")
 }
@@ -123,13 +126,25 @@ model CustomerUser {
   /// Ort (App-Layer 2..100 chars).
   city            String?
 
+  // IT12 / US-IT12-15 — Marketing-Mail-Opt-Out (DSGVO Variante 3 / UWG §7 Abs. 3).
+  /// Zeitpunkt, an dem der Kunde sich von Marketing-Mails abgemeldet hat.
+  /// NULL = aktiv (Default — Bestandskunden-Sonderregel). Wenn gesetzt, werden
+  /// alle künftigen Marketing-Bulk-Sends an diesen Customer hart aussortiert.
+  /// Transaktionale Mails (Bestätigung, Storno, Reset) sind NICHT betroffen.
+  unsubscribedAt     DateTime?
+  /// Optionaler Grund — z.B. 'EMAIL_FOOTER' (Klick auf Unsubscribe-Link in
+  /// einer Marketing-Mail) oder 'ADMIN' (manuelle Markierung durch Tom).
+  unsubscribedReason String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  bookings            Booking[]
-  reviews             Review[]
+  bookings                 Booking[]
+  reviews                  Review[]
   /// IT7 / US-IT7-05 — Backref auf Reset-Token-Records.
-  passwordResetTokens PasswordResetToken[]
+  passwordResetTokens      PasswordResetToken[]
+  /// IT12 / US-IT12-15 — Backref auf Marketing-Mail-Empfänger-Records.
+  marketingEmailRecipients MarketingEmailRecipient[]
 
   @@index([email])
   @@index([oauthProvider, oauthId])
@@ -137,6 +152,8 @@ model CustomerUser {
   @@index([lastName, firstName])
   // IT6 / US-IT6-07 — Sort-Whitelist `adminRating_desc`.
   @@index([adminRating])
+  // IT12 / US-IT12-15 — Sparse-Index für Marketing-Filter (Default unsubscribed=null).
+  @@index([unsubscribedAt])
   @@map("customer_users")
 }
 
@@ -390,4 +407,98 @@ model BufferConfig {
   updatedAt     DateTime @updatedAt
 
   @@map("buffer_config")
+}
+
+/// IT12 / US-IT12-15 — Marketing-E-Mail Audit.
+///
+/// Dokumentiert, welcher Admin wann an wie viele Empfänger welche Mail
+/// gesendet hat. Werte (status):
+///   'draft'           — Mail im Composer angelegt, noch nicht versendet.
+///   'queued'          — Send-Trigger empfangen, Recipient-Set wird vorbereitet.
+///   'sending'         — Resend-Calls laufen.
+///   'sent'            — alle Empfänger erfolgreich versorgt.
+///   'partial_failure' — mind. 1 FAILED, mind. 1 SUCCESS.
+///   'failed'          — 0 SUCCESS (z.B. Resend-Outage).
+///
+/// Hard-Cap pro Send (IT12): 50 Empfänger (Vercel-Hobby-Timeout).
+/// Daily-Cap (IT12): 100/Tag (Resend Free).
+model MarketingEmail {
+  id             String    @id @default(cuid())
+  /// FK auf den absendenden Admin (NextAuth `User`). RESTRICT, damit der
+  /// Audit-Pfad nicht durch Admin-Löschung gebrochen wird.
+  sentByAdminId  String
+  sentByAdmin    User      @relation("MarketingEmailSentBy", fields: [sentByAdminId], references: [id], onDelete: Restrict)
+  /// Betreff (App-Layer 1..200 chars).
+  subject        String
+  /// Plain-Text-Body, von Tom verfasst (App-Layer 1..5000 chars). DSGVO-Footer
+  /// hängt der Server beim Senden automatisch dran (siehe `lib/marketing-mail.ts`).
+  bodyText       String
+  /// JSON-Array der Service-Slugs, die beim Empfänger-Filter aktiv waren —
+  /// reines Audit-Field, nicht ausgewertet beim Send.
+  filterServices String
+  /// Anzahl der Empfänger, an die TATSÄCHLICH gesendet wurde
+  /// (nach Unsubscribe-Filter).
+  recipientCount Int
+  /// Erfolgreiche Sends.
+  successCount   Int       @default(0)
+  /// Fehlgeschlagene Sends.
+  failureCount   Int       @default(0)
+  /// 'draft' | 'queued' | 'sending' | 'sent' | 'partial_failure' | 'failed'.
+  status         String    @default("draft")
+  createdAt      DateTime  @default(now())
+  /// Wenn alle Sends abgeschlossen sind.
+  completedAt    DateTime?
+
+  recipients MarketingEmailRecipient[]
+
+  @@index([sentByAdminId, createdAt])
+  @@index([status, createdAt])
+  @@map("marketing_emails")
+}
+
+/// IT12 / US-IT12-15 — Pro Empfänger ein Record (Audit + Status).
+///
+/// Werte (status): 'PENDING' | 'SENT' | 'FAILED'.
+/// Email ist Snapshot zum Sendezeitpunkt (auch wenn Customer später die
+/// E-Mail-Adresse ändert, bleibt der Audit-Eintrag korrekt).
+model MarketingEmailRecipient {
+  id               String         @id @default(cuid())
+  marketingEmailId String
+  marketingEmail   MarketingEmail @relation(fields: [marketingEmailId], references: [id], onDelete: Cascade)
+  customerId       String
+  customer         CustomerUser   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// Snapshot der E-Mail zum Sendezeitpunkt.
+  email            String
+  /// 'PENDING' | 'SENT' | 'FAILED'.
+  status           String         @default("PENDING")
+  /// Resend-Response-Message-ID (für späteres Bounce-Tracing).
+  resendMessageId  String?
+  /// Bei status='FAILED': die Fehlermeldung von Resend.
+  errorMessage     String?
+  sentAt           DateTime?
+  createdAt        DateTime       @default(now())
+
+  @@index([marketingEmailId, status])
+  @@index([customerId])
+  @@index([sentAt])
+  @@map("marketing_email_recipients")
+}
+
+/// IT12 / US-IT12-11 — Idempotency-Key-Cache für POST /api/bookings.
+///
+/// Bei doppeltem Submit mit gleichem Header `Idempotency-Key`:
+/// cached Response zurück, kein neuer Insert. TTL 24h.
+model IdempotencyKey {
+  id        String   @id @default(cuid())
+  /// Vom Frontend pro Submit generiert (UUID).
+  key       String   @unique
+  /// Optionaler Email-Bind (verhindert Cross-User-Re-Use).
+  scope     String?
+  /// JSON-stringified Response.
+  response  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("idempotency_keys")
 }

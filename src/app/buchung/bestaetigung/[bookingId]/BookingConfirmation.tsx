@@ -24,6 +24,8 @@ import { CONTACT } from '@/lib/contact';
 import { formatBerlinDateShort } from '@/lib/format';
 import { getServiceLabel } from '@/lib/services';
 import { OpenBookingDialogButton } from '@/components/booking/OpenBookingDialogButton';
+import { CreateAccountOfferSheet } from '@/components/booking/CreateAccountOfferSheet';
+import { useCustomer } from '@/lib/use-customer';
 
 interface BookingConfirmationProps {
   bookingId: string; // CUID, gekürzt anzeigen (erste 8 Zeichen)
@@ -33,6 +35,24 @@ interface BookingConfirmationProps {
   status?: string; // optional: PENDING / CONFIRMED — für Status-Badge
   /** True wenn Submit gerade frisch passiert ist (?new=true). */
   isFresh?: boolean;
+  /**
+   * IT12-S05 — Customer-Name aus dem Public-Summary-DTO (vom Buchungs-Submit).
+   * Wird in der „Konto erstellen?"-Card als „Hallo {firstName}, …"
+   * verwendet.
+   */
+  customerName?: string | null;
+  /**
+   * IT12-Bugfix BUG-002 — Optional: Customer-Email aus dem Public-Summary-DTO
+   * (Backend liefert sie bei Token-Auth). Wenn vorhanden, wird sie in der
+   * „Konto erstellen?"-Card vorausgefüllt; sonst zeigt die Card die ältere
+   * Microcopy „Wir verknüpfen das Konto mit der E-Mail aus Ihrer Anfrage.".
+   */
+  customerEmail?: string | null;
+  /**
+   * IT12-S05 — Confirmation-Token aus dem URL-Param `?token=…`. Nur dann ist
+   * die Konto-Anlage möglich (Backend leitet Email/Name aus dem Token ab).
+   */
+  confirmationToken?: string | null;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -51,11 +71,25 @@ export function BookingConfirmation({
   startTime,
   status,
   isFresh,
+  customerName,
+  customerEmail,
+  confirmationToken,
 }: BookingConfirmationProps) {
   const shortId = bookingId.slice(0, 8).toUpperCase();
   const serviceLabel = getServiceLabel(service);
   const dateLabel = date ? formatBerlinDateShort(date) : null;
   const statusLabel = status ? STATUS_LABEL[status] ?? status : null;
+  // IT12-S05: Konto-Anbieten nur, wenn (1) Submit frisch ist, (2) ein
+  // Confirmation-Token vorliegt, (3) der Nutzer NICHT eingeloggt ist.
+  const { status: customerStatus } = useCustomer();
+  const showAccountOffer =
+    isFresh &&
+    !!confirmationToken &&
+    customerStatus === 'unauthenticated';
+  const firstName =
+    customerName && customerName.trim().length > 0
+      ? customerName.trim().split(/\s+/)[0]
+      : null;
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-12 sm:py-16">
@@ -154,6 +188,21 @@ export function BookingConfirmation({
           </OpenBookingDialogButton>
         </div>
       </article>
+
+      {/* IT12-S05 + Bugfix BUG-002: Konto-Anbieten als Embedded-Card.
+          Wenn Backend bei Token-Auth `customerEmail` mitliefert, zeigt die
+          Card die Adresse vorausgefüllt + read-only an („Erstellen Sie ein
+          Konto für {email} …"). Falls das Backend die Email noch nicht
+          liefert (Race-Condition während Backend-Build), fällt die Card auf
+          die ältere Microcopy zurück. */}
+      {showAccountOffer && confirmationToken && (
+        <CreateAccountOfferSheet
+          bookingId={bookingId}
+          confirmationToken={confirmationToken}
+          displayEmail={customerEmail ?? ''}
+          displayFirstName={firstName}
+        />
+      )}
     </main>
   );
 }

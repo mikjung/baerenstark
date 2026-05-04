@@ -59,7 +59,9 @@ export type ApiErrorCode =
   | 'INVALID_CREDENTIALS'
   | 'EMAIL_ALREADY_REGISTERED'
   | 'INVALID_OR_EXPIRED_TOKEN'
-  | 'ALREADY_VERIFIED';
+  | 'ALREADY_VERIFIED'
+  // IT12 / US-IT12-15 Bug-Fix BUG-003 — Marketing-Send Recipient-Filter
+  | 'UNPROCESSABLE_ENTITY';
 
 const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   VALIDATION_ERROR: 400,
@@ -93,6 +95,8 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   EMAIL_ALREADY_REGISTERED: 409,
   INVALID_OR_EXPIRED_TOKEN: 410,
   ALREADY_VERIFIED: 409,
+  // IT12
+  UNPROCESSABLE_ENTITY: 422,
 };
 
 export interface ApiErrorOptions {

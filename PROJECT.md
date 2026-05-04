@@ -3474,4 +3474,556 @@ Story deckt ausschließlich die Kundenseite ab. Hängt von US-IT11-01 ab.
 3. **US-IT11-03 + US-IT11-05** — nach US-IT11-01, können parallel laufen.
 4. **US-IT11-04** — Diagnose sofort starten, End-to-End-Test nach US-IT11-01.
 5. **US-IT11-06** — nach US-IT11-01; kann parallel zu US-IT11-03/05 entwickelt werden.
+
+---
+
+## Iteration 12 — Stakeholder-Feedback-Sweep: Bug-Fixes & gezielte Verbesserungen
+
+### Iterations-Vision
+
+Iteration 12 behebt alle vom Inhaber Tom Siefert direkt gemeldeten Fehler aus dem
+Live-Betrieb (Google OAuth, Kalender-Performance, Scroll-Verhalten, Server-Fehler
+in Kunden- und Admin-Dashboard, Bild-Upload, Submission-Feedback) und liefert
+zusätzlich zwei produktive Verbesserungen: Service-Detailseiten erhalten echte
+Bilder, und Admins können gezielt Kunden per E-Mail ansprechen.
+
+---
+
+### Stories
+
+---
+
+#### IT12-S01: Google OAuth „Bad Request" in Produktion beheben
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 3
+
+**Repro-Schritte:**
+1. Produktionsseite aufrufen.
+2. „Mit Google anmelden" klicken.
+3. Google-Consent-Bildschirm erscheint, nach Bestätigung Weiterleitung zurück.
+4. Fehlermeldung: „Bad request" auf `/api/auth/customer/google` oder `/api/auth/customer/callback/google`.
+
+**Als** nicht eingeloggter Kunde
+**möchte ich** mich mit meinem Google-Konto anmelden können,
+**damit** ich mich nicht mit E-Mail und Passwort registrieren muss.
+
+**Akzeptanzkriterien:**
+
+- **Given** die Redirect-URI `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google` ist in der Google Cloud Console hinterlegt und `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` sind in Vercel gesetzt,
+  **When** ein Kunde auf der Produktionsseite „Mit Google anmelden" klickt und den Google-Consent-Bildschirm bestätigt,
+  **Then** wird er ohne Fehlermeldung auf das Kunden-Dashboard weitergeleitet und ist eingeloggt.
+
+- **Given** der Solution Architect den NextAuth-Provider-Code für `customer` prüft,
+  **When** er die `callbackUrl`-Logik und die `providers`-Konfiguration in `[...nextauth].ts` (Customer-Route) analysiert,
+  **Then** ist dokumentiert, ob die Route `/api/auth/customer/[...nextauth]` korrekt das NextAuth-Handler-Setup enthält (insbesondere: kein manuelles `redirect_uri`-Override, das vom Wert in Google Cloud abweicht).
+
+- **Given** der Fix deployed ist,
+  **When** ein Tester den OAuth-Flow in der Produktionsumgebung durchläuft,
+  **Then** gibt es keinen HTTP-4xx-Fehler im Vercel-Log für die Callback-Route.
+
+**Hinweis für den Architect:** Wahrscheinlichste Ursachen: (1) NextAuth `NEXTAUTH_URL` in Vercel auf falschem Wert (z. B. ohne `www.`), sodass NextAuth intern eine abweichende `redirect_uri` berechnet; (2) Die Customer-NextAuth-Route überschreibt `callbackUrl` manuell mit einem hardcodierten Wert; (3) Der NextAuth-Handler ist nicht korrekt als Catch-all-Route (`[...nextauth]`) eingerichtet und beantwortet die Callback-Route nicht. `NEXTAUTH_URL` in Vercel muss exakt `https://www.baerenstark-hausservice.app` lauten.
+
+---
+
+#### IT12-S02: Service-Detailseiten — echte Bilder + Icon neben Servicenamen
+
+**Klassifikation:** Enhancement (Feature)
+**Priorität:** Must Have | **Story Points:** 2
+
+**Als** Website-Besucher
+**möchte ich** auf einer Service-Detailseite ein aussagekräftiges Foto des Services sehen und das Icon kompakt neben dem Servicenamen,
+**damit** ich schnell einen visuellen Eindruck des Angebots bekomme.
+
+**Akzeptanzkriterien:**
+
+- **Given** ein Besucher die Detailseite von „Grünflächenpflege" aufruft,
+  **When** die Seite lädt,
+  **Then** erscheint das Bild `grünflächenpflege.png` aus `/public` als Hero-Bild an der Stelle, an der bisher das Icon prominent stand, und das Icon ist links neben dem Servicenamen in kleinerer Größe platziert.
+
+- **Given** die Mapping-Tabelle Service → Bilddatei:
+  `Grünflächenpflege` → `grünflächenpflege.png`,
+  `Entrümpelungen` → `entruemplungen.png`,
+  `Entkernungsarbeiten` → `entkernungsarbeiten.png`,
+  `Reinigungsarbeiten` → `reinigungsarbeiten.png`,
+  `Mülltonnenservice` → `mülltonnenservice.png`,
+  `Entsorgung Schrott & Metalle` → `metal_schrott.png`,
+  **When** eine dieser Detailseiten aufgerufen wird,
+  **Then** wird das jeweils zugeordnete Bild angezeigt — kein Fallback-Platzhalter, kein fehlendes Bild.
+
+- **Given** das Bild für einen Service nicht in `/public` vorhanden wäre (zukünftiger Edge-Case),
+  **When** die Detailseite lädt,
+  **Then** erscheint ein neutraler Fallback-Container (grauer Hintergrund mit dem Icon), kein 404-Fehler und kein kaputtes `<img>`-Tag.
+
+---
+
+#### IT12-S03: Buchungskalender — Ladezeit und Tage-Klickbarkeit reparieren
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 5
+
+**Repro-Schritte:**
+1. Buchungsformular aufrufen (nicht eingeloggt).
+2. Auf den Schritt „Wann?" klicken.
+3. Kalender erscheint — lädt sehr langsam, Tage sind nicht anklickbar.
+
+**Als** Kunde
+**möchte ich** einen Buchungstermin im Kalender schnell auswählen können,
+**damit** der Buchungsvorgang flüssig und intuitiv ist.
+
+**Akzeptanzkriterien:**
+
+- **Given** ein Besucher das Buchungsformular öffnet und den Schritt „Wann?" erreicht,
+  **When** der Kalender rendert,
+  **Then** ist der Kalender in unter 1,5 Sekunden vollständig sichtbar (gemessen ab Navigation zum Schritt „Wann?").
+
+- **Given** der Kalender vollständig geladen ist,
+  **When** der Nutzer auf einen verfügbaren Tag klickt,
+  **Then** wird dieser Tag als ausgewählt markiert (visuelles Feedback) und der Buchungsfluss kann auf den nächsten Schritt voranschreiten.
+
+- **Given** der Solution Architect die Ursache der Langsamkeit analysiert,
+  **When** er die Kalenderkomponente und den zugehörigen API-Aufruf untersucht,
+  **Then** ist dokumentiert, ob die Ursache ein fehlender `await`/async-Fehler, eine unoptimierte Datenbankabfrage für verfügbare Slots, ein fehlender Index auf der `TimeSlot`-Tabelle, oder ein State-Management-Problem ist — und die Ursache ist behoben.
+
+- **Given** ein Tag keine verfügbaren Zeitfenster hat,
+  **When** der Nutzer auf diesen Tag klickt,
+  **Then** ist der Tag visuell als nicht auswählbar markiert (z. B. ausgegraut) und ein Klick darauf hat keine Auswirkung.
+
+**Hinweis für den Architect:** Wahrscheinlichste Ursachen: (1) `GET /api/availability` oder vergleichbarer Endpoint wird bei jedem Kalender-Render ohne Debounce/Caching aufgerufen; (2) Der Kalender-State ist falsch initialisiert — `onDayClick`-Handler ist nicht registriert; (3) Verfügbarkeits-API macht N+1-Queries pro Tag; (4) Fehlender DB-Index auf `TimeSlot.date`.
+
+---
+
+#### IT12-S04: Scroll-Jump nach Slot-Auswahl bei „Wie lange?" unterbinden
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 2
+
+**Repro-Schritte:**
+1. Buchungsformular aufrufen.
+2. Schritt „Wie lange?" erreichen.
+3. Einen Zeitslot auswählen → Seite springt nach oben.
+
+**Als** Kunde
+**möchte ich** beim Auswählen eines Zeitslots keine unbeabsichtigte Seitennavigation erleben,
+**damit** der Buchungsfluss nicht verwirrend wirkt.
+
+**Akzeptanzkriterien:**
+
+- **Given** der Nutzer den Schritt „Wie lange?" im Buchungsformular aufgerufen hat,
+  **When** er einen Zeitslot auswählt,
+  **Then** bleibt die Scrollposition der Seite unverändert — kein Sprung zum Seitenanfang.
+
+- **Given** der Fix deployed ist,
+  **When** der Nutzer mehrere Slots hintereinander auswählt,
+  **Then** scrollt die Seite bei keiner Auswahl unbeabsichtigt.
+
+**Hinweis für den Architect:** Ursache ist wahrscheinlich ein `<button>` oder `<a>`-Element ohne `type="button"` in einem `<form>`-Kontext (Default-Submit löst Seiten-Reload aus) oder ein `router.push`/`window.scrollTo(0,0)` im `onChange`-Handler.
+
+---
+
+#### IT12-S05: Nach Gast-Buchung Konto-Erstellung anbieten
+
+**Klassifikation:** Feature
+**Priorität:** Must Have | **Story Points:** 3
+
+**Als** Gast (nicht eingeloggt), der gerade eine Buchungsanfrage abgesendet hat,
+**möchte ich** gefragt werden, ob ich mit den eingegebenen Daten ein Kundenkonto anlegen möchte,
+**damit** ich meine Anfragen später einsehen und verwalten kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ein nicht eingeloggter Nutzer eine Buchungsanfrage erfolgreich absendet,
+  **When** die Bestätigungsseite oder das Erfolgsfeedback erscheint,
+  **Then** wird ihm unterhalb der Bestätigungsnachricht ein Hinweis angezeigt: „Möchten Sie ein Konto anlegen, um Ihre Anfragen zu verwalten?" mit einem Button „Jetzt Konto erstellen".
+
+- **Given** der Nutzer auf „Jetzt Konto erstellen" klickt,
+  **When** die Registrierungsseite oder ein Modal öffnet,
+  **Then** sind E-Mail-Adresse, Vorname und Nachname aus dem Buchungsformular bereits vorausgefüllt — der Nutzer muss nur noch ein Passwort setzen.
+
+- **Given** der Nutzer das Konto-Erstellen-Angebot ablehnt (ignoriert oder schließt),
+  **When** er das Feedback-Modal verlässt,
+  **Then** ist keine Aktion erforderlich — die Buchungsanfrage bleibt gespeichert, das Angebot erscheint nicht erneut im selben Session-Kontext.
+
+- **Given** der Nutzer bereits eingeloggt ist und eine Buchung absendet,
+  **When** die Bestätigung erscheint,
+  **Then** wird das Konto-Erstellen-Angebot nicht angezeigt.
+
+---
+
+#### IT12-S06: Kundendashboard — „Anfragen konnten nicht geladen werden" beheben
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 3
+
+**Repro-Schritte:**
+1. Als Kunde einloggen.
+2. Dashboard unter `/konto` aufrufen.
+3. Fehlermeldung: „Wir konnten Ihre Anfragen nicht laden. Interner Serverfehler. Bitte später erneut versuchen."
+
+**Als** eingeloggter Kunde
+**möchte ich** meine Buchungsanfragen in meinem Dashboard sehen,
+**damit** ich den Status meiner Aufträge verfolgen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt und rufe `/konto` auf,
+  **When** die Seite lädt,
+  **Then** werden meine Buchungsanfragen (auch wenn keine vorhanden: leere Liste mit Hinweis) ohne Fehlermeldung angezeigt.
+
+- **Given** der Solution Architect die API-Route `GET /api/customer/bookings` (oder vergleichbar) in den Vercel-Logs analysiert,
+  **When** der Fehler identifiziert ist,
+  **Then** ist die Ursache (fehlende Session-Überprüfung, Prisma-Fehler, fehlende Spalte im Schema) dokumentiert und behoben.
+
+- **Given** der Fix deployed ist,
+  **When** ein eingeloggter Kunde ohne Buchungen das Dashboard aufruft,
+  **Then** erscheint der Text „Sie haben noch keine Buchungsanfragen" — kein Fehler, keine leere weiße Fläche.
+
+**Hinweis für den Architect:** Wahrscheinlich dieselbe Ursache wie IT12-S10 (Admin-Seiten-Fehler) — Datenbankschema in Produktion weicht vom Prisma-Schema ab (fehlende Migration). Prüfen: Ist `prisma migrate deploy` nach IT11 tatsächlich ausgeführt worden? Vercel-Log-Eintrag für den fehlgeschlagenen GET-Call prüfen.
+
+---
+
+#### IT12-S07: „Anmelden"-Button nach Profil-Speichern — Login-State konsistent halten
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 2
+
+**Repro-Schritte:**
+1. Als Kunde einloggen.
+2. Unter `/konto/profil` die Adresse bearbeiten und speichern.
+3. Der „Anmelden"-Button erscheint in der Navigation, obwohl der Nutzer eingeloggt ist.
+
+**Als** eingeloggter Kunde
+**möchte ich** nach dem Speichern meiner Profildaten weiterhin als eingeloggt angezeigt werden,
+**damit** die Navigation keinen irreführenden „Anmelden"-Button zeigt.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt und speichere Änderungen in meinem Profil,
+  **When** die Speichern-Aktion abgeschlossen ist,
+  **Then** zeigt die Navigation weiterhin meinen Nutzernamen oder „Mein Konto" — kein „Anmelden"-Button.
+
+- **Given** der Fix deployed ist,
+  **When** ich mehrfach hintereinander Profiländerungen speichere,
+  **Then** bleibt die Navigation konsistent — der Login-State wird nie als ausgeloggt angezeigt.
+
+**Hinweis für den Architect:** Wahrscheinliche Ursache: Nach dem API-Call zum Speichern der Profildaten wird `router.refresh()` oder `router.push()` aufgerufen, was eine neue Serverkomponente rendert — dabei wird die Session-Prop nicht korrekt weitergereicht oder ein `update()` von `useSession()` fehlt. Alternativ: Die Profil-Speichern-Route ruft versehentlich `signOut()` auf.
+
+---
+
+#### IT12-S08: Buchungsformular (eingeloggt) — Profildaten vorausfüllen
+
+**Klassifikation:** Enhancement (Feature)
+**Priorität:** Must Have | **Story Points:** 3
+
+**Als** eingeloggter Kunde
+**möchte ich** das Buchungsformular mit meinen hinterlegten Profildaten vorausgefüllt sehen,
+**damit** ich keine bereits bekannten Informationen erneut eingeben muss und keine Anfragen unter falschem Namen möglich sind.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt und öffne das Buchungsformular,
+  **When** das Formular lädt,
+  **Then** sind die Felder Name, E-Mail, Telefon sowie — falls im Profil vorhanden — Straße & Hausnummer, PLZ und Ort mit meinen Profildaten vorausgefüllt.
+
+- **Given** `GET /api/customer/me` gibt HTTP 200 mit Profildaten zurück,
+  **When** das Buchungsformular initialisiert wird,
+  **Then** werden die `defaultValues` von React Hook Form mit den geladenen Profildaten befüllt — das Formular zeigt sofort die Werte, ohne dass der Nutzer warten muss.
+
+- **Given** ich ein vorausgefülltes Feld ändere und die Buchung absende,
+  **When** die Buchung gespeichert wird,
+  **Then** wird der geänderte Formulärwert für diese Buchung verwendet — meine Profildaten im Konto werden nicht überschrieben.
+
+- **Given** ich nicht eingeloggt bin,
+  **When** das Buchungsformular lädt,
+  **Then** sind alle Felder leer — kein Fehler, kein unerwartetes Verhalten.
+
+**Hinweis für den Architect:** Diese Story überschneidet sich mit US-IT11-05 — prüfen, ob der Fix aus IT11 tatsächlich in Produktion aktiv ist. Falls ja: nur verifizieren und Story als Retest abhaken. Falls nein: `useCustomer()`-Hook und `BookingForm`-Initialisierung neu analysieren.
+
+---
+
+#### IT12-S09: Buchungsformular — Scroll-Jump bei Feldwechsel unterbinden
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 2
+
+**Repro-Schritte:**
+1. Als Kunde einloggen.
+2. Buchungsformular aufrufen.
+3. Zwischen Formularfeldern wechseln → Seite springt jedes Mal nach oben.
+
+**Als** eingeloggter Kunde
+**möchte ich** beim Ausfüllen des Buchungsformulars keine ungewollten Scrollsprünge erleben,
+**damit** das Ausfüllen des Formulars komfortabel und flüssig ist.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt und fülle das Buchungsformular aus,
+  **When** ich zwischen Feldern wechsle (Tab, Klick, Eingabe),
+  **Then** bleibt die Scrollposition unverändert — kein Sprung zum Seitenanfang.
+
+- **Given** der Fix deployed ist,
+  **When** ich das komplette Formular von oben nach unten ausfülle,
+  **Then** findet kein einziger unbeabsichtigter Scroll-Event statt.
+
+**Hinweis für den Architect:** Dieselbe Wurzel wie IT12-S04 — `<button>`-Elemente ohne `type="button"` in einem `<form>` oder ein `useEffect`/`onChange`-Handler der `window.scrollTo` aufruft. Auch prüfen: Wird bei jedem Feldwechsel eine Serverkomponente neu gerendert (z. B. durch falschen `router.push` statt `router.replace`)? React Hook Form mit `mode: "onChange"` darf keine Navigation triggern.
+
+---
+
+#### IT12-S10: Bild-Upload im Buchungsformular reparieren (INTERNAL_ERROR)
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 3
+
+**Repro-Schritte:**
+1. Buchungsformular aufrufen (eingeloggt).
+2. Bild für den Auftrag hochladen.
+3. Fehlermeldung: „Upload zum Speicher fehlgeschlagen. Bitte später erneut versuchen. (INTERNAL_ERROR)".
+
+**Als** Kunde
+**möchte ich** Bilder zum Buchungsformular hochladen können,
+**damit** Tom bereits vor dem Termin einen visuellen Eindruck des Auftrags bekommt.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich wähle im Buchungsformular eine Bilddatei (JPEG/PNG, max. 10 MB) aus,
+  **When** der Upload-Button gedrückt wird,
+  **Then** wird das Bild erfolgreich zu Vercel Blob hochgeladen und eine öffentliche URL zurückgegeben — kein INTERNAL_ERROR.
+
+- **Given** der Solution Architect den Upload-Endpoint analysiert,
+  **When** er `POST /api/upload` (oder vergleichbar) in den Vercel-Logs prüft,
+  **Then** ist dokumentiert, ob `BLOB_READ_WRITE_TOKEN` in Vercel gesetzt ist, ob der Endpoint korrekt den `@vercel/blob`-Client verwendet, und ob der Fehler im Client-Code oder im Vercel-Blob-Service liegt.
+
+- **Given** ein Bild erfolgreich hochgeladen wurde,
+  **When** Tom die Buchungsanfrage im Admin-Dashboard öffnet,
+  **Then** wird das Bild als Vorschau oder Download-Link angezeigt.
+
+- **Given** eine Datei die Größenbeschränkung (10 MB Bild, 50 MB Video) überschreitet,
+  **When** der Upload versucht wird,
+  **Then** erscheint eine verständliche Fehlermeldung auf Deutsch — kein INTERNAL_ERROR, kein technischer Stack-Trace.
+
+**Hinweis für den Architect:** Wahrscheinlichste Ursachen: (1) `BLOB_READ_WRITE_TOKEN` nicht in Vercel-Environment-Variables gesetzt; (2) `@vercel/blob` ist nicht als Dependency installiert oder die API stimmt nicht mit der installierten Version überein; (3) Die Vercel-Blob-Integration ist nicht im Vercel-Projekt aktiviert. Vercel-Logs zum Zeitpunkt des INTERNAL_ERROR prüfen.
+
+---
+
+#### IT12-S11: Buchungsformular — Submission-Feedback reparieren und Anfragen im Dashboard anzeigen
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 5
+
+**Repro-Schritte:**
+1. Eingeloggt sein.
+2. Buchungsformular vollständig ausfüllen und „Anfrage absenden" klicken.
+3. Loader „Anfrage wird gesendet" erscheint — bleibt dauerhaft, kein Erfolgs- oder Fehlerfeedback.
+4. Erneutes Klicken bewirkt nichts.
+5. Buchungsanfrage erscheint nicht im Kundenkonto.
+
+**Als** eingeloggter Kunde
+**möchte ich** nach dem Absenden des Buchungsformulars klares Feedback erhalten und meine Anfrage im Dashboard sehen,
+**damit** ich weiß, ob meine Anfrage erfolgreich eingegangen ist.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich fülle das Buchungsformular vollständig aus und klicke „Anfrage absenden",
+  **When** die Buchungsanfrage erfolgreich serverseitig gespeichert wurde,
+  **Then** verschwindet der Loader und eine Erfolgsmeldung wird angezeigt (z. B. „Ihre Anfrage wurde erfolgreich übermittelt. Wir melden uns in Kürze.") — der Submit-Button ist danach deaktiviert oder die Seite leitet weiter.
+
+- **Given** die Buchungsanfrage erfolgreich gespeichert wurde,
+  **When** ich `/konto` aufrufe,
+  **Then** erscheint die soeben erstellte Anfrage in der Liste meiner Buchungsanfragen.
+
+- **Given** die Buchungsanfrage serverseitig fehlschlägt (z. B. Validierungsfehler),
+  **When** der Server HTTP 4xx oder 5xx zurückgibt,
+  **Then** verschwindet der Loader, eine verständliche Fehlermeldung auf Deutsch wird angezeigt, und der Submit-Button ist wieder aktiv — der Nutzer kann es erneut versuchen.
+
+- **Given** der Solution Architect die Submission-Logik analysiert,
+  **When** er den `onSubmit`-Handler und den API-Call prüft,
+  **Then** ist dokumentiert, warum der Promise nicht resolved/rejected (z. B. fehlender `await`, unbehandelter rejected Promise, fehlendes `finally`-Block-Reset des Loading-States).
+
+**Hinweis für den Architect:** Wahrscheinliche Ursachen: (1) Der `fetch`-Call im `onSubmit`-Handler hat kein `.catch()` und der Fehler wird still verschluckt — der Loading-State bleibt `true`; (2) Die Booking-API gibt HTTP 500 zurück (dieselbe Ursache wie IT12-S06, fehlende Migration), und der Client behandelt den Fehler nicht; (3) Nach erfolgreicher Buchung fehlt ein `router.refresh()` oder ein Cache-Invalidierungs-Call, sodass die Anfrage nicht im Dashboard erscheint.
+
+---
+
+#### IT12-S12: Admin-Dashboard „Bevorstehende Termine" — Interner Serverfehler beheben
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 2
+
+**Repro-Schritte:**
+1. Als Admin einloggen.
+2. Admin-Dashboard aufrufen.
+3. Widget „Bevorstehende Termine" zeigt: „Fehler beim Laden Interner Serverfehler".
+
+**Als** Admin (Tom)
+**möchte ich** bevorstehende Termine im Dashboard sehen,
+**damit** ich meinen Arbeitstag planen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin als Admin eingeloggt und rufe das Admin-Dashboard auf,
+  **When** die Seite lädt,
+  **Then** zeigt das Widget „Bevorstehende Termine" die nächsten anstehenden Termine — oder bei keinen Terminen: eine leere Liste mit Hinweis „Keine bevorstehenden Termine".
+
+- **Given** der Solution Architect die zugehörige API-Route analysiert,
+  **When** er den Fehler in den Vercel-Logs identifiziert,
+  **Then** ist die Ursache (fehlendes DB-Feld, fehlende Auth-Prüfung, Prisma-Fehler) dokumentiert und behoben.
+
+**Hinweis für den Architect:** Vermutlich dieselbe Wurzel wie IT12-S06 und IT12-S13 — fehlende Datenbankmigrierung in Produktion. Alle drei Admin-/Kunden-API-Fehler sollten mit einem einzigen `prisma migrate deploy`-Lauf behoben werden können; danach einzeln verifizieren.
+
+---
+
+#### IT12-S13: Admin-Dashboard „Buchungsanfragen" — Interner Serverfehler beheben
+
+**Klassifikation:** Bug
+**Priorität:** Must Have | **Story Points:** 2
+
+**Repro-Schritte:**
+1. Als Admin einloggen.
+2. Buchungsanfragen-Bereich im Admin-Dashboard aufrufen.
+3. Fehlermeldung: „Anfragen konnten nicht geladen werden. Interner Serverfehler".
+
+**Als** Admin (Tom)
+**möchte ich** alle eingegangenen Buchungsanfragen im Admin-Dashboard einsehen,
+**damit** ich auf Anfragen reagieren und Aufträge verwalten kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin als Admin eingeloggt und öffne den Buchungsanfragen-Bereich,
+  **When** die Seite lädt,
+  **Then** werden alle offenen Buchungsanfragen angezeigt — kein Fehler, keine weiße Seite.
+
+- **Given** keine Buchungsanfragen vorhanden sind,
+  **When** die Seite lädt,
+  **Then** erscheint der Hinweis „Keine Buchungsanfragen vorhanden" — kein Fehler.
+
+- **Given** der Fix deployed ist,
+  **When** ein Tester eine neue Buchungsanfrage als Gast einreicht,
+  **Then** erscheint die Anfrage sofort oder nach einem Reload in der Admin-Liste.
+
+---
+
+#### IT12-S14: Admin-Navigation neu strukturieren
+
+**Klassifikation:** Enhancement (Feature)
+**Priorität:** Must Have | **Story Points:** 3
+
+**Als** Admin (Tom)
+**möchte ich** eine klar strukturierte Admin-Navigation ohne Duplikate,
+**damit** ich schnell zu den richtigen Bereichen navigiere und nicht verwirrt werde.
+
+**Vorgeschlagene Ziel-Struktur:**
+
+```
+1. Kalender & Zeitmanagement
+   └─ Kalender (Übersicht)
+   └─ Zeitfenster verwalten
+   └─ Verfügbarkeit
+   └─ Buchungsanfragen
+
+2. Nutzerverwaltung
+   └─ Kunden
+   └─ Admins
+
+3. Auswertungen
+   └─ Analytics
+   └─ Bewertungen
+```
+
+**Akzeptanzkriterien:**
+
+- **Given** ich als Admin eingeloggt bin und die Admin-Navigation aufrufe,
+  **When** ich die Navigation sehe,
+  **Then** sind alle Navigationspunkte logisch in maximal drei Gruppen gegliedert — keine Duplikate (Bewertungen darf nur einmal vorkommen).
+
+- **Given** die neue Navigation deployed ist,
+  **When** ich auf „Buchungsanfragen" klicke,
+  **Then** lande ich auf der korrekten Seite — der Link funktioniert und das Item ist eindeutig einer Gruppe zugeordnet.
+
+- **Given** die Umstrukturierung abgeschlossen ist,
+  **When** ein Tester alle Navigationspunkte nacheinander anklickt,
+  **Then** führt jeder Punkt zu einer funktionierenden Seite — kein 404, kein 500.
+
+**Hinweis für den Architect:** Die genaue visuelle Umsetzung (Sidebar, Accordion, Tab-Bar) liegt beim Solution Architect / UX. Die Story definiert nur die logische Gruppierung und die Duplikat-Entfernung. Doppelte „Bewertungen"-Einträge müssen auf einen konsolidiert werden.
+
+---
+
+#### IT12-S15: Admin — Kunden per E-Mail ansprechen (Marketing-E-Mail mit Service-Filter)
+
+**Klassifikation:** Feature (Neu)
+**Priorität:** Must Have | **Story Points:** 8
+
+**Als** Admin (Tom)
+**möchte ich** Kunden gefiltert nach in Anspruch genommenem Service per E-Mail anschreiben können,
+**damit** ich gezielte Marketing- und Informations-E-Mails an relevante Kundengruppen versenden kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin als Admin eingeloggt und öffne den Bereich „Nutzerverwaltung / Kunden",
+  **When** ich die Seite aufrufe,
+  **Then** sehe ich eine Filteroption „Nach Service filtern" mit einer Mehrfachauswahl aller verfügbaren Services.
+
+- **Given** ich einen oder mehrere Services im Filter ausgewählt habe,
+  **When** der Filter angewendet wird,
+  **Then** zeigt die Kundenliste nur Kunden, die mindestens eine abgeschlossene Buchungsanfrage für einen der gewählten Services haben — jeder Kunden-Eintrag zeigt, welche Services er in Anspruch genommen hat.
+
+- **Given** ich eine Auswahl von Kunden (Checkboxen) getroffen habe,
+  **When** ich auf „E-Mail senden" klicke,
+  **Then** öffnet sich ein Compose-Modal mit Feldern: Betreff (Freitext) und Nachricht (Freitext, mehrzeilig) — eine Vorschau der Empfänger-E-Mail-Adressen ist sichtbar.
+
+- **Given** ich Betreff und Nachricht ausgefüllt habe und auf „Senden" klicke,
+  **When** die E-Mails verarbeitet werden,
+  **Then** erhält jeder ausgewählte Kunde eine individuelle E-Mail mit dem eingegebenen Betreff und Text — die E-Mails werden über das bestehende E-Mail-System (Resend) versandt.
+
+- **Given** mehr als 50 Kunden ausgewählt sind,
+  **When** ich auf „Senden" klicke,
+  **Then** erscheint eine Warnung: „Sie sind dabei, E-Mails an X Empfänger zu senden. Möchten Sie fortfahren?" — die Aktion erfordert eine explizite Bestätigung.
+
+- **Given** der Versand abgeschlossen ist,
+  **When** alle E-Mails verarbeitet wurden,
+  **Then** erscheint eine Erfolgsmeldung mit der Anzahl versendeter E-Mails — und bei etwaigen Fehlern eine Liste der E-Mail-Adressen, an die nicht gesendet werden konnte.
+
+- **Given** kein Kunde ausgewählt ist,
+  **When** ich auf „E-Mail senden" klicke,
+  **Then** ist der Button deaktiviert oder eine Hinweismeldung „Bitte mindestens einen Kunden auswählen" erscheint.
+
+**Hinweis für den Architect:** Resend-API ist bereits eingerichtet (IT11). Für den Service-Filter wird ein JOIN auf Bookings/Services benötigt. Rate-Limiting bei Resend beachten (max. Anfragen pro Sekunde/Minute) — bei großen Empfängerlisten ggf. Batching implementieren. Kein Bulk-Send-Endpoint von Resend verfügbar → sequenzielle Einzel-Sends mit Promise.allSettled. Story-Points 8 wegen Filterlogik, Compose-Modal, Batch-Sending und Fehlerbehandlung.
+
+---
+
+### Abhängigkeiten Iteration 12
+
+- IT12-S01 ist unabhängig von allen anderen Stories.
+- IT12-S02 ist unabhängig; rein frontends.
+- IT12-S03 und IT12-S04 sind unabhängig voneinander; beide betreffen das Buchungsformular (nicht-eingeloggt).
+- IT12-S05 **hängt von IT12-S11 ab** — Konto-Erstellen-Angebot erscheint nur nach erfolgreicher Buchungs-Submission.
+- IT12-S06, IT12-S12, IT12-S13 haben wahrscheinlich **dieselbe Wurzelursache** (fehlende DB-Migration) — zuerst `prisma migrate deploy` ausführen, dann alle drei verifizieren.
+- IT12-S07 ist unabhängig von IT12-S06, aber beide betreffen den eingeloggten Kunden.
+- IT12-S08 **hängt von IT12-S06 ab** — Profildaten-API muss funktionieren, bevor das Formular vorausgefüllt werden kann.
+- IT12-S09 ist unabhängig (reines Frontend-Fix).
+- IT12-S10 ist unabhängig (Upload-Fix).
+- IT12-S11 **hängt von IT12-S06 ab** — Buchungsanfragen können erst im Dashboard erscheinen, wenn IT12-S06 behoben ist.
+- IT12-S14 ist unabhängig; reine Navigation-UX.
+- IT12-S15 **hängt von IT12-S06/S13 ab** — Kundenliste mit Buchungsdaten setzt funktionierende DB-Queries voraus.
+
+### Empfohlene Bearbeitungsreihenfolge
+
+1. **`prisma migrate deploy` verifizieren** — deckt wahrscheinlich IT12-S06, S12, S13 mit einem Schritt ab.
+2. **IT12-S01** — OAuth-Fix, unabhängig, hohe Sichtbarkeit.
+3. **IT12-S02** — Service-Bilder, rein frontend, schnelles Win.
+4. **IT12-S09, S04** — Scroll-Fixes, isoliert und schnell.
+5. **IT12-S03** — Kalender-Performance (braucht ggf. DB-Analyse).
+6. **IT12-S07** — Login-State-Fix.
+7. **IT12-S10** — Blob-Upload (ENV-Variable prüfen).
+8. **IT12-S08** — Profildaten-Vorausfüllung (nach S06-Fix).
+9. **IT12-S11** — Submission-Feedback (nach S06-Fix).
+10. **IT12-S05** — Konto-Angebot nach Buchung (nach S11-Fix).
+11. **IT12-S14** — Admin-Navigation (UX-Aufgabe, kann parallel zu anderen laufen).
+12. **IT12-S15** — Marketing-E-Mail (größte Story, am Ende).
+
+### Definition of Done — Iteration 12
+
+- Alle als „Bug" klassifizierten Stories: Der ursprüngliche Reproduktionsschritt führt in der Produktionsumgebung nicht mehr zum Fehler.
+- Alle als „Feature/Enhancement" klassifizierten Stories: Die Funktion ist end-to-end getestet (Nutzerinteraktion → API → DB → sichtbares Ergebnis) in der Produktionsumgebung.
+- IT12-S01 (Google OAuth) ist in der Produktionsumgebung mit einem echten Google-Konto verifiziert — kein HTTP-4xx auf der Callback-Route.
+- Alle Vercel-Logs zeigen keine neuen ungeklärten Fehler nach dem Deployment.
+- Tom Siefert hat alle Must-Have-Stories im Produktions-Build manuell abgenommen.
 **Priorität:** Should Have | **Story Points:** 5

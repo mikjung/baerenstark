@@ -11,6 +11,15 @@
  * Telefon, keine internen Felder. Nur Felder, die der User selbst eingegeben
  * hat (Service, Datum, Zeit, Status, Anzeige-Name) plus Attachment-Liste
  * (für die Bestätigungs-Page).
+ *
+ * IT12 Bug-Fix BUG-002 (S05 AC2):
+ *   Wenn `?token=…` valide ist (User hat den Confirmation-/Cancellation-
+ *   Link aus seiner eigenen E-Mail), liefern wir `customerEmail` ZUSÄTZLICH
+ *   aus, damit die „Konto erstellen?"-Card die Email vorausfüllen kann.
+ *   Cookie-Pfad liefert die Email ebenfalls, da der eingeloggte Customer
+ *   sowieso seine eigene Buchung anschaut. Ohne Token UND ohne Cookie
+ *   würde der Endpoint mit 401 antworten — der PII-Pfad „nur Token, keine
+ *   Email" existiert also gar nicht mehr.
  */
 
 import type { NextRequest } from 'next/server';
@@ -80,6 +89,7 @@ export async function GET(
         id: true,
         customerId: true,
         customerName: true,
+        customerEmail: true, // IT12 BUG-002: nur ausliefern, wenn authorisiert.
         service: true,
         date: true,
         startTime: true,
@@ -157,6 +167,12 @@ export async function GET(
       status: booking.status,
       createdAt: booking.createdAt.toISOString(),
       customerName: booking.customerName,
+      // IT12 BUG-002: Email-Ausgabe nur, wenn authorisiert (Token oder
+      // Cookie-Owner). Der gesamte Endpoint ist bereits durch die obige
+      // Authorisierung geschützt — wir geben deshalb `customerEmail`
+      // direkt zurück. Konsumenten (nur die Bestätigungs-Page) nutzen
+      // sie zum Vorausfüllen der „Konto erstellen?"-Card.
+      customerEmail: booking.customerEmail ?? null,
       attachments: booking.attachments.map((a) => ({
         id: a.id,
         url: a.url,
