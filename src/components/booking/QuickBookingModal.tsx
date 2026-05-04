@@ -205,6 +205,16 @@ export function QuickBookingModal({
     setInternalTimeSlot(null);
   }, [internalDate, internalDuration]);
 
+  // IT14-S01 Fix: Wenn die Customer-Daten erst nach dem Mount eintreffen
+  // (useCustomer lädt asynchron), übernimmt RHF die neuen `defaultValues` nicht
+  // mehr automatisch. Daher hier explizit reset(...) aufrufen — aber nur, wenn
+  // der User noch nicht selbst getippt hat (isDirty === false).
+  useEffect(() => {
+    if (!isDirty) {
+      reset(initialValues);
+    }
+  }, [initialValues, isDirty, reset]);
+
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const isBusy = state.kind === 'submitting';
 
