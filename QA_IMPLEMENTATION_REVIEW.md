@@ -1,382 +1,457 @@
-# QA Implementation Review — Bärenstark Hausservice
+# QA Implementation Review — Konsolidiert (Stand IT12, 2026-05-04)
 
-**Modus:** Build QA (Backend + Frontend)
-**Datum:** 2026-05-02
-**Iteration:** 1 (erste Implementierungs-Verifikation nach Design-QA v1.1)
-**Stories im Scope:** US-01 bis US-08, US-12
-
----
-
-## Verdict
-
-**Gesamt: READY (mit kleineren Empfehlungen)** — 9 von 9 Stories *Done*.
-
-- Pass-Rate (Akzeptanzkriterien): 18 / 18 (100 %)
-- Critical Issues: **0**
-- Important Issues: **2** (DX/Reliability, kein AC-Blocker)
-- Minor Issues: **4** (Hygiene, Doku, optional)
-- Tests: **13/13 PASS** (Smoke-Tests gegen Prisma + Schemas)
-- Build: **PASS** (Next.js 14 production build mit allen 17 Routes, keine Type- oder Lint-Fehler)
-
-Empfehlung an Orchestrator: **MVP kann ausgeliefert werden.** Die zwei
-Important-Findings (Smoke-Test braucht absoluten DB-Pfad / `robots.txt` fehlt)
-sind keine User-Story-Blocker — Tom kann produktiv damit arbeiten.
+Reviewer: qa-engineer
+Konsolidiert aus: QA_IMPLEMENTATION_REVIEW_IT2.md … QA_IMPLEMENTATION_REVIEW_IT12.md
+Methode: Statische Code-Analyse + `tsc --noEmit` + `npm run build`/`next build` + `npm test` + `npm run lint` + cURL-Smoke-Tests, je nach Iteration ergänzt durch Schema-/Vertrags-Diff und Live-Smoke gegen `localhost:3000`.
 
 ---
 
-## Build-Status
+## Übersicht aller Iterationen
 
-### `npx tsc --noEmit`
-```
-PASS — keine Type-Fehler.
-```
-
-### `npx next lint`
-```
-✔ No ESLint warnings or errors
-```
-
-### `npx next build` (mit DATABASE_URL absolut gesetzt)
-```
-✓ Compiled successfully
-✓ Generating static pages (12/12)
-
-Route (app)                              Size     First Load JS
-┌ ○ /                                    185 B          99.2 kB
-├ ○ /_not-found                          153 B          87.3 kB
-├ ƒ /admin                               8.23 kB        98.4 kB
-├ ○ /admin/bookings                      153 B          87.3 kB
-├ ○ /admin/login                         2 kB            130 kB
-├ ○ /admin/setup                         2.19 kB         130 kB
-├ ○ /admin/slots                         153 B          87.3 kB
-├ ƒ /api/admin/setup                     0 B                0 B
-├ ƒ /api/auth/[...nextauth]              0 B                0 B
-├ ƒ /api/bookings                        0 B                0 B
-├ ƒ /api/bookings/[id]                   0 B                0 B
-├ ƒ /api/bookings/[id]/resend-mail       0 B                0 B
-├ ƒ /api/slots                           0 B                0 B
-├ ƒ /api/slots/[id]                      0 B                0 B
-├ ○ /buchung                             5.1 kB          125 kB
-├ ○ /datenschutz                         153 B          87.3 kB
-└ ○ /impressum                           153 B          87.3 kB
-ƒ Middleware                             77 kB
-```
-
-Alle 17 Routes (10 Pages + 7 API-Endpunkte) sind im Build vorhanden und
-entsprechen 1:1 der Spec aus `contracts/api-routes.md`.
-
-### Smoke-Tests (`npm test`)
-
-Aufruf erfordert absoluten DB-Pfad (siehe Important-Finding IMP-002):
-```
-DATABASE_URL="file:/Users/mikesiefert/Desktop/baerenstark/prisma/dev.db" \
-  npx tsx tests/smoke.ts
-```
-
-```
-Schema Validation
-  PASS  CreateSlot accepts valid input
-  PASS  CreateSlot rejects <30min
-  PASS  CreateSlot rejects past dates
-  PASS  CreateSlot rejects >12h
-  PASS  CreateBooking rejects missing privacyAccepted
-  PASS  CreateBooking rejects phone <6 digits
-  PASS  CreateBooking rejects unknown service
-  PASS  AdminSetup rejects short password
-  PASS  AdminSetup rejects password mismatch
-
-Partial Unique Index (BUG-006)
-  PASS  Second active booking on same slot is rejected by unique index
-  PASS  Booking on slot with only REJECTED bookings succeeds
-
-Soft-Delete & PENDING-Migration (BUG-003)
-  PASS  Soft-delete migrates PENDING bookings to REJECTED
-  PASS  Slot is soft-deleted
-
-Total: 13 passed, 0 failed.
-```
+| Iteration | Datum | Verdict | tsc | build | tests | Critical | Major | Minor | Loops nötig? |
+|-----------|-------|---------|-----|-------|-------|----------|-------|-------|--------------|
+| IT2 | 2026-05-02 | Ready (mit minor follow-ups) | PASS | PASS | n/a (Smoke) | 0 | 0 | 4 | Nein |
+| IT3 | 2026-05-02 | Ready (mit 2 kosmetischen Findings) | PASS | PASS | n/a (Smoke) | 0 | 0 | 4 | Nein |
+| IT4 | 2026-05-02 | Approved with Fixes | PASS | PASS | grün | 0 | 1 (BUG-IT4-QA-001 Verify-Redirect-Param) | 3 | Nein |
+| IT5 | 2026-05-02 | Done | PASS | PASS | grün | 0 | 0 | 4 (pre-existing) | Nein |
+| IT6 | 2026-05-03 | Bedingt-DONE → DONE (Final-Pass) | PASS | n/a | 171/171 (+2 SKIP) | 0 | 2 (D1, D2) | 2 (D3, D4) | Ja — 1 Loop, alle 4 Defekte behoben |
+| IT7 | 2026-05-03 | Done (m6-IT7 = Tom-Aktion) | PASS | n/a | 181/181 | 0 | 0 | 2 (D1-IT7, D2-IT7) | Nein |
+| IT8 | 2026-05-03 | Done — Production-deploybar | PASS | n/a | 181/181 + 32/32 Diagnose | 0 | 0 | 0 | Nein |
+| IT9 | 2026-05-03 | Done | PASS | n/a | 181/181 | 0 | 0 | 3 | Nein |
+| IT10 | 2026-05-03 | Done — Go Live (mit DevOps-Auflagen) | PASS | n/a | 181/181 + 24/24 IT10 | 0 | 0 | 0 | Nein |
+| IT11 | 2026-05-04 | Done (Code) — wartet auf Tom-Smoke | PASS | PASS | 181/181 + 33/33 IT11 | 0 | 0 | 4 | Nein |
+| IT12 | 2026-05-04 | BLOCKED → APPROVED with caveats (nach Re-Verify) | PASS | PASS | 19/19 → 20/20 IT12 | 1 (BUG-001 BLOCKER) | 3 (BUG-002,-003,-004) | 6 FIND + 2 Caveats | **Ja** — 1 Loop, alle Critical/Major resolved |
 
 ---
 
-## Story-by-Story-Verifikation
+## Wiederkehrende Patterns / Lessons Learned
 
-### US-01 — Service-Portfolio einsehen — **Done**
+### 1. Migrations-Drift `P2022` als wiederkehrende Bug-Klasse
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Sechs Services mit Titel + Beschreibung) | `src/components/home/ServiceGrid.tsx:21–53` rendert `SERVICE_LIST.map(...)` aus `src/lib/services.ts:29–78`. Die sechs Slugs entsprechen exakt PROJECT.md: entruempelung, entkernung, reinigung, gruenflaechenpflege, muelltonnenservice, entsorgung. | PASS |
-| AC-2 (Mobile-first ohne horizontales Scrollen) | `ServiceGrid.tsx:23` nutzt `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`. `<html lang="de">` + `<meta viewport>` (`layout.tsx:35–39`) korrekt. Cards full-width unter 640 px. | PASS |
+- IT8: BUG-IT8-01 — Admin-Verwaltungs-Crash durch Envelope-Mismatch.
+- IT9: US-IT9-01 — `/admin/users` Crash, exakt gleiches Schema-Drift-Pattern wie IT8-01.
+- IT10: STRUCT-1 — `internalError()` Logging-Härtung, damit künftige Migrations-Drifts sichtbar werden.
+- IT12: S06/S12/S13 — alle drei Bug-Stories ziehen sich auf `prisma migrate deploy` zurück (nicht Code-Bug).
 
-### US-02 — Kontaktinformationen finden — **Done**
+**Lesson:** Vor jedem PR auf Bug-Endpoints: `prisma migrate status` gegen Prod ist Pflicht-Schritt 1. Im PR-Body dokumentieren.
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Footer mit Telefon, E-Mail, Standort) | `src/components/layout/Footer.tsx:8–41` rendert alle drei: Telefon (`CONTACT.phoneDisplay`), E-Mail (`CONTACT.email`), Einzugsgebiet (`CONTACT.region`). Footer ist im Root-Layout (`layout.tsx:59`) und damit auf jeder Seite. | PASS |
-| AC-2 (Telefon als `tel:`-Link) | `Footer.tsx:16` → `href={`tel:${CONTACT.phoneTel}`}`. `CONTACT.phoneTel = "+4915774787512"` (E.164, korrekt aus `src/lib/contact.ts:8`). Auch in Header (`Header.tsx:34`) und Hero (`Hero.tsx:34`) als `tel:`-Link. | PASS |
+### 2. Defense-in-Depth bei Schema-Drift
 
-### US-03 — Verfügbare Zeitfenster anzeigen — **Done**
+- IT8/IT9/IT12: `Array.isArray`-Guard in API-Client + erneuter Guard in der Komponente + Error-Boundary im Layout-Segment.
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Liste der freigegebenen Zeitfenster) | `src/app/api/slots/route.ts:27–81` (GET): filtert `deletedAt: null`, Range `from`–`to`, sortiert `startsAt asc`. Frontend `src/components/booking/SlotList.tsx:80–130` rendert die Liste mit Loading-/Error-/Empty-State + Skeletons. | PASS |
-| AC-2 (Ausgebuchtes Zeitfenster nicht buchbar) | `route.ts:62–67`: `bookings.where: { status: { in: ['PENDING', 'CONFIRMED'] } }` → `isBooked: s.bookings.length > 0`. `SlotList.tsx:89` `disabled={isBooked}` + Badge "Belegt" + visuell graued out + ARIA-Label "(bereits belegt)". | PASS |
+**Lesson:** Belt-and-suspenders ist verbindliches Pattern für jede Liste/Tabellen-Komponente.
 
-### US-04 — Buchungsanfrage stellen — **Done**
+### 3. Conditional UPDATE für Race-Mitigation
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Erfolgs-Bestätigung nach Submit) | `BookingForm.tsx:90–101` ruft `createBooking()`; bei Erfolg `setStatus({kind:'success'})` → grüner `Banner role="status"` mit Text "Anfrage erfolgreich gesendet — Tom meldet sich zeitnah" (Z. 68–88). | PASS |
-| AC-2 (Inline-Validierung ohne Reload) | React Hook Form + Zod via `zodResolver(CreateBookingSchema)` in `BookingForm.tsx:40–41`. `mode: 'onBlur'`. `errors.<field>?.message` bei jedem Input (`{customerName, customerPhone, customerEmail, service, description}`). DSGVO-Checkbox-Fehler in `Banner role="alert"` (Z. 266–270). | PASS |
+- IT6: `disableAdminSafely` als Vorbild.
+- IT7: `password_reset_tokens` Conditional UPDATE (m2-IT7).
+- IT8: `lastRangeRef` + AbortController für Calendar-Race.
+- IT11: BookingConflict mit atomarem Cancel-Update + 60s-Window-Dedup.
+- IT12: Idempotency-Key (S11).
 
-**Zusatz-Checks (alle erfüllt):**
-- Pflichtfelder Name (≥2), Telefon (≥6 Ziffern), Service (Enum), Beschreibung (≥5) — alle in `CreateBookingSchema` (`contracts/zod-schemas.ts:186–212`).
-- DSGVO-Checkbox: `privacyAccepted: z.literal(true)` (Z. 209–211); UI: `BookingForm.tsx:243–271` mit Link auf `/datenschutz` und `target="_blank" rel="noopener"`.
-- 409 CONFLICT-Handling: `BookingForm.tsx:104–108` + `route.ts:135–144` (Prisma P2002 → 409). Conflict-Banner + Slots werden via `onSubmitted()` neu geladen.
-- 429 RATE_LIMITED-Handling: `BookingForm.tsx:109–112` + `route.ts:92–101`.
-- 400 VALIDATION_ERROR + Feldzuordnung: `BookingForm.tsx:113–119` mit `setError(err.field, ...)`.
+### 4. Microcopy / Wortlaut-Drift
 
-### US-05 — Zeitfenster einpflegen (Admin) — **Done**
+- IT3: US-22 AC-2 Schnitt 4,0 vs 4,6 (Test-Daten).
+- IT4: BUG-IT4-QA-001 Verify-Redirect-Param `?verified=1` vs `?verified=true`.
+- IT9: MINOR-IT9-01-A „Noch keine Kunden" vs „Keine Kunden".
+- IT11: NBSP in Telefonnummern verifiziert (`0157 74787512`).
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Anlegen → sofort öffentlich sichtbar) | `POST /api/slots` (`src/app/api/slots/route.ts:89–152`): Auth-Check, `CreateSlotSchema.parse`, Overlap-Check, `prisma.slot.create`, **`revalidateTag('slots')`** (Z. 132–136). Frontend: `SlotForm.tsx` → `createSlot()` → `onCreated()` lädt die Liste neu. | PASS |
-| AC-2 (Löschen → innerhalb Sekunden nicht mehr buchbar) | `DELETE /api/slots/:id` (`src/app/api/slots/[id]/route.ts:18–91`): Soft-Delete in Transaktion, PENDING-Bookings → REJECTED (BUG-003), 409 CONFLICT bei CONFIRMED-Bookings, `revalidateTag('slots')`. UI: `SlotTable.tsx:59–86` mit `ConfirmDialog`. | PASS |
+**Lesson:** Story-Wortlaut für UI-Strings ist verbindlich, Engineer übernimmt 1:1.
 
-**Zusatz-Checks:**
-- Sanity-Checks aktiv: Min 30 min, Max 12 h, Max-Vorlauf 365 Tage, Zukunft-Pflicht — alle in `CreateSlotSchema.superRefine` (`contracts/zod-schemas.ts:92–150`). Smoke-Test bestätigt 4 von 4 Negative-Cases.
-- Overlap-Check: `slots/route.ts:107–121` halb-offenes Intervall (`startsAt < newEndsAt AND endsAt > newStartsAt`).
-- Soft-Delete-Migration verifiziert per Smoke-Test ("PASS Soft-delete migrates PENDING bookings to REJECTED").
+### 5. ESLint-Config-Drift / Edge-Runtime-Warnings (technische Schulden)
 
-### US-06 — Buchungsanfragen verwalten (Admin) — **Done**
+- IT2: MIN-001 ESLint-Plugin-Init-Fehler (`Converting circular structure to JSON`).
+- IT3/IT4/IT5: gleicher Befund.
+- IT4: BUG-IT4-QA-003 `jose`/`CompressionStream`-Warning persistent — Workaround: Sub-Path-Imports.
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Liste mit Name, Service, Zeitfenster, Status) | `GET /api/bookings` (`src/app/api/bookings/route.ts:26–79`) liefert für jede Booking: customerName, service, slot{startsAt,endsAt,description}, status, mailSent, mailError. UI: `BookingTable.tsx:208–345` rendert alle Felder + Filter-Tabs (Alle / Offen / Bestätigt / Abgelehnt). | PASS |
-| AC-2 (Bestätigen → Status wechselt + Slot belegt) | `PATCH /api/bookings/:id` (`src/app/api/bookings/[id]/route.ts:25–93`) mit kompletter State-Machine + Idempotenz. `revalidateTag('slots')` invalidiert öffentliche Slot-Liste. UI: `BookingTable.tsx:88–119` mit `ConfirmDialog` vor jedem Statuswechsel (BUG-016 erfüllt). | PASS |
+**Lesson:** Tech-Debt-Story am Anfang einer Iteration einplanen, sonst eskaliert Lint-Drift.
 
-**Zusatz-Checks:**
-- Mail-Status-Indikator: `BookingTable.tsx:212` `const mailFailed = !b.mailSent;` rotes Badge "✉️ Mail nicht zugestellt" + `b.mailError` als Tooltip + Inline-Fehlerbox (Z. 292–296) + "Mail erneut senden"-Button (Z. 299–308).
-- Resend-Mail: `POST /api/bookings/:id/resend-mail` (`route.ts`) korrekt mit Idempotenz (mailSent === true → no-op) und 502 MAIL_FAILED bei finalem Fehlschlag.
-- ConfirmDialog: `src/components/ui/ConfirmDialog.tsx` mit `role="dialog" aria-modal="true"`, ESC-Schutz, Focus-Trap, Click-Outside-Close. Verhindert versehentliche Doppel-Updates.
-- 409 CONFLICT bei Slot-Konflikt nach REJECTED→CONFIRMED: `[id]/route.ts:67–75` (Prisma P2002).
+### 6. Operative DevOps-Aktionen (Tom)
 
-### US-07 — Admin-Login — **Done**
+- IT4: Resend-API-Key, ENV-Konfig.
+- IT10: 5 operative Aufgaben (`MAIL_FROM`, Resend-Domain, migrate deploy, Vercel-ENV).
+- IT11: 12-Schritte-Smoke + `BOOKING_TOKEN_SECRET`.
+- IT12: Phase-1 (NEXTAUTH_URL, Google-Cloud-Console-Redirect-URI, Migrationen, BLOB_READ_WRITE_TOKEN, UNSUBSCRIBE_TOKEN_SECRET, MAIL_FROM).
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Gültige Zugangsdaten → /admin) | `src/lib/auth.ts:22–70` Credentials Provider mit bcrypt-Vergleich. `src/app/admin/login/page.tsx:78–102` `signIn('credentials', { redirect: false })` → `router.replace(result.url ?? callbackUrl)`. | PASS |
-| AC-2 (Falsche Zugangsdaten → generische Fehlermeldung) | `auth.ts:53–57` Dummy-Bcrypt-Hash gegen Timing-Side-Channel; `auth.ts:59–60` returns `null` bei falschem Passwort. UI: "E-Mail oder Passwort ist falsch." (`login/page.tsx:73, 91`) — keine Differenzierung zwischen "User existiert nicht" und "Passwort falsch". | PASS |
-| AC-3 (Direkte Admin-URL → Redirect auf Login) | `src/middleware.ts:17–37` matcht `/admin/:path*`, schließt `/admin/login` und `/admin/setup` aus, prüft `req.auth?.user`, redirects auf `/admin/login?callbackUrl=<originalPath>`. Server-Side: `src/app/admin/page.tsx:21–24` Doppel-Check via `auth()` + `redirect('/admin/login')`. | PASS |
+**Lesson:** Code-Verdict ≠ Production-Ready. Tom-Smoke-Schritte sind Sign-Off-Kriterium.
 
-**Zusatz-Checks (alle erfüllt):**
-- Setup-Wizard: `src/app/admin/setup/page.tsx` + `POST /api/admin/setup` + `GET /api/admin/setup` (Verfügbarkeits-Check). Tom legt sein Passwort selbst — kein ENV-Seed.
-- callbackUrl-Validierung (BUG-005): Doppelt abgesichert.
-  1. `auth.config.ts:24–34` `callbacks.redirect` nur same-origin oder `/`-Pfade, sonst `/admin`.
-  2. `login/page.tsx:27–29` `callbackUrlRaw.startsWith('/') ? callbackUrlRaw : '/admin'` (Defense in Depth).
-- Session: JWT, 24h, sliding refresh 1h (`auth.config.ts:13–15`).
-- Rate-Limit Login: 5/15min via Upstash, no-op-Fallback ohne Konfig (`auth.ts:32–45` + `ratelimit.ts:64`).
-- Edge-sichere `auth.config.ts` getrennt von Node-only `auth.ts` (Edge-Build zieht kein bcrypt/Prisma).
+### 7. Tests-Suite wächst, Hygiene bleibt grün
 
-### US-08 — E-Mail-Benachrichtigung bei neuer Anfrage — **Done**
+- IT6: 171/171 Tests + DTO-Leak-Scanner.
+- IT7: 181/181 Tests + IT7-Suiten.
+- IT8: 181/181 + 32/32 Diagnose-Tests.
+- IT10: 181/181 + 24/24 IT10-Tests.
+- IT11: 181/181 + 33/33 IT11-Tests.
+- IT12: 19/19 → 20/20 IT12-Tests (+1 Bestandskunden-Filter).
 
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Mail an Admin-Adresse mit Anfrage-Details) | `bookings/route.ts:149–161` ruft `sendBookingNotification(payload)` nach erfolgreichem Insert. `src/lib/mail.ts:71–135` baut Plaintext + HTML mit Name, Telefon, E-Mail (oder "(nicht angegeben)"), Service-Label, formatiertem Slot-Range (Europe/Berlin), Beschreibung, Admin-Dashboard-Link. Empfänger `process.env.MAIL_TO_ADMIN` (Default `hausservice-baerenstark@outlook.com`, korrekt). | PASS |
-
-**Zusatz-Checks (BUG-002 erfüllt):**
-- Retry-Logik: `mail.ts:181–197` 3 Versuche, Backoff `[0, 300, 1500]` ms. **3 Versuche bestätigt.**
-- mailSent / mailError persistiert: `bookings/route.ts:163–169` (initial) und `resend-mail/route.ts:70–84` (Recovery).
-- Buchung wird in jedem Fall persistiert; Kunde bekommt 201 unabhängig vom Mail-Ergebnis (`route.ts:177–184`).
-- HTML-Escape für alle User-Inputs: `mail.ts:50–57` `escapeHtml()` korrekt auf Name, Telefon, E-Mail, Beschreibung, Description-Slot angewendet.
-- Mail-Recovery-Endpoint `POST /api/bookings/:id/resend-mail` mit Idempotenz, Service-Slug-Defensive (`resend-mail/route.ts:53–54`).
-
-### US-12 — Impressum & Datenschutz — **Done**
-
-| AC | Beleg | Status |
-|----|-------|--------|
-| AC-1 (Footer-Klick → Unterseite mit gesetzlichen Angaben) | `Footer.tsx:65–76` `Link href="/impressum"` und `Link href="/datenschutz"`. Pages: `src/app/impressum/page.tsx` (mit § 5 TMG, § 55 RStV, Haftungshinweis, Platzhalter-Hinweis) und `src/app/datenschutz/page.tsx` (Verantwortlicher, erhobene Daten, Zweck/Rechtsgrundlage Art. 6 Abs. 1 lit. b/f DSGVO, 2-Jahres-Speicherdauer, Auftragsverarbeiter Vercel/Turso/Resend/Upstash, Betroffenenrechte). | PASS |
-
-Datenschutzerklärung wird zusätzlich vom Buchungsformular verlinkt (`BookingForm.tsx:254–261`) — DSGVO-konform.
+**Lesson:** Pro Iteration eigener Test-Block + Smoke-Suite-Erhalt. Skips müssen explizit mit Begründung dokumentiert sein.
 
 ---
 
-## Sicherheits-Quick-Check
+## Per Iteration
 
-| Check | Beleg | Status |
-|-------|-------|--------|
-| Middleware schützt `/admin/*` | `src/middleware.ts:13–37` whitelist `/admin/login`, `/admin/setup`; ohne Session → Redirect mit `callbackUrl`. Matcher: `['/admin/:path*']`. | PASS |
-| Edge-sichere Middleware ohne Node-Module | `auth.config.ts` zieht kein bcrypt/Prisma; `auth.ts` (Node-only) lebt nur in API-Routen via `auth()`-Aufruf. Build zeigt Middleware = 77 kB (akzeptabel). | PASS |
-| callbackUrl-Validierung (BUG-005) | Doppelt abgesichert: Server (`auth.config.ts:24–34`) + Client (`login/page.tsx:29`). Externe URLs → `/admin`. | PASS |
-| Partial Unique Index (BUG-006) | `prisma/migrations/20260502000001_active_booking_per_slot/migration.sql`: `CREATE UNIQUE INDEX uniq_active_booking_per_slot ON bookings(slotId) WHERE status IN ('PENDING','CONFIRMED');` — Smoke-Test bestätigt P2002-Verhalten. | PASS |
-| API-Routen prüfen Session | `bookings/route.ts:28–31`, `bookings/[id]/route.ts:30–33`, `slots/route.ts:91–94`, `slots/[id]/route.ts:23–26`, `resend-mail/route.ts:24–27` — alle Admin-Endpunkte rufen `auth()` und liefern `apiError({code:'UNAUTHORIZED'})`. | PASS |
-| Passwort-Hashing | bcryptjs cost 10 (`api/admin/setup/route.ts:44`, `lib/auth.ts:55,59`). | PASS |
-| Rate-Limit Login + Booking | `loginLimiter` 5/15min (`auth.ts:32–45`), `bookingLimiter` 10/60min (`bookings/route.ts:92–101`). No-op-Fallback ohne Upstash dokumentiert. | PASS |
-| Security-Headers | `next.config.js:2–24` HSTS, X-Content-Type-Options, X-Frame-Options DENY, Referrer-Policy, CSP. CSP enthält `'unsafe-inline'` und `'unsafe-eval'` für Next-Inline-Scripts (notwendig für Next.js Hydration). | PASS (mit Hinweis) |
-| Generische Login-Fehlermeldung | "E-Mail oder Passwort ist falsch." in `login/page.tsx:73, 91` — keine Auskunft, ob E-Mail existiert (BUG-AC2 erfüllt). | PASS |
-| HTML-Escape in Mails | `mail.ts:50–57, 100–125` — Customer-Inputs werden per `escapeHtml()` saniert; tel:-Link nutzt nur `[^+\d]`-Filter. | PASS |
-| Session HttpOnly + Secure | NextAuth Defaults; `trustHost: true` in `auth.config.ts:21`. | PASS |
-| robots.txt für /admin | **FEHLT** als Datei in `public/`. Stattdessen Server-Side Metadata `robots: { index: false, follow: false }` auf `/admin/page.tsx:15`. Login/Setup-Pages haben das **nicht** explizit. → siehe MIN-002. | PARTIAL |
+### IT2 — BUG US-04, US-13/14/15/16 (Counter-Proposal, Storno, Wochentag-Verfügbarkeit, Kunden-Kalender)
 
----
+- **Verdict:** Ready (mit minor follow-ups)
+- **Build:** tsc PASS, build PASS, Migrate Deploy PASS, alle 13 API-Routen vorhanden.
+- **Smoke (Live-Dev):** 6/6 Tests PASS (Verfügbarkeit, Kalender, Booking-Validation, Auth-Schutz, Token-Action-Redirect).
 
-## Kontrakt-Konsistenz (FE ↔ BE)
+**Story-Verdicts:**
 
-| Aspekt | Beleg | Status |
-|--------|-------|--------|
-| Endpoint-Pfade FE ↔ BE | `api-client.ts:129, 141, 149, 165, 179, 195, 212, 223, 235` matcht 1:1 mit `app/api/...`-Routes. | PASS |
-| Field-Names | Frontend nutzt `customerEmail`, `customerName`, `customerPhone`, `slotId`, `privacyAccepted`, `mailSent`, `mailError`, `startsAt`, `endsAt`, `isBooked` — exakt wie `BookingAdminSchema` und `SlotPublicSchema` aus `contracts/zod-schemas.ts`. | PASS |
-| Status-Codes | `api-client.ts:34–46` ApiClientError mappt `error.code` aus Response auf `ApiErrorCode`-Union. Alle BE-Codes (`VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, OVERLAP, RATE_LIMITED, MAIL_FAILED, INTERNAL_ERROR`) sind im FE-Type aufgeführt + `NETWORK_ERROR` für Fetch-Fehler. | PASS |
-| Fehlerformat | BE: `apiError()` in `lib/api.ts:50–62` liefert `{error:{code, message, field?}}` — FE: `api-client.ts:101–107` liest exakt diese Form. | PASS |
-| Datums-Format | BE liefert `.toISOString()` (UTC mit Z), FE liest mit `Intl.DateTimeFormat(..., { timeZone:'Europe/Berlin' })` in `format.ts:9–38`. | PASS |
-| Service-Slugs | Single Source of Truth in `lib/services.ts` + `contracts/zod-schemas.ts` SERVICES-Konstante. Beide Dateien listen identische Slugs. | PASS |
-| Idempotenz | Bookings: `[id]/route.ts:53–59` gleicher Status → 200 ohne Update. Resend-Mail: `resend-mail/route.ts:43–49` `mailSent === true` → no-op. | PASS |
+| Story | Verdict | Bemerkung |
+|-------|---------|-----------|
+| BUG US-04 | DONE | 201 auch bei Mail-Failure, Placeholder-Resend-Key gefiltert, customerEmail Pflichtfeld |
+| US-13 | DONE | Counter-Proposal-Flow, drei Action-Buttons, Slot-Locking COUNTER_PROPOSED aktiv |
+| US-14 | DONE | Customer-Storno via cancelToken, Tom-Mail mit allen Daten |
+| US-15 | DONE | 7-Wochentage-Toggle, COCONFIRMED-Booking als Blocker, sofortiges Re-Render |
+| US-16 | DONE | Monatsansicht Grün/Rot, Klick auf Tag, Vergangenheit blockiert, mobile-friendly |
+
+**Critical/Major:** Keine.
+
+**Minor (alle erhalten):**
+
+- MIN-001 — ESLint im `next build` schlägt mit Circular-Reference fehl (non-blocking). Routing: `frontend-engineer`.
+- MIN-002 — `npm run build` lädt `.env.local` nicht für Prisma-CLI. Routing: `solution-architect` / `backend-engineer`.
+- MIN-003 — `Calendar.goNext` Hard-Cap-Logik undurchsichtig (Modulo-Formel statt Backend-Konstante). Routing: `frontend-engineer`.
+- MIN-004 — ARIA-Rollen-Verschachtelung in `Calendar.tsx` (`<button role="gridcell">`). Routing: `frontend-engineer`.
+
+**Re-Verify-Outcome:** Iteration 2 als abgeschlossen markiert. Minor-Defekte als Tech-Debt für IT3.
 
 ---
 
-## Defekte (priorisiert)
+### IT3 — BUG IT3, US-17/18/19/20/21/22/23/24
 
-### Critical: 0
+- **Verdict:** Ready (mit zwei kosmetischen Findings)
+- **Build:** tsc PASS, build PASS (14 Routen).
 
-Keine.
+**Story-Verdicts:**
 
-### Important: 2
+| Story | Verdict | Bemerkung |
+|-------|---------|-----------|
+| BUG IT3 | DONE | slotId nicht mehr via register() gebunden, 201 bei Mail-Fehler |
+| US-17 | DONE | Default-Vorlage Mo-Fr 08-17, AvailabilityTemplate-Seed 7 Einträge, TimeSlotPicker |
+| US-18 | DONE (mit MIN-002) | File-Upload Bilder/Videos/PDFs, 20MB-Limit, Anhänge im Admin |
+| US-19 | DONE | „Sonstiges" als letzter Service, ≥30 Zeichen-Validation deutsch |
+| US-20 | DONE | Alle 7 Preise korrekt, Disclaimer „Endpreise nach individueller Besichtigung" |
+| US-21 | DONE | Upcoming-Bookings-List sortiert, „Heute"-Badge |
+| US-22 | DONE (mit DEF-001 + MIN-001) | 10 Bewertungen, Schnitt 4,6 vs Spec 4,0 |
+| US-23 | DONE | Service-Popups mit ESC/Backdrop, Focus-Trap, Body-Scroll-Lock |
+| US-24 | DONE | Bestätigungs-/Storno-/Reject-Mails an Kunden, Berlin-TZ |
 
-#### IMP-001 — Smoke-Tests laden `.env.local` nicht
+**Critical/Major:** Keine.
 
-- **Datei:** `package.json:15`, `tests/smoke.ts:13–20`
-- **Beobachtung:** `npm test` schlägt mit `Environment variable not found: DATABASE_URL` fehl, weil `tsx` `.env.local` standardmäßig nicht lädt. Zudem ist der Pfad `file:./dev.db` aus `.env.local` relativ zur prisma-Schema-Datei, aber `tsx tests/smoke.ts` startet aus dem Projekt-Root → DB-Datei wird nicht gefunden.
-- **Reproduktion:**
-  ```bash
-  cd /Users/mikesiefert/Desktop/baerenstark
-  npm test
-  # → Test runner crashed: Environment variable not found: DATABASE_URL.
-  ```
-- **Workaround:** `DATABASE_URL="file:/<absolute>/prisma/dev.db" npx tsx tests/smoke.ts` läuft grün durch (13/13 PASS).
-- **Empfehlung (für Engineers):** entweder
-  - (a) `dotenv -e .env.local` als Wrapper im npm-Script, oder
-  - (b) `tsx --env-file=.env.local tests/smoke.ts`, oder
-  - (c) das Test-Skript erkennt das CWD und resolved den DB-Pfad zu absolut.
-- **Routing:** backend-engineer (kosmetisch, kein AC-Blocker — Tests laufen *funktional*, nur die DX-Umhüllung ist holprig).
-- **Severity:** Important (CI/CD-Setup wird darüber stolpern).
+**Minor (alle erhalten):**
 
-#### IMP-002 — `robots.txt` fehlt; Login/Setup-Pages nicht "noindex"
+- DEF-001 — US-22 AC-3 „Mehr anzeigen"-Button fehlt. Routing: `frontend-engineer`.
+- MIN-001 — US-22 AC-2 Schnitt 4,6 statt 4,0; PM-Klärung. Routing: `project-manager`.
+- MIN-002 — US-18 BLOB_NOT_CONFIGURED-Code-Mismatch (Server `INTERNAL_ERROR` vs Client erwartet `BLOB_NOT_CONFIGURED`). Routing: `backend-engineer`.
+- MIN-003 — US-21 AC-3 Klick auf Termin → Detailseite fehlt (keine separate Route). Routing: `project-manager`.
+- MIN-004 — ESLint-Plugin-Init-Fehler. Routing: `backend-engineer`.
 
-- **Datei:** `public/robots.txt` (existiert nicht), `src/app/admin/login/page.tsx`, `src/app/admin/setup/page.tsx`
-- **Beobachtung:** Architektur §11 schreibt `robots.txt` mit `Disallow: /admin/*` und `Disallow: /api/*` vor. In `public/` liegt nur `logo.png`. `app/admin/page.tsx:15` setzt `robots: { index: false, follow: false }` als Metadata, aber die Login- und Setup-Pages tun das nicht. Die Setup-URL ist potenziell eine Privilege-Escalation-Surface, wenn Suchmaschinen sie finden, bevor Tom sie aufruft.
-- **Empfehlung:** Eine 5-Zeilen-`public/robots.txt` mit
-  ```
-  User-agent: *
-  Disallow: /admin/
-  Disallow: /api/
-  ```
-  hinzufügen. Optional zusätzlich `metadata.robots = { index: false, follow: false }` auf `login/page.tsx` und `setup/page.tsx` ergänzen.
-- **Routing:** frontend-engineer.
-- **Severity:** Important (Setup-Wizard-Race ist im Doc als „Tom ruft direkt auf" gemildert, aber `robots.txt` ist die zweite Verteidigungslinie und in der Spec explizit gefordert).
-
-### Minor: 4
-
-#### MIN-001 — `/admin/slots` und `/admin/bookings` als reine Redirects
-
-- **Datei:** `src/app/admin/slots/page.tsx`, `src/app/admin/bookings/page.tsx`
-- **Beobachtung:** Architektur §2 listet `/admin/slots/page.tsx` und `/admin/bookings/page.tsx` als eigenständige Seiten. Implementation hat das Dashboard als Tabs gebaut (`AdminDashboard.tsx`), und die zwei URLs sind `redirect('/admin')`. Funktional gleichwertig — alle ACs erfüllt — aber der Architektur-Plan sah das anders vor.
-- **Empfehlung:** Architektur-Doku auf "Tab-Layout" aktualisieren oder zwei eigenständige Seiten extrahieren. Funktional kein Problem.
-- **Routing:** solution-architect (Doc) oder project-manager (Decision).
-- **Severity:** Minor (kein AC betroffen).
-
-#### MIN-002 — `format.ts:localInputToIso` nimmt Browser-Local-TZ als Berlin an
-
-- **Datei:** `src/lib/format.ts:84–93`, `src/components/admin/SlotForm.tsx:21–28, 46–48`
-- **Beobachtung:** `combineToIso(date, time)` macht `new Date('2026-05-15T08:00')` ohne Offset; das wird als *Browser-Local-Time* interpretiert. Tom administriert von Deutschland aus → unter normalen Umständen identisch mit Europe/Berlin, aber wenn er mal aus dem Ausland (z.B. Urlaub, anderer TZ-Computer) Slots anlegt, sind die Zeiten verschoben. Code-Kommentar dokumentiert das ehrlich, das Risiko ist gering.
-- **Empfehlung:** Optional eine explizite Timezone-Lib (`@js-temporal/polyfill` oder Manuell `new Date(Date.UTC(...))` mit Berlin-Offset) verwenden.
-- **Routing:** frontend-engineer (optional).
-- **Severity:** Minor (Dokumentiert als Annahme, kein direkter AC-Verstoß).
-
-#### MIN-003 — `Skeleton`-Component setzt `role="status"` mehrfach in einer SkeletonCard
-
-- **Datei:** `src/components/ui/Skeleton.tsx:8, 19–26`
-- **Beobachtung:** `<SkeletonCard>` rendert zweimal `<Skeleton role="status" aria-live="polite">`. Screenreader bekommen zwei „Lade Termin"-Ankündigungen pro Card. Bei drei Cards = sechs Status-Ankündigungen.
-- **Empfehlung:** `Skeleton` als reines Visual ohne `role` machen; nur eine Wrapper-Live-Region pro Liste setzen (z.B. das Container-`<div>` mit `aria-busy="true"`).
-- **Routing:** frontend-engineer.
-- **Severity:** Minor (Accessibility-Politur, kein Blocker).
-
-#### MIN-004 — Console-Log in `lib/api.ts:99` produziert Logs in Production
-
-- **Datei:** `src/lib/api.ts:98–104`
-- **Beobachtung:** `console.error('[api] internal error:', err);` läuft in Production. Vercel-Logs sind die akzeptierte Quelle (siehe ARCHITECTURE.md §7), also ist das **gewollt**. Der vorhandene `eslint-disable`-Kommentar dokumentiert das. Nur als Hinweis, dass für strukturiertes Logging später ein Logger eingeführt werden könnte.
-- **Empfehlung:** Backlog: Pino oder Pino-pretty in `lib/logger.ts` einführen, sobald Sentry/Vercel-Log-Drains konfiguriert werden.
-- **Routing:** backend-engineer (Backlog).
-- **Severity:** Minor (Nice-to-have).
+**Re-Verify-Outcome:** Loop zurück an `frontend-engineer` für DEF-001, parallel `project-manager` für MIN-001.
 
 ---
 
-## Anforderungs-Lücken
+### IT4 — US-25 bis US-29 (Kunden-Auth, Auftragsübersicht, Storno-Portal, Stripe, Reviews)
 
-Keine. Alle in Architektur und Stories beschriebenen Anforderungen sind
-implementiert.
+- **Verdict:** Approved with Fixes
+- **Build:** tsc PASS, build PASS (25/25 Static Pages).
 
----
+**Story-Verdicts:**
 
-## Out-of-Scope-Funde
+| Story | Verdict | Bemerkung |
+|-------|---------|-----------|
+| US-25 | DONE (mit MAJOR-Bug) | Register/Login/Verify, BUG-401-Fix `verificationTokenExpiry`, BUG-402-Fix `.strict()` ohne email |
+| US-26 | DONE | `GET /api/customer/bookings` upcoming/past, isCancellable mit DST-Schutz |
+| US-27 | DONE | Customer-Storno-Portal mit Frist-Check |
+| US-28 | DONE | Stripe-Session + Idempotenz + Webhook + raw-body-Verify |
+| US-29 | DONE | Reviews POST mit COMPLETED-Check + Ownership, Admin-PATCH Idempotenz |
 
-Keine. Implementation hält sich strikt an den Scope:
+**Critical/Major:**
 
-- Backlog-Stories US-09 (Instagram), US-10 (Bewertungen), US-11 (Kunden-Mail) sind **nicht** implementiert — korrekt.
-- US-12 (Impressum/Datenschutz) ist als Platzhalter-Texte umgesetzt (mit klarem Hinweis auf Toms finale Inhalte).
+- **BUG-IT4-QA-001 (Major)** — US-25 AC. Verify-Redirect-Param-Mismatch: Backend `?verified=true`, Spec `?verified=1`. Verify-Success-Banner zeigt sich nicht auf `/konto`. Routing: `backend-engineer`.
 
----
+**Minor:**
 
-## Nicht-funktionale Funde
+- BUG-IT4-QA-002 — `verify-email`-Alias-Endpoint mit `DYNAMIC_SERVER_USAGE`-Warning. Routing: `backend-engineer`.
+- BUG-IT4-QA-003 — `jose`-Edge-Runtime-Warnings (`CompressionStream`); Workaround Sub-Path-Imports. Routing: `backend-engineer`.
+- BUG-IT4-QA-004 — ESLint-Config (`Converting circular structure to JSON`). Routing: `backend-engineer`.
 
-| Bereich | Beobachtung |
-|---------|-------------|
-| Security | bcrypt cost 10, Partial Unique Index, callbackUrl-Validierung doppelt abgesichert, CSP, HSTS — alles vorhanden. CSP nutzt `'unsafe-inline'`/`'unsafe-eval'` (Next.js erfordert es für Hydration). Akzeptabel für MVP. |
-| Accessibility | ARIA-Labels, `aria-busy`, `aria-live`, `aria-invalid`, `aria-describedby`, `role="alert/status/dialog"`, sr-only Skip-Link, Focus-Trap im ConfirmDialog, Tabs mit `role="tab"`. Kontrast-Tokens definiert (Bark/Cream ≥7:1). Sehr solide. Kleinere Politur: Skeleton-Doppel-Status (siehe MIN-003). |
-| Performance | Server-Components für statische Pages, `cache: 'no-store'` für Lese-Endpunkte, `revalidateTag('slots')` an allen mutierenden Endpunkten, Bundle-Sizes klein (Buchungsseite 5.1 kB / 125 kB First Load). Composite-Index `(startsAt, endsAt)` in Migrations. |
-| Observability | Strukturierte Console-Errors via `internalError()`. Mail-Reliability sichtbar im Admin-Dashboard. Kein Sentry — laut Architektur ok für MVP. |
-| Error UX | Jede Page hat dokumentierte Loading-/Empty-/Error-/Conflict-States. Conflict (409), Rate-Limit (429), Validation-Fehler werden separat behandelt. |
-| GDPR | DSGVO-Checkbox als `z.literal(true)` Pflicht, Datenschutz-Page mit Auftragsverarbeitern, 2-Jahres-Speicherdauer dokumentiert. |
-
----
-
-## Empfehlungen für Release
-
-1. **IMP-001** beheben, bevor CI/CD aufgesetzt wird (sonst läuft `npm test` in der Pipeline rot).
-2. **IMP-002** vor Live-Deploy fixen (5 Minuten Aufwand, harte DSGVO/Security-Hygiene).
-3. MIN-001 bis MIN-004 sind in eine Nice-to-have-Liste für Iteration 2.
-4. Tom muss vor Live-Schaltung:
-   - Eigene Domain bei Vercel registrieren (DNS umbiegen).
-   - Resend-Domain DNS-verifizieren oder zunächst `onboarding@resend.dev` als Absender stehen lassen.
-   - `NEXTAUTH_SECRET` neu erzeugen (`openssl rand -base64 32`).
-   - Upstash Redis (Free Tier) provisionieren und ENV setzen, sonst läuft Rate-Limit nicht (akzeptabler Fallback laut Spec).
-   - Direkt nach erstem Deploy `/admin/setup` aufrufen und Passwort setzen (≥12 Zeichen).
-   - Impressum-Inhalte (Adresse) in `src/app/impressum/page.tsx` finalisieren.
+**Re-Verify-Outcome:** Patch BUG-IT4-QA-001 (one-line), dann DONE. MINOR-Issues in IT5-Backlog.
 
 ---
 
-## Sign-off Checkliste
+### IT5 — US-30 bis US-34 (Admin-Pwd-Reset, OAuth-Customer, Adressfeld, Buchungsdauer, Buffer-Zeit)
 
-- [x] Alle Critical Issues behoben (es gibt keine).
-- [x] Alle 18 Akzeptanzkriterien (US-01 bis US-08, US-12) erfüllt.
-- [x] Contract-Mismatches: keine gefunden.
-- [x] Build (`next build`), Type-Check (`tsc --noEmit`), Lint (`next lint`), Smoke-Tests (13/13) PASS.
-- [x] Non-functional baseline (Security, A11y, Perf, GDPR) akzeptabel.
-- [ ] IMP-001 (npm test ohne ENV-Wrapper) — empfohlen vor CI-Setup.
-- [ ] IMP-002 (robots.txt) — empfohlen vor Live-Deploy.
+- **Verdict:** Done
+- **Build:** tsc PASS, build PASS (Exit 0, alle 30 Static Pages, 8 IT5-Routen sichtbar).
+
+**Story-Verdicts:**
+
+| Story | Verdict | Bemerkung |
+|-------|---------|-----------|
+| US-30 | DONE | Forgot/Reset-UI mit Loading + Erfolgs-Banner + 3s-Countdown, `adminBaseUrl()`-Fallback-Kette, Public-Routes in Middleware |
+| US-31 | DONE | Feature-Flag, OAuth-Buttons Login+Register, eigene NextAuth-Customer-Instanz, BUG-IT5-004 Hijacking-Schutz, Cookie-Trennung |
+| US-32 | DONE | Adress-Pflichtfelder + 5-Stellen-PLZ-Regex + DB-Persistenz |
+| US-33 | DONE | DurationPicker 1h-8h + Preisschätzung, Serializable-Transaktion in `booking-create.ts` |
+| US-34 | DONE | Buffer-Config 0/15/30/45/60, Default 30, defense-in-depth (Slot-Anzeige + Insert-Pfad) |
+
+**Critical/Major:** Keine.
+
+**Sicherheits-Bewertung IT5:** Alle 7 Bereiche (Account-Linking, Cookie-Trennung, Open-Redirect, Race-Conditions, User-Enumeration, Token-Lifecycle, Admin-Schutz) sauber.
+
+**Minor (offene Punkte, nicht-blockierend):**
+
+- US-33 AC1 — „Ganztag"-Kachel nicht explizit in UI. Routing: `frontend-engineer`.
+- US-34 AC5 — Buffer-Bereich nicht visuell als grauer Block im Admin-Kalender. Routing: `frontend-engineer`.
+- Pre-existing Build-Warnung `aria-pressed` auf `gridcell` in `Calendar.tsx`. Routing: `frontend-engineer`.
+- Pre-existing IT4-Verhalten `DYNAMIC_SERVER_USAGE` in `verify-email`. Routing: `backend-engineer`.
+
+**Re-Verify-Outcome:** Iteration 5 als DONE markiert. Polish-Punkte als Backlog.
 
 ---
 
-## Finales Urteil pro Story
+### IT6 — US-IT6-01 bis US-IT6-09 (Multi-Admin, Kalender, Reviews, SEO, Auth-Bereinigung, Wipe, Customer-Userverwaltung, Final-Preis, Analytics)
 
-| Story | Titel | Status |
-|-------|-------|--------|
-| US-01 | Service-Portfolio einsehen | **Done** |
-| US-02 | Kontaktinformationen finden | **Done** |
-| US-03 | Verfügbare Zeitfenster anzeigen | **Done** |
-| US-04 | Buchungsanfrage stellen | **Done** |
-| US-05 | Zeitfenster einpflegen (Admin) | **Done** |
-| US-06 | Buchungsanfragen verwalten (Admin) | **Done** |
-| US-07 | Admin-Login | **Done** |
-| US-08 | E-Mail-Benachrichtigung | **Done** |
-| US-12 | Impressum & Datenschutz | **Done** |
+- **Verdict:** Bedingt-DONE → **DONE (Final Verification Pass)**
+- **Build:** tsc 0, lint 0, npm test 171/171 + 2 SKIP, DTO-Leak-Scanner OK, Migration `20260503083723_iteration_6` OK.
 
-**Empfehlung an Project Manager:** MVP ist *Ready for Release*. Die zwei Important-Findings (IMP-001 npm-Test-Wrapper, IMP-002 robots.txt) sollten in einem 30-Minuten-Folge-Ticket gefixt werden, blockieren aber keinen Story-Abschluss.
+**Story-Verdicts pro Story:** 9/9 DONE.
+
+**Critical/Major (alle erhalten):**
+
+- **D1 (Major) — US-IT6-04 — Sitemap referenziert nicht-existente Service-Detail-Pages.** Lighthouse-SEO + Google-Indexierung leiden. Routing: `frontend-engineer` (Service-Detail-Page anlegen) ODER `solution-architect` (Sitemap-Einträge raus). **RESOLVED** — `src/app/services/[slug]/page.tsx` mit `generateStaticParams()` für 6 Slugs angelegt, `dynamicParams = false`, JSON-LD + Canonical.
+- **D2 (Major) — US-IT6-01 — DISABLED-Admin kann Page-Shells öffnen.** Page-Components prüfen nur `session?.user`, nicht `User.status === 'ACTIVE'`. AC verletzt. Routing: `backend-engineer` + `frontend-engineer`. **RESOLVED** — Helper `requireActiveAdmin()` in `src/lib/require-admin.ts` redirected bei `status !== 'ACTIVE'` zu `/admin/login?error=account_disabled`. Alle 6 Admin-Pages migriert.
+
+**Minor:**
+
+- D3 — US-IT6-05 — Legacy-Auth-Endpoints liefern 410 statt 404. Routing: `solution-architect` / `backend-engineer`. **RESOLVED** — Verzeichnisse gelöscht; Next.js liefert nativ 404.
+- D4 — US-IT6-06 — `reset-users.ts` ohne `--dry-run` und ohne NODE_ENV-Production-Guard. Routing: `backend-engineer`. **RESOLVED** — `--dry-run`-Flag, Production-Guard `CONFIRM_PRODUCTION_WIPE=true`, 5-Sekunden-Countdown vor real-Run.
+
+**Sicherheits-Sign-Off:** F1, F2, F3 alle PASS. CI-Test-Suiten für DTO-Leak grün.
+
+**Re-Verify-Outcome (Final Pass):** Alle 4 Defekte resolved. Hygiene komplett grün, F1/F2/F3-Garantien unverändert in place. **Iteration 6 ist DONE — go-live freigegeben.**
+
+---
+
+### IT7 — US-IT7-01 bis US-IT7-05 (Email/Pwd-Reversion, Google+Facebook OAuth, Promote-Skript, Reset-Flow)
+
+- **Verdict:** DONE (kein Re-Loop nötig); m6-IT7 = Tom-Aktion bleibt offen
+- **Build:** tsc PASS, lint 0, npm test 181/181, DTO-Leak-Scanner OK, Migration Plan A + Plan B vorhanden.
+
+**Story-Verdicts:** 5/5 DONE (US-IT7-02/03 Code-DONE — manueller Sign-Off durch Tom).
+
+**Critical/Major:** Keine.
+
+**IT6-Regression:** F1, F2, F3 alle aktiv und um IT7-Felder (`passwordHash`, `verificationToken`, `verificationTokenExpiry`, `oauthId`) erweitert. Tests grün.
+
+**m-Findings-Auflagen-Status:**
+
+- m1-IT7 (Latency-Floor 750ms) — PASS
+- m2-IT7 (Conditional UPDATE Reset) — PASS
+- m3-IT7 (Migration Plan B) — PASS
+- m4-IT7 (Stdin Pwd / History-Warning) — PASS
+- m5-IT7 (`secret_source` Aliasing) — PASS
+- m6-IT7 (Tom-OAuth-Sign-Off) — TOM-AKTION (Orchestrator-Termin)
+
+**Minor (Cosmetic, nicht-blockierend):**
+
+- D1-IT7 — `customerLoginLimiter` 15min/10 (strenger als Spec 1h/10). Routing: `solution-architect` (Doku) / `backend-engineer`.
+- D2-IT7 — Schema `User.resetToken` bleibt für Admin-Reset-Flow erhalten (kein Defekt, Doku-Hinweis). Routing: `solution-architect`.
+
+**Re-Verify-Outcome:** Iteration 7 als DONE markiert. Tom-Sign-Off-Termin einplanen für US-IT7-02/03 OAuth.
+
+---
+
+### IT8 — US-IT8-01 bis US-IT8-05 (Admin-Crash, Calendar, Slot-Save, DayOverride-Liste, OAuth-Diagnose)
+
+- **Verdict:** DONE — Production-deploybar
+- **Build:** tsc 0, npm run test:diagnose 32/32, npm test 181/181 + 0 Fails.
+
+**Story-Verdicts:** 5/5 DONE.
+
+**Critical/Major:** Keine.
+
+**Verifikation der QA-Design-Major-Concerns:**
+
+- BUG-IT8-01-A (Envelope-Mismatch + Defense-in-Depth) — Backend `apiSuccess(array)`, FE `Array.isArray`-Guard, Konsumenten-Audit grün.
+- BUG-IT8-02-A (`useRef` + AbortController) — `lastRangeRef`/`abortRef`/`mountedRef` vollständig umgesetzt.
+- BUG-IT8-03-A (Public-View kein Regression) — Server-Verzweigung auf `auth()` + FE übergibt explizit `from`.
+- BUG-IT8-05-A (alle ENV-Var-Checks `actionRequired: 'config'`) — 14/14 Checks korrekt; Test verifiziert.
+
+**Live-Browser-Smoke (NICHT im Sandbox testbar):** 7-Schritte-Checkliste für Tom auf Vercel-Preview.
+
+**Re-Verify-Outcome:** Phase 4 starten (Production-Deploy zu Vercel-Preview). Kein weiterer Build-Loop erforderlich.
+
+---
+
+### IT9 — US-IT9-01 bis US-IT9-04 (`/admin/users`-Crash, Customer-Adresse, Buchungs-Kalender, Google-OAuth-Setup-Guide)
+
+- **Verdict:** DONE
+- **Build:** tsc clean, npm test 181/181.
+
+**Story-Verdicts:** 4/4 DONE.
+
+**Critical/Major:** Keine.
+
+**Verifikation der QA-Design-Major-Concerns:**
+
+- MAJOR-IT9-02-A (Migration sicher, additive ALTER COLUMN) — bestätigt.
+- MAJOR-IT9-02-B (CustomerLoginResponseSchema robust) — bestätigt; Mapper mit `?? null`.
+- MAJOR-IT9-02-C (alle `toCustomerPublic`-Aufrufer via `selectCustomerUserPublic`) — bestätigt.
+- MAJOR-IT9-02-D (Schema-Pflicht-Felder vs. Mapper) — bestätigt.
+- MAJOR-IT9-03-A (Helper-Name `computeInitialMonthRangeBerlin()` als neue Datei `src/lib/calendar-range.ts`) — bestätigt; kein Refactor des IT8-Helpers.
+- MAJOR-IT9-04-A (Redirect-URI-Pfad gegen Diagnose-Endpoint) — bestätigt; 1:1-Match.
+
+**Minor (alle erhalten):**
+
+- MINOR-IT9-01-A — Empty-State-Wortlaut „Noch keine Kunden registriert." statt Story-„Keine Kunden registriert." Routing: `frontend-engineer`.
+- MINOR-IT9-01-B — AC4 Status-Spalte unklar; aktuell `bookingCount` + `adminRating` als Proxy. Routing: `frontend-engineer`.
+- MINOR-IT9-02-A — Server-Banner-Pfad bei 400 `address_required` ohne Profil-Link (Defense-in-Depth, UI verhindert Fall heute kaum). Routing: `frontend-engineer`.
+
+**Open Manual:** US-IT9-04 AC4 — Live-Login mit Google nach Setup → manueller Smoke durch Tom auf Vercel-Preview.
+
+**Re-Verify-Outcome:** Loop schließen. Minor-Findings in Follow-up-PR oder Backlog.
+
+---
+
+### IT10 — US-IT10-01 bis US-IT10-05 (Reset-Mail, Admin-Nutzerliste, Booking-POST, Quick-Booking-Modal, Customer-Self-Service)
+
+- **Verdict:** DONE — Go Live (vorbehaltlich 5 operative Tom-Aufgaben)
+- **Build:** lint PASS, typecheck PASS, smoke 181/181, IT10-Tests 24/24.
+
+**Story-Verdicts:** 5/5 DONE.
+
+**Critical/Major:** Keine.
+
+**Phase-2-QA-Auflagen-Status (alle aus dem Design-Review umgesetzt):**
+
+- STRUCT-1 (`internalError()`-Logging-Härtung mit `[internal_error]`/`[prisma_error]`-Markern + Endpoint-Tag + Stack + Prisma-Code im Log; Response leakt nichts) — PASS.
+- STRUCT-3 (`BOOKING_SLOT_TAKEN`-Subcode in BE + FE) — PASS, `BookingConflictError` mit Subcode + `field: 'date'`.
+- STRUCT-4 (Service-Pflichtfeld im Modal, Submit disabled bis Service gewählt) — PASS.
+- UX-2 (`COMPLETED`-Badge ergänzt, 6 Varianten, A11y-konform Text+Icon) — PASS.
+- PM-1 (`MAIL_FROM` kanonisch im Code; `RESEND_FROM_EMAIL` nicht referenziert) — PASS.
+- STRUCT-5 (Vor-Account-Buchungen-Filter als bewusste Limitation, im UI dokumentiert) — PASS.
+
+**Beobachtungen ohne Defekt-Klassifikation:**
+
+- `lucide-react` nicht installiert; `src/components/ui/icons.tsx` mit Inline-SVG-Eigenimplementierungen. Akzeptabel.
+- `useCustomer()` (Client-Hook) statt SSR-Pre-Fill (Architektur §2.2 hatte „empfohlen Variante A"). Vertretbar; Backlog IT11+.
+- Frontend-seitige Pagination für `GET /api/customer/bookings`. Pragmatisch akzeptabel; Backlog bei Wachstum.
+
+**Operative Aufgaben für Tom (nicht-Code):**
+
+1. `MAIL_FROM` in Vercel setzen.
+2. Resend-Domain verifizieren.
+3. Pflicht-ENV `RESEND_API_KEY`, `MAIL_TO_ADMIN`, `NEXTAUTH_URL`, `NEXT_PUBLIC_BASE_URL`.
+4. `prisma migrate deploy` gegen Prod-libSQL/Turso.
+5. Live-Smoke-Test in Prod nach Vercel-Setup.
+
+**Re-Verify-Outcome:** Code-Qualität hoch. Tom muss vor Live-Deployment die 5 operativen Aufgaben abarbeiten — sonst werden Bug-Symptome (Reset-Mail kommt nicht an, `/admin/users` 500, Booking-POST 500) weiter sichtbar.
+
+---
+
+### IT11 — US-IT11-01 bis US-IT11-06 (Buchung-E2E, Modal-Konsolidierung, Bestätigung+Token, Datei-Upload, Profil-Vorausfüllung, Storno)
+
+- **Verdict:** DONE (Code) — wartet auf Tom-Smoke-Test in Prod
+- **Build:** test:it11 33/33, test 181/181 (+2 SKIP), tsc clean, lint 0, build erfolgreich.
+
+**Story-Verdicts:** 6/6 DONE aus Code-Sicht.
+
+**Critical/Major:** Keine. Statisch und dynamisch wurde kein AC-Bruch identifiziert.
+
+**Vertragskonformität (OpenAPI v11.1):** Vollständig konform. Alle 11 Vertragsteile passing.
+
+**Microcopy + A11y Stichproben:** Telefon-NBSP, `tel:`-Link E.164, Modal-Trigger `aria-haspopup="dialog"`, Cancel-Dialog `role="dialog"` + Focus auf Abbrechen — alle PASS.
+
+**Minor (alle erhalten, nicht-blockierend):**
+
+- MIN-01 — Magic-Bytes-Check kann silently übersprungen werden (Defense-in-Depth). Routing: `backend-engineer` (Backlog IT12).
+- MIN-02 — Doppel-Submit-Dedup nur bei `customerEmail`-Match. Routing: `backend-engineer` (Wartungs-Backlog).
+- MIN-03 — Bestätigungs-Page bei `kind: 'error'` rendert dieselbe `<TokenExpiredPage>` wie bei `kind: 'unauthorized'`. Routing: `frontend-engineer` (Backlog IT12).
+- MIN-04 — Tom-Mail-Pfad bei Cancel: best-effort, kein Retry/DLQ. Routing: `backend-engineer` (Backlog).
+
+**Manuelle Smoke-Tests für Tom:** 12 Schritte (Phase A operative Vorbedingungen + Phase B E2E).
+
+**Sign-off-Kriterium:** (1) Alle 12 Smoke-Schritte funktionieren UND (2) mindestens eine Mail an Tom (`hausservice-baerenstark@outlook.com`) bei einem Nicht-Test-Empfänger angekommen.
+
+**Re-Verify-Outcome:** Nach Tom-Smoke-Test final abnehmbar.
+
+---
+
+### IT12 — IT12-S01 bis IT12-S15 (OAuth-Fix, Service-Bilder, Kalender-Performance, 9 Bug-Fixes, Marketing-Mailer)
+
+- **Verdict (Original):** **BLOCKED** — Loop nötig.
+- **Verdict (Re-Verify nach Bug-Fixes):** **APPROVED with caveats** — alle Critical/Major resolved, deploy-ready für Production.
+- **Build:** tsc clean, test:it12 19/19 → 20/20, build erfolgreich.
+
+**Story-Verdicts:** 7 Done + 7 Done with conditions + 1 Not done (S15, BLOCKER vor Re-Verify).
+
+**Critical (alle erhalten):**
+
+- **BUG-001 (Critical, Blocker) — S15 Bulk-Send-Endpoint FE↔BE Body-Mismatch.** FE `sendMarketingEmail(draftId)` ohne Body, Backend erwartet `recipientIds`-Body. Routing: `backend-engineer` / `frontend-engineer`. **RESOLVED** in Re-Verify (Option A — Frontend sendet `recipientIds`+`subject`+`body`; Backend persistiert FE-Edits vor Send).
+
+**Major (alle erhalten):**
+
+- **BUG-002 (Major) — S05 AC2 E-Mail-Vorausfüllung im Konto-Card.** `displayEmail=""` weil `public-summary` E-Mail aus PII-Gründen nicht liefert. Routing: `solution-architect` → `frontend-engineer`. **RESOLVED** — `BookingPublicSummary` liefert `customerEmail` aus, wenn Token-Auth ODER Cookie-Owner; `CreateAccountOfferSheet` zeigt Email read-only.
+- **BUG-003 (Major, Compliance) — S15 DSGVO/UWG-Risiko, Backend-Send filtert nicht auf Bestandskunde.** UWG §7 Abs. 3 verletzt, wenn Customer ohne COMPLETED-Booking Marketing-Mail erhält. Routing: `backend-engineer` + `solution-architect`. **RESOLVED** — `marketing-bulk-send.ts` filtert auf `bookings: { some: { status: 'COMPLETED' } }`; `strictRecipients: true` wirft 422 INVALID_RECIPIENTS; dedicated Test verifiziert.
+- **BUG-004 (Major, Doku) — OpenAPI-Spec Drift: `/send` ohne Body, Implementierung mit Body.** Routing: `solution-architect`. **RESOLVED** — `iteration-12.openapi.yaml` aktualisiert mit `MarketingEmailSendRequest`-Schema + 422-Response + Header-Doku.
+
+**Findings (Should fix, alle erhalten):**
+
+- FIND-001 (Minor, Contract) — S05 Backend gibt 401 statt subcode `INVALID_TOKEN`. Funktioniert dank FE-Mehrfach-Check. Routing: `backend-engineer`.
+- FIND-002 (Minor, UX) — Marketing-Composer auto-saved Draft kann nicht aktualisiert werden. **RESOLVED** in Re-Verify (Composer schickt aktuelle State-Werte an `/send`, Backend persistiert vor Send).
+- FIND-003 (Minor) — S15 Marketing-Historie nicht implementiert (Should-Have). Bestätigt als IT13-Backlog.
+- FIND-004 (Should fix) — S03 Performance-Target Production-Verifikation. Routing: Tom (Browser DevTools-Messung nach Deploy).
+- FIND-005 (Minor) — S02 Service-Tests nicht im Test-Lauf. Manueller Smoke akzeptabel.
+- FIND-006 (Minor, defensive) — S07 ProfileForm: `router.refresh()` für Server-Components fehlt. Routing: `frontend-engineer`.
+
+**Caveats nach Re-Verify (kein Blocker):**
+
+- CAVEAT-001 (Minor) — Frontend-Composer liest ausgeschlossene Recipient-IDs aus `err.details`, Backend liefert via Header `X-Excluded-Ids`. Tom sieht Fehlermeldung, aber nicht ID-Liste im UI. Backlog IT13.
+- CAVEAT-002 (Minor) — FIND-001 nicht erneut verifiziert (war Optional/kosmetisch).
+
+**Operative Tom-Aufgaben:**
+
+1. Vercel-Env: `NEXTAUTH_URL=https://www.baerenstark-hausservice.app`, `NEXT_PUBLIC_BASE_URL=https://www.baerenstark-hausservice.app`, `UNSUBSCRIBE_TOKEN_SECRET`, `BLOB_READ_WRITE_TOKEN`, `RESEND_API_KEY`, `MAIL_FROM`.
+2. Google Cloud Console — Authorized Redirect URI `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google`.
+3. `npx prisma migrate deploy` (Marketing-Tabellen + `customer_users.unsubscribedAt/Reason` + `idempotency_keys`).
+
+**Re-Verify-Outcome:** **APPROVED with caveats** — alle Critical/Major-Bugs resolved, deploy-ready für Production. Caveats nicht-blockierend, IT13-Backlog. Tom-Smoke-Tests (S01-S15) in 18 Schritten dokumentiert.
+
+---
+
+## Manueller Smoke-Plan für Tom (jüngste Iteration IT12)
+
+### Phase 1 — DevOps-Pflichtaktionen (vor allem)
+
+1. Vercel-ENV setzen/verifizieren (siehe oben IT12-Block).
+2. Google Cloud Console — Authorized Redirect URI exakt.
+3. `npx prisma migrate deploy`.
+
+### Phase 2 — Smoke-Tests pro Story
+
+4. S01: Inkognito → `/konto/login` → „Mit Google anmelden" → erwartet eingeloggt auf `/konto`, kein 4xx.
+5. S02: `/services/entruempelung` (+ 5 weitere Slugs) → Hero-Foto sichtbar, Icon klein neben H1.
+6. S03: `/buchung` → Schritt „Wann?" → Stoppuhr < 1.5s.
+7. S04: Slot auswählen → Scrollposition unverändert.
+8. S05: Als Gast Buchung absenden → Bestätigungsseite → Konto-Card sichtbar → Passwort eingeben → eingeloggt → `/konto` zeigt Anfrage.
+9. S06: Als Customer eingeloggt → `/konto` → Anfragen-Liste rendert (kein 500).
+10. S07: `/konto/profil` → Adresse ändern → Speichern → Header zeigt weiterhin „Mein Konto".
+11. S08: Als Customer eingeloggt → `/buchung` → Form prüfen vorausgefüllt.
+12. S09: Wechsel zwischen Feldern → KEIN Scroll-Sprung.
+13. S10: `/buchung` → Bild-Upload (1 MB JPEG) erfolgreich. Großdatei (>10 MB) → klare Fehlermeldung.
+14. S11: Submit als Customer → Loader weg, Toast „Anfrage gesendet", Redirect → `/konto` zeigt neue Anfrage. Doppelklick-Schutz (Idempotency-Key).
+15. S12: Admin → `/admin` → Widget „Bevorstehende Termine" lädt.
+16. S13: Admin → `/admin/bookings` → Liste rendert.
+17. S14: Admin-Sidebar prüfen: 3 Gruppen, Bewertungen NUR in Auswertungen, Welcome-Banner einmalig.
+18. S15: `/admin/marketing` → Service-Filter → Wizard → Test-Send → Mail prüfen → UWG-Checkbox → Senden → Step 6. Unsubscribe-Test, Daily-Quota-Test.
+
+### Phase 3 — Logs & Monitoring
+
+19. Vercel-Logs auf 4xx/5xx prüfen.
+20. Resend-Dashboard auf bounced/failed Mails prüfen.
+
+---
+
+**Ende konsolidiertes Implementation-Review IT2–IT12.**

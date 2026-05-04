@@ -1,4034 +1,893 @@
-# Architektur — Bärenstark Hausservice Website
+# Bärenstark Hausservice — Architektur (Stand IT12, 2026-05-04)
 
-**Version:** 1.6.0 (Iteration 6 — Admin-Reife, Auth-Bereinigung, SEO; siehe §19 + ARCHITECTURE_IT6.md)
-**Stand:** 2026-05-03
-**Autor:** Solution Architect
+**Owner:** Tom Siefert (Inhaber)
+**Konsolidiert von:** Solution Architect, 2026-05-04
+**Dokument-Status:** Single Source of Truth. Frühere Iterations-Dateien
+(`ARCHITECTURE_IT6.md` ... `ARCHITECTURE_IT12.md`) werden archiviert.
+Bei Konflikten gilt dieses Dokument.
 
-> Vor v1.6.0: Version 1.5.1 (Iteration 5 — Design-Revision nach QA, US-30 bis US-34, Stand 2026-05-02).
-
----
-
-## Änderungslog v1.5.1 (Iteration 5 — Design-Revision nach QA)
-
-Auslöser: `QA_DESIGN_REVIEW.md` Abschnitt „Iteration 5 Design Review" mit
-1 Critical und 3 zu fixierenden Major-Befunden. Diese Revision schließt
-die offenen Architektur-Entscheidungen verbindlich, **bevor der Build
-startet**. Es gibt **keine Schema-Änderungen**; der Fix ist rein
-spezifikatorisch.
-
-| ID            | Severity | Bereich         | Fix-Strategie                                                                                                                                                                                                                                                                                                                                                                |
-| ------------- | -------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| BUG-IT5-001   | Critical | Backend / DB    | §18.5.5 NEU: **Race-Condition-Schutz für variable Buchungsdauer** verbindlich festgelegt. SQLite-Transaktion mit `BEGIN IMMEDIATE` serialisiert schreibende Transaktionen; im Block: Overlap-Check (`start < requestedEnd AND end > requestedStart`) gegen aktive Buchungen + Buffer-Check + Insert. Der Partial Unique Index bleibt als zweite Verteidigungslinie bestehen. |
-| BUG-IT5-002   | Major    | Auth-Architektur| §18.2.4 NACHGESCHÄRFT: **Cookie-Setzen nach OAuth-Callback ist verbindlich Variante 2 (Redirect-basiert via Custom Finalize-Route)**. Neuer öffentlicher Endpoint `GET /api/customer/oauth-finalize` setzt das `customer-session`-Cookie nach erfolgreichem OAuth-Flow. NextAuth-`redirect`-Callback leitet dorthin um.                                                       |
-| BUG-IT5-004   | Major    | Sicherheit      | §18.9.2 NACHGESCHÄRFT: **Account-Linking-Sicherheit differenziert** zwischen verifiziertem und unverifiziertem lokalen Konto. Unverifiziertes lokales Konto → KEINE automatische OAuth-Verknüpfung; neuer Fehlercode `OAUTH_UNVERIFIED_CONFLICT` (422). Verifiziertes Konto → automatische Verknüpfung wie bisher.                                                            |
-| Deployment-URL| —        | Operational     | Produktions-Domain wechselt von `baerenstark.vercel.app` auf `https://www.baerenstark-hausservice.app`. ENV-Variable `NEXTAUTH_URL` und alle OAuth-Callback-URLs (Google + GitHub) müssen entsprechend aktualisiert werden. Tom muss die Callback-URLs in den Developer-Konsolen aktualisieren.                                                                              |
-| Neuer Code    | API      | Fehlercode      | `OAUTH_UNVERIFIED_CONFLICT` (HTTP 422) — OAuth-Login schlägt fehl, weil ein lokales Konto mit gleicher E-Mail existiert, das nicht verifiziert ist.                                                                                                                                                                                                                          |
-
-Begleitende Updates in `contracts/api-routes.md` (neuer Endpoint
-`/api/customer/oauth-finalize` + neuer Fehlercode) und `.env.example`
-(neue Produktions-URL als Kommentar, OAuth-Callback-URL-Hinweise).
-
-Nicht enthalten in dieser Revision: BUG-IT5-003, BUG-IT5-005,
-MIN-IT5-001…MIN-IT5-005 — diese bleiben auf der Engineering-Notes-Liste
-des Build-Plans und werden während der Implementierung adressiert (siehe
-QA-Review).
+> Dieses Dokument beschreibt den **finalen Stand nach Iteration 12** als
+> aktuelle Wahrheit. Iterations-Notizen in §11 erklären den historischen
+> Kontext. Detail-Verträge (OpenAPI, Zod-Schemas) liegen unter
+> `contracts/`. User-Stories sind die Truth in `PROJECT.md` /
+> `project/user-stories/`.
 
 ---
 
-## Änderungslog v1.5 (Iteration 5 — US-30 bis US-34)
+## 1. Stack-Übersicht
 
-Auslöser: Iteration-5-Stories US-30 bis US-34. Diese Version
-dokumentiert den Admin-Passwort-Reset-UX-Fix, OAuth2-Login für Kunden
-(Google + GitHub), das Adressfeld in der Buchung, die Multi-Stunden-
-Auftragsdauer und den globalen Buffer-Zeit-Mechanismus.
+| Layer            | Technologie                                                   |
+|------------------|---------------------------------------------------------------|
+| Frontend         | Next.js 14 App Router, TypeScript, TailwindCSS, React Hook Form + Zod |
+| Backend          | Next.js Route Handlers (Node-Runtime), Zod-Validation          |
+| ORM              | Prisma 5.22 — `provider = "sqlite"`                           |
+| Datenbank Prod   | **Turso (libSQL)** — `baerenstark-prod`, `DATABASE_URL=libsql://…` |
+| Datenbank Dev    | Lokales SQLite-File über Prisma                               |
+| Admin-Auth       | NextAuth v5 (Credentials) auf `/api/auth/[...nextauth]`        |
+| Customer-Auth    | NextAuth v5 (Google OAuth) auf `/api/auth/customer/[...nextauth]` + Custom-JWT-Cookie `customer-session` (E-Mail/Passwort, OAuth-Finalize) |
+| Mail-Provider    | Resend (Free Tier: 100/Tag, 3 000/Monat)                      |
+| File-Storage     | Vercel Blob (`@vercel/blob` 2.3.x), `BLOB_READ_WRITE_TOKEN`   |
+| Hosting          | Vercel **Hobby Plan** (10 s Function-Timeout)                 |
+| Domain           | `https://www.baerenstark-hausservice.app` (mit `www`!)         |
+| Calendar-Lib     | FullCalendar 6 (`@fullcalendar/react`)                        |
+| Charts           | Recharts (Analytics)                                          |
+| Tokens           | `jose` (JWT) — Confirmation/Cancellation Tokens, transitive Dep über NextAuth |
 
-| ID                | Bereich       | Erweiterung / Fix                                                                                |
-| ----------------- | ------------- | ------------------------------------------------------------------------------------------------ |
-| US-30 UX          | Admin-Auth    | Reset-Link-URL strikt aus `NEXTAUTH_URL` (Helper `adminBaseUrl()` mit Vercel-/Localhost-Fallback). Mindest-Pw-Länge im Reset auf 8 Zeichen. Login-Page-Link „Passwort vergessen?" wird sichtbar unter dem Passwort-Feld platziert. Middleware-Whitelist verifiziert. |
-| US-31 Datenmodell | Schema        | `CustomerUser.passwordHash` wird **nullable**. Drei neue Felder: `oauthProvider`, `oauthId`, `avatarUrl`. Composite-Index `(oauthProvider, oauthId)`. |
-| US-31 API         | Endpunkte     | **Neuer NextAuth-Customer-Handler** unter `/api/auth/customer/[...nextauth]` (separater Pfad — kollidiert NICHT mit Admin-NextAuth). Nach OAuth-Callback: CustomerUser via E-Mail finden/anlegen, dann Custom-JWT-Cookie `customer-session` setzen → einheitlicher Auth-Flow für eingeloggten Kunden. Bestehender `POST /api/customer/login` unverändert. |
-| US-31 Auth-Logic  | App-Layer     | Account-Verknüpfung via E-Mail (case-insensitive). OAuth-Login auf bestehendes Pw-Konto setzt nur `oauthProvider/oauthId/avatarUrl` — `passwordHash` bleibt erhalten (Konto unterstützt beide Methoden). Pw-Login gegen OAuth-only-Konto → 422 `OAUTH_ONLY_ACCOUNT`. |
-| US-31 ENV         | Operational   | Neue ENV: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`. Tom muss OAuth-Apps in Google Cloud Console + GitHub Developer Settings anlegen und Callback-URLs eintragen. |
-| US-32 Datenmodell | Schema        | `Booking.addressStreet`, `addressZip`, `addressCity` neu (DB-nullable für Bestand, API-Pflicht für neue Buchungen). |
-| US-32 API         | Endpunkte     | `POST /api/bookings` Body um drei Pflichtfelder erweitert. Alle Listing- und Detail-Endpoints geben Adressfelder im Response zurück (nullable für Bestand). |
-| US-33 Datenmodell | Schema        | `Booking.durationMinutes Int @default(60)` neu. Default-Wert ermöglicht Backfill ohne Migration-Daten-Verlust. |
-| US-33 API         | Endpunkte     | `POST /api/bookings` Body erhält `durationMinutes` (Whitelist 60..480 oder Sonderwert -1 = Ganztag). Backend berechnet `endTime` aus `startTime + durationMinutes` (durationMinutes ist Authority). `GET /api/slots/available` erhält optionalen `?duration=NNN`-Param und prüft Verfügbarkeit für gewünschte Dauer. |
-| US-33 Frontend    | UI            | `<DurationPicker>` neu — 7 Kacheln (1h/2h/3h/4h/5h/6h/8h) + „Ganztag". Pro Kachel Preisschätzung „ca. min–max €" via `lib/services.ts.priceFrom × durationHours`. Disabled-State, wenn Fenster nicht ausreicht. Disclaimer (US-20). |
-| US-34 Datenmodell | Schema        | NEUE Tabelle `BufferConfig` (Singleton, ein Datensatz). Default 30 Minuten. Whitelist [0,15,30,45,60] im App-Layer; DB lässt Forward-Kompatibilität. |
-| US-34 API         | Endpunkte     | `GET /api/admin/buffer-config`, `PUT /api/admin/buffer-config`. `GET /api/slots/available` berücksichtigt Buffer-Blöcke nach **CONFIRMED**-Buchungen (NICHT nach PENDING/COUNTER_PROPOSED). |
-| US-34 Frontend    | UI            | Neuer Konfigurationsabschnitt in `app/admin/availability/page.tsx`: Dropdown mit den 5 Buffer-Werten + Speichern-Button. Sichtbare Buffer-Blöcke in Admin-Kalenderansicht (graue Kacheln direkt nach Buchung). |
-| Neue Fehlercodes  | API           | `OAUTH_ONLY_ACCOUNT` (422), `OAUTH_ERROR` (502).                                                  |
-
-Detaillierte Iteration-5-Spezifikation: siehe **§18** in diesem Dokument.
+**Kein Stripe in IT12 produktiv aktiv**: Das `Payment`-Modell und der
+`/api/payments/*`-Pfad sind aus IT4 vorhanden; Stripe-API-Keys sind
+operativ nicht gesetzt, der Buchungs-Flow ist payment-frei. Backlog.
 
 ---
 
-## Änderungslog v1.4.1 (Iteration 4 — QA-Revision)
-
-Auslöser: QA-Design-Review zu Iteration 4 (siehe `QA_DESIGN_REVIEW.md`,
-Abschnitt "Iteration 4 Design Review"). 2 kritische und 5 wichtige
-Defekte wurden vor dem Code-Build im Design behoben. Schema-Änderung
-ist auf 1 neues Feld beschränkt; alle anderen Findings werden durch
-Spec-Klarstellungen + 1 neuen öffentlichen Endpoint adressiert.
-
-| ID         | Severity | Bereich         | Fix-Strategie                                                                                                                                  |
-| ---------- | -------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| BUG-401    | Critical | Schema / Auth   | Neues Feld `CustomerUser.verificationTokenExpiry DateTime?`. Wird bei Registrierung UND `resend-verification` auf `now + 24h` gesetzt. Verify prüft gegen diese Spalte. |
-| BUG-402    | Critical | API / Profil    | E-Mail-Änderung im MVP NICHT erlaubt. `CustomerProfileUpdateSchema` ist `.strict()` und akzeptiert nur firstName/lastName/phone. Pending-Email-Mechanismus bleibt Backlog (IT5). |
-| MAJOR-401  | Major    | Backend / Time  | Storno-Frist wird in Berlin-Zeitzone berechnet. `parseBerlinDateTime()` interpretiert die Wall-Clock korrekt und liefert UTC — DST-fest dokumentiert in §17.7. |
-| MAJOR-402  | Major    | API / FE        | Neuer öffentlicher Endpoint `GET /api/payments/session-status?session_id=...`. Erfolgsseite polled diesen Endpoint (max 5×, 1s Intervall) — Gäste-tauglich. |
-| MAJOR-403  | Major    | Schema / API    | `Review.customerName` bleibt KEIN DB-Feld. Backend leitet ihn live aus dem Customer-Join ab (`firstName + lastName[0] + '.'`); Fallback `"Anonym"` bei null-Kunde. |
-| MAJOR-404  | Major    | Backend / Logic | `isCancellable()` ist null-fest: für Bestandsbuchungen (Slot-basiert ohne `date`) wird `slot.startsAt` herangezogen. Buchungen ohne bekannten Termin → `true` (Server-Authority gilt). |
-| MAJOR-405  | Major    | Sicherheit / FE | `redirectUrl` (im POST-Body) bzw. `callbackUrl` (Query) wird via `safeCustomerCallback()` validiert: nur relative Pfade ohne Protokoll/Host. Sonst Fallback `/konto`. |
-
-Detaillierte Fix-Spezifikation: §17.1 (Auth + Profile), §17.4 (Stripe-Status-Endpoint), §17.5 (Mail-Templates verändert), §17.7 (Sicherheits-Aspekte).
-
-Schema-Migration: 1 ALTER TABLE auf `customer_users` (neue Spalte `verification_token_expiry DATETIME NULL`). Kein Backfill nötig — bestehende unverifizierte Konten erhalten beim nächsten `resend-verification` einen frischen Wert; eine 24h+alte Mail bleibt ungültig (gewünschtes Verhalten).
-
----
-
-## Änderungslog v1.4 (Iteration 4)
-
-Auslöser: Iteration-4-Stories US-25 bis US-29. Diese Version dokumentiert
-das neue Kundenportal mit eigener Auth-Mechanik, die Stripe-basierte
-Zahlungsabwicklung, das echte Backend für Kundenbewertungen und den
-neuen Booking-Status `COMPLETED`.
-
-| ID                | Bereich       | Erweiterung / Fix                                                                                |
-| ----------------- | ------------- | ------------------------------------------------------------------------------------------------ |
-| US-25 Datenmodell | Schema        | Neue Tabelle `customer_users` mit eigenem Cookie `customer-session` (JWT, 7d). Vollständig getrennt vom Admin-`User`. |
-| US-25 API         | Endpunkte     | 9 neue Endpunkte unter `/api/customer/*` (register/login/logout/me/verify/resend-verification/forgot-password/reset-password). |
-| US-25 Mail        | Templates     | 2 neue Templates: `customerVerificationMail`, `customerPasswordResetMail`. (`customerEmailChangedMail` war ursprünglich geplant, wurde in v1.4.1 entfernt — siehe BUG-402.) |
-| US-25 Middleware  | Routing       | `/konto/*` (außer Public-Whitelist) prüft `customer-session`-Cookie. Edge-sicher (nur Cookie-Existenz, JWT-Verify im Handler). |
-| US-26 Datenmodell | Schema        | `Booking.customerId` (FK → customer_users, ON DELETE SET NULL). Backfill-Strategie: keine — Gastbuchungen bleiben sichtbar nur für Tom. |
-| US-26 API         | Endpunkte     | `GET /api/customer/bookings` (Split upcoming/past), `GET /api/customer/bookings/:id`. |
-| US-27 API         | Endpunkte     | `POST /api/customer/bookings/:id/cancel` mit serverseitigem 24h-Frist-Check. |
-| US-28 Stack       | Stack         | **Stripe** als Zahlungs-Provider (deckt Karte, PayPal, Apple Pay, Google Pay über Checkout-Sessions). Alternativen verworfen — siehe §17.4. |
-| US-28 Datenmodell | Schema        | Neue Tabelle `payments` (1:1 zu Booking). Beträge in Cents (Int). |
-| US-28 API         | Endpunkte     | `POST /api/admin/bookings/:id/payment` (Admin), `DELETE /api/admin/bookings/:id/payment` (Admin), `POST /api/payments/create-session`, `POST /api/payments/webhook` (Stripe). |
-| US-28 Mail        | Templates     | 4 neue Templates: `paymentRequestToCustomer`, `paymentReceivedToCustomer`, `paymentReceivedToAdmin`, `paymentRefundedToCustomer`. |
-| US-29 Datenmodell | Schema        | Neue Tabelle `reviews` mit Admin-Freigabe-Mechanismus (`approved` boolean). 1:1 zu Booking, optional zu CustomerUser. |
-| US-29 API         | Endpunkte     | `POST /api/customer/reviews`, `GET /api/reviews` (öffentlich, nur approved), `GET /api/admin/reviews`, `PATCH /api/admin/reviews/:id`. |
-| US-29 Status      | State-Machine | `BookingStatus.COMPLETED` neu — Tom markiert Termin nach Erbringung als abgeschlossen, was Bewertungs-Button im Portal freischaltet. |
-| US-29 Frontend    | UI            | `lib/reviews.ts` (statisch, IT3) wird ersetzt durch `GET /api/reviews`-Aufruf — sobald ≥4 approved Reviews vorhanden sind. |
-| Neue ENV          | Operational   | `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`. `AUTH_SECRET` (alias `NEXTAUTH_SECRET`) wird wiederverwendet für Customer-JWT-Signing. |
-| Neue Fehlercodes  | API           | `EMAIL_NOT_VERIFIED` (422), `STRIPE_ERROR` (502).                                                |
-
-Detaillierte Iteration-4-Spezifikation: siehe **§17** in diesem Dokument.
-
----
-
-## Änderungslog v1.3 (Iteration 3)
-
-Auslöser: Iteration-3-Stories US-17 bis US-24 plus Blocker-Bug
-**BUG IT3** ("Buchungsformular schlägt erneut fehl"). Diese Version
-dokumentiert das neue Verfügbarkeitsfenster-Modell, Datei-Upload via
-Vercel Blob, Preis-Datenstruktur, Feedback-Sektion, Service-Popups und
-die erweiterten Kunden-E-Mails.
-
-| ID                | Bereich       | Erweiterung / Fix                                                                                |
-| ----------------- | ------------- | ------------------------------------------------------------------------------------------------ |
-| BUG-IT3 Fix       | Frontend      | `BookingForm.tsx` umgebaut: `slotId`/Date/Time werden außerhalb von RHF gehalten (siehe `BUG_BOOKING_IT3.md`). |
-| US-17 Datenmodell | Schema        | `AvailabilityTemplate` (7 Wochentage mit startTime/endTime/slotDurationMinutes), `DayOverride` (individuelle Tages-Überschreibung). |
-| US-17 Booking     | Schema        | `Booking.date / startTime / endTime` neu (nullable). `slotId` wird nullable (Bestand). Neuer Partial Unique Index `uniq_active_booking_per_timeslot`. |
-| US-17 API         | Endpunkte     | `GET/PUT /api/admin/availability-template`, `GET/POST /api/admin/day-overrides`, `DELETE /api/admin/day-overrides/:id`, `GET /api/slots/available`. |
-| US-18 Storage     | Storage       | Vercel Blob als Datei-Storage (kostenfrei bis 2 GB). `BookingAttachment`-Modell, `POST /api/upload`. |
-| US-19 Service     | Konstante     | `'sonstiges'` zu `SERVICES` hinzugefügt; bei diesem Service zwingt `CreateBookingSchema` `description ≥ 30` Zeichen. |
-| US-20 Preise      | Frontend      | Statische Preisangaben in `lib/services.ts` (`priceFrom`, `priceUnit`, `priceNote`). Anzeige auf Service-Karten + Popups. |
-| US-21 Dashboard   | API + UI      | `GET /api/admin/upcoming-bookings`. Neue Sektion oben auf `/admin` Dashboard. |
-| US-22 Reviews     | Frontend      | Statische Bewertungen in `lib/reviews.ts`. Neue Section auf Startseite. |
-| US-23 Popups      | Frontend      | Service-Karten-Klick öffnet Modal; Inhalt aus `lib/services.ts.details`. |
-| US-24 Mails       | Mail          | 2 neue Templates: `bookingConfirmationToCustomer` (PENDING→CONFIRMED), `bookingRejectionToCustomer` (PENDING→REJECTED). Trigger in `PATCH /api/bookings/:id`. Eingangsbestätigung an Kunden ist bereits IT2 vorhanden. |
-| Neue ENV          | Operational   | `BLOB_READ_WRITE_TOKEN` (Vercel Blob).                                                            |
-| Neue Fehlercodes  | API           | `PAYLOAD_TOO_LARGE` (413), `UNSUPPORTED_MEDIA_TYPE` (415) für `POST /api/upload`.                |
-
-Detaillierte Iteration-3-Spezifikation: siehe **§16** in diesem Dokument.
-
----
-
-## Änderungslog v1.2 (Iteration 2)
-
-Auslöser: Iteration-2-Stories US-13 bis US-16 plus Blocker-Bug **BUG US-04**
-("Buchungsanfrage absenden schlägt fehl"). Diese Version dokumentiert die
-neuen Datenmodell-Felder, Endpunkte, State-Machine-Übergänge und E-Mail-
-Templates. Detaillierte Wire-Specs in `contracts/api-routes.md` (v1.2),
-`contracts/schema.prisma` (v1.2), `contracts/zod-schemas.ts` (v1.2). Die
-Bug-Analyse mit konkreten Patch-Anweisungen liegt in
-`contracts/BUG_US04_ANALYSIS.md`.
-
-| ID                | Bereich       | Erweiterung / Fix                                                                                |
-| ----------------- | ------------- | ------------------------------------------------------------------------------------------------ |
-| BUG-US-04 Fix 1   | Backend-Logik | `POST /api/bookings` antwortet sofort 201, Mail läuft fire-and-forget (`runMailDispatch`).        |
-| BUG-US-04 Fix 2   | Schema        | `customerEmail` via `z.preprocess` gegen Whitespace gehärtet (Iteration 2 macht es zur Pflicht). |
-| BUG-US-04 Fix 3   | Operational   | `getResend()` filtert Placeholder-Keys aktiv; `.env.example` mit Hinweis.                         |
-| US-13 (Datenmodell) | Schema      | `Booking.cancelToken` (UNIQUE), `Booking.counterProposalSlotId` (FK).                            |
-| US-13 (Status)    | State-Machine | Neue Statuswerte `COUNTER_PROPOSED`, `CANCELLED`. State-Machine in §15 dokumentiert.              |
-| US-13 (API)       | Endpunkte     | `POST /api/bookings/:id/counter-proposal`, `GET /api/bookings/respond`, `POST /api/bookings/rebook` neu. |
-| US-13 (Mail)      | Templates     | 4 neue Mail-Templates (Eingangsbestätigung, Counter-Proposal, Bestätigung-an-Tom, Storno-an-Tom). |
-| US-14             | Endpunkte     | Storno via `GET /api/bookings/respond?action=cancel` plus öffentliche Storno-Bestätigungs-Page. |
-| US-15             | Datenmodell   | Neues Modell `WeeklyAvailability` (7 Datensätze, Toggle pro Wochentag).                           |
-| US-15 (API)       | Endpunkte     | `GET /api/availability`, `PUT /api/availability`.                                                |
-| US-16             | API           | `GET /api/calendar?year=YYYY&month=M`. Frontend-Komponente `components/booking/Calendar.tsx`.     |
-| Index-Update      | DB            | Partial Unique Index erweitert um `COUNTER_PROPOSED`.                                            |
-| Soft-Delete-Update| DB            | `DELETE /api/slots/:id` setzt jetzt auch `COUNTER_PROPOSED → CANCELLED`.                          |
-| Customer-Email    | Schema        | `customerEmail` ist im `CreateBookingSchema` jetzt **Pflicht** (US-13/US-14 brauchen sie).        |
-| Neuer Fehlercode  | API           | `GONE` (HTTP 410) für verbrauchte Token / Endstatus-Versuche.                                     |
-| Neue ENV          | Operational   | `NEXT_PUBLIC_BASE_URL` für Aktionslinks in Mails (Default-Fallback: `NEXTAUTH_URL`).              |
-
-Detaillierte Iteration-2-Spezifikation: siehe **§15** in diesem Dokument.
-
----
-
-## Änderungslog v1.1
-
-Auslöser: `QA_DESIGN_REVIEW.md` vom 2026-05-02 mit 5 kritischen, 8 wichtigen,
-6 minor Findings. Folgende Fixes sind in dieser Version umgesetzt:
-
-| ID       | Bereich     | Fix                                                                                              |
-| -------- | ----------- | ------------------------------------------------------------------------------------------------ |
-| BUG-001  | Logik       | `isBooked` schließt PENDING ein. Slot wird ab erster Anfrage gesperrt; REJECTED gibt ihn frei.   |
-| BUG-002  | Mail        | `mailSent`/`mailError` am Booking. 3 Retries im Handler. Admin-Dashboard markiert Fehlversände.  |
-| BUG-003  | Schema      | Soft-Delete für Slots (`deletedAt`). DELETE setzt PENDING-Bookings atomar auf REJECTED.          |
-| BUG-004  | Security    | Rate-Limit via Upstash Redis (shared); Fallback dokumentiert.                                    |
-| BUG-005  | Security    | NextAuth `callbacks.redirect` validiert `callbackUrl` auf same-origin.                            |
-| BUG-006  | DB          | Partial Unique Index `uniq_active_booking_per_slot` verhindert Doppelbuchungen DB-seitig.        |
-| BUG-008  | Validation  | Slot: Min 30 min, Max 12 h, Max-Vorlauf 1 Jahr, Überlappungs-Check → 409 `OVERLAP`.              |
-| BUG-009  | Contract    | `customerEmail` ist im MVP-Formular vorhanden, optional, beschriftet entsprechend.               |
-| BUG-010  | Validation  | Telefon: mindestens 6 Ziffern nach Strip von Trennzeichen.                                       |
-| BUG-011  | Validation  | Datums-Format: ISO 8601 mit Offset akzeptiert, BE konvertiert in UTC.                            |
-| BUG-012  | UX          | Loading-/Error-/Empty-/Conflict-States pro Page dokumentiert (siehe §10).                        |
-| BUG-013  | API         | State-Machine inkl. Idempotenz: gleicher Status → 200 OK, kein Update.                           |
-| GDPR     | Legal       | Datenschutz-Hinweis im Buchungsformular Pflicht; Aufbewahrung 2 Jahre.                            |
-| Setup    | Auth        | Admin-Setup-Wizard auf `/admin/setup` ersetzt ENV-Seed-Variante.                                  |
-| BUG-015  | Performance | Composite-Index `(startsAt, endsAt)` für Range-Queries.                                          |
-
-Neue Fehlercodes: `OVERLAP`, `RATE_LIMITED`, `MAIL_FAILED`.
-
----
-
-## 1. Stack-Entscheidung
-
-Gewählter Stack: **Next.js 14 (App Router) + SQLite + Prisma + NextAuth + Resend + Tailwind CSS**, deployed auf **Vercel**, mit **Upstash Redis** für Rate-Limiting.
-
-| Layer            | Technologie                                | Begründung                                                                                                  |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| Framework        | Next.js 14 (App Router) + TypeScript       | Frontend + Backend in einem Projekt, eine Code-Basis, eine Deployment-Pipeline. Senkt Wartungsaufwand drastisch. |
-| Styling          | Tailwind CSS                               | Mobile-first by default, kein eigenes CSS-System nötig, lässt sich perfekt an Braun/Beige-Farbschema anpassen. |
-| Datenbank        | SQLite via **Turso** (libSQL)              | Kostenloser Tier (500 DB / 9 GB), edge-replicated, kein eigener DB-Server, kein Backup-Setup. Fallback: lokale SQLite-Datei für Dev. |
-| ORM              | Prisma                                     | Typisiertes Schema, Migrations-Tooling, einfache Wartung. Generiert Client automatisch. Partial-Unique-Index via Raw-SQL-Migration. |
-| Auth             | NextAuth.js (Auth.js v5) — Credentials Provider | Built-in Session-Handling, Middleware-Schutz für `/admin/*`. Ein einziger Admin-User reicht (Tom).        |
-| Passwort-Hashing | bcrypt (cost 10)                           | Standard. ~100 ms/Versuch dient gleichzeitig als Brute-Force-Bremse.                                         |
-| E-Mail           | Resend                                     | Kostenloser Tier (3.000 Mails/Monat), simple HTTP-API, keine SMTP-Konfiguration nötig.                      |
-| Validierung      | Zod                                        | Schema-Validierung für API-Eingaben + Formulare. Single source of truth für FE/BE-Contracts.                |
-| Forms            | React Hook Form + Zod Resolver             | Inline-Validierung ohne Page-Reload (US-04 AC2).                                                            |
-| Rate-Limit       | **Upstash Redis (Free Tier)** + `@upstash/ratelimit` | Shared Counter über alle Vercel-Instanzen. 10.000 cmds/Tag reichen für MVP. Fallback siehe §5. |
-| Hosting          | Vercel (Hobby Plan, kostenlos)             | Automatisches Deployment via Git-Push, integrierte Edge-Functions, kein Server-Management.                  |
-| Domain           | Über Vercel oder externer Registrar         | Aktive Domain (v1.5.1): `https://www.baerenstark-hausservice.app` (verbunden via DNS mit Vercel).            |
-
-### Warum nicht alternative Stacks?
-
-- **Statisches HTML/CSS:** Reicht nicht, da US-04/05/06 dynamische Daten und Auth verlangen.
-- **WordPress:** Mehr Wartungsaufwand (Plugin-Updates, Sicherheits-Patches) als Tom übernehmen kann.
-- **Astro + Backend:** Zwei Codebasen, mehr Komplexität ohne Mehrwert für diese Größenordnung.
-- **PostgreSQL:** Overkill für ein paar hundert Buchungen pro Jahr.
-
-### Kosten
-
-Der gesamte MVP läuft im **Free Tier**:
-
-- Vercel Hobby: 0 €
-- Turso Starter: 0 €
-- Resend Free: 0 € (für ~10 Mails/Tag absolut ausreichend)
-- Upstash Redis Free: 0 € (10.000 Commands/Tag)
-- Domain: ~10 €/Jahr (einmaliger Ausgabenposten von Tom)
-
----
-
-## 2. Projektstruktur
-
-```
-baerenstark/
-├── ARCHITECTURE.md                    # Dieses Dokument
-├── PROJECT.md                         # User Stories
-├── README.md                          # Setup-Anleitung
-├── contracts/                         # Verbindliche Specs (FE/BE-Vertrag)
-│   ├── schema.prisma                  # Datenmodell (Prisma)
-│   ├── schema.sql                     # SQL-Referenz
-│   ├── api-routes.md                  # Endpoint-Spezifikation
-│   └── zod-schemas.ts                 # Geteilte Validierungs-Schemas
-├── images/
-│   └── logo.png                       # Bärenstark-Logo
-├── public/
-│   ├── logo.png                       # Static-Asset (kopiert aus images/)
-│   └── favicon.ico
-├── prisma/
-│   ├── schema.prisma                  # Live-Schema (sync mit contracts/)
-│   ├── migrations/
-│   │   └── <ts>_active_booking_per_slot/
-│   │       └── migration.sql          # Raw-SQL: Partial Unique Index
-│   └── seed.ts                        # NUR Beispiel-Slots in Dev — KEIN User
-├── src/
-│   ├── app/
-│   │   ├── layout.tsx                 # Root-Layout: Header + Footer
-│   │   ├── page.tsx                   # Startseite (US-01, US-02)
-│   │   ├── globals.css                # Tailwind + Custom Tokens
-│   │   ├── buchung/
-│   │   │   └── page.tsx               # Buchungsseite (US-03, US-04)
-│   │   ├── impressum/
-│   │   │   └── page.tsx               # Statisch (US-12)
-│   │   ├── datenschutz/
-│   │   │   └── page.tsx               # Statisch (US-12) — auch von Booking-Form verlinkt
-│   │   ├── admin/
-│   │   │   ├── layout.tsx             # Geschützt via Middleware
-│   │   │   ├── setup/page.tsx         # Setup-Wizard (einmalig)
-│   │   │   ├── login/page.tsx         # US-07
-│   │   │   ├── page.tsx               # Dashboard (Übersicht)
-│   │   │   ├── slots/page.tsx         # US-05: Zeitfenster
-│   │   │   └── bookings/page.tsx      # US-06: Anfragen
-│   │   └── api/
-│   │       ├── auth/[...nextauth]/route.ts   # NextAuth-Handler
-│   │       ├── admin/setup/route.ts          # POST + GET (einmalig)
-│   │       ├── slots/route.ts                # GET (public), POST (admin)
-│   │       ├── slots/[id]/route.ts           # DELETE (admin, soft)
-│   │       ├── bookings/route.ts             # GET (admin), POST (public)
-│   │       ├── bookings/[id]/route.ts        # PATCH (admin: status)
-│   │       └── bookings/[id]/resend-mail/route.ts  # POST (admin)
-│   ├── components/
-│   │   ├── layout/
-│   │   │   ├── Header.tsx
-│   │   │   └── Footer.tsx             # US-02: Kontaktdaten + tel:-Link
-│   │   ├── home/
-│   │   │   ├── Hero.tsx
-│   │   │   └── ServiceGrid.tsx        # US-01
-│   │   ├── booking/
-│   │   │   ├── SlotList.tsx           # US-03
-│   │   │   └── BookingForm.tsx        # US-04 (mit DSGVO-Checkbox)
-│   │   ├── admin/
-│   │   │   ├── SlotForm.tsx
-│   │   │   ├── SlotTable.tsx
-│   │   │   ├── BookingTable.tsx       # mit Mail-Status-Markierung
-│   │   │   └── ConfirmDialog.tsx      # Bestätigungs-Modal
-│   │   └── ui/                        # Button, Input, Card, Badge, Skeleton, ...
-│   ├── lib/
-│   │   ├── prisma.ts                  # Prisma-Client-Singleton
-│   │   ├── auth.ts                    # NextAuth-Konfiguration (mit redirect-Callback)
-│   │   ├── mail.ts                    # Resend-Client + Templates + Retry-Logik
-│   │   ├── ratelimit.ts               # Upstash-Wrapper
-│   │   ├── schemas.ts                 # Re-export aus contracts/zod-schemas.ts
-│   │   └── services.ts                # Service-Liste (statische Konstante)
-│   ├── middleware.ts                  # Schützt /admin/*
-│   └── types/
-│       └── index.ts
-├── .env.local                         # Lokale Secrets (NICHT committen)
-├── .env.example                       # Template
-├── next.config.js
-├── tailwind.config.ts                 # Braun/Beige-Farbtokens
-├── tsconfig.json
-├── package.json
-└── .gitignore
-```
-
----
-
-## 3. Datenmodell
-
-Drei Tabellen reichen für den MVP. Schema-Definition als Prisma + SQL siehe `contracts/schema.prisma` und `contracts/schema.sql`.
-
-### Tabelle: `User` (Admin)
-
-| Feld          | Typ        | Constraints                  | Bemerkung                                 |
-| ------------- | ---------- | ---------------------------- | ----------------------------------------- |
-| `id`          | TEXT (cuid)| PK                           |                                           |
-| `email`       | TEXT       | UNIQUE, NOT NULL             | Login-Identifikator                       |
-| `passwordHash`| TEXT       | NOT NULL                     | bcrypt (cost factor 10)                   |
-| `name`        | TEXT       | NOT NULL                     | Anzeigename (z.B. "Tom")                  |
-| `createdAt`   | DATETIME   | DEFAULT now()                |                                           |
-
-Anlage **ausschließlich** über Setup-Wizard `/admin/setup` (einmalig, nur wenn
-`users` leer ist). Kein Seed mit Initial-Passwort, kein Insider-Risiko.
-
-### Tabelle: `Slot` (Zeitfenster)
-
-| Feld           | Typ        | Constraints                      | Bemerkung                                         |
-| -------------- | ---------- | -------------------------------- | ------------------------------------------------- |
-| `id`           | TEXT (cuid)| PK                               |                                                   |
-| `startsAt`     | DATETIME   | NOT NULL, INDEX                  | Beginn (UTC)                                      |
-| `endsAt`       | DATETIME   | NOT NULL                         | Ende (UTC)                                        |
-| `description`  | TEXT       | NULL                             | Optional (US-05): "Vormittag", "ab 14 Uhr" etc.   |
-| `createdAt`    | DATETIME   | DEFAULT now()                    |                                                   |
-| `deletedAt`    | DATETIME   | NULL, INDEX                      | Soft-Delete: nicht NULL ⇒ unsichtbar in Listen.    |
-
-**Indexe:**
-- `Slot(startsAt)`
-- `Slot(startsAt, endsAt)` — Composite für Range-Queries (BUG-015).
-- `Slot(deletedAt)` — schnelles Filtern aktiver Slots.
-
-**Belegt-Status (`isBooked`)** ist abgeleitet, nicht gespeichert:
-> Ein Slot gilt als belegt, wenn mindestens eine Booking mit Status
-> **`PENDING` oder `CONFIRMED`** darauf verweist (BUG-001).
-> REJECTED-Bookings geben den Slot wieder frei.
-
-### Tabelle: `Booking` (Buchungsanfrage)
-
-| Feld             | Typ        | Constraints                             | Bemerkung                                            |
-| ---------------- | ---------- | --------------------------------------- | ---------------------------------------------------- |
-| `id`             | TEXT (cuid)| PK                                      |                                                      |
-| `slotId`         | TEXT       | FK → Slot.id, ON DELETE RESTRICT, INDEX | Verknüpfung zum Zeitfenster                          |
-| `customerName`   | TEXT       | NOT NULL                                | Pflichtfeld (US-04)                                  |
-| `customerPhone`  | TEXT       | NOT NULL                                | Pflichtfeld; min. 6 Ziffern (BUG-010)                |
-| `customerEmail`  | TEXT       | NULL                                    | **Optional, im MVP-Formular vorhanden** (BUG-009).    |
-| `service`        | TEXT       | NOT NULL                                | Wert aus fester Service-Liste (siehe `lib/services.ts`) |
-| `description`    | TEXT       | NOT NULL                                | Kurzbeschreibung (US-04)                             |
-| `status`         | TEXT       | NOT NULL, DEFAULT 'PENDING'             | Enum: `PENDING` \| `CONFIRMED` \| `REJECTED`         |
-| `mailSent`       | BOOLEAN    | NOT NULL, DEFAULT false                 | Resend-Versand erfolgreich? (BUG-002)                |
-| `mailError`      | TEXT       | NULL                                    | Letzter Fehler (truncated 500 Z.) bei Versand.       |
-| `createdAt`      | DATETIME   | DEFAULT now()                           |                                                      |
-| `updatedAt`      | DATETIME   | UPDATE now()                            |                                                      |
-
-**Indexe:**
-- `Booking(slotId)`
-- `Booking(status, createdAt DESC)` — für Admin-Listenansicht.
-- **`UNIQUE INDEX uniq_active_booking_per_slot ON bookings(slot_id) WHERE status IN ('PENDING','CONFIRMED')`** — Partial Unique Index (BUG-006). Verhindert auf DB-Ebene, dass für denselben Slot mehrere aktive Bookings existieren. Verstoß → SQLITE_CONSTRAINT_UNIQUE → Handler übersetzt in HTTP 409 `CONFLICT`.
-
-### Iteration-2-Erweiterungen am Booking-Modell (US-13/US-14)
-
-| Feld                    | Typ        | Constraints                                       | Bemerkung                                                                                  |
-| ----------------------- | ---------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `cancelToken`           | TEXT       | NOT NULL, UNIQUE, DEFAULT cuid()                  | Eindeutiger Aktions-Token für Kunden-Links (Storno, Counter-Proposal-Antwort). Lebenslang gültig pro Booking. |
-| `counterProposalSlotId` | TEXT       | NULL, FK → Slot.id ON DELETE SET NULL, INDEX       | ID des vom Admin vorgeschlagenen Alternativ-Slots. NULL, solange kein Vorschlag aktiv.      |
-
-**`customerEmail`**: war in v1.1 nullable und im UI optional — **ab Iteration 2
-Pflichtfeld** im `CreateBookingSchema`. DB-seitig bleibt das Feld
-`String?`/nullable, um Bestandsdaten ohne Migration zu handhaben. Der App-Layer
-erzwingt Pflicht via Zod.
-
-**Status-Werte (erweitert):** `PENDING | CONFIRMED | REJECTED | COUNTER_PROPOSED | CANCELLED`.
-
-**Partial Unique Index (erweitert):**
-```sql
-DROP INDEX IF EXISTS uniq_active_booking_per_slot;
-CREATE UNIQUE INDEX uniq_active_booking_per_slot
-  ON bookings(slot_id)
-  WHERE status IN ('PENDING', 'CONFIRMED', 'COUNTER_PROPOSED');
-```
-
-> **Wichtig zur Slot-Locking-Semantik bei Counter-Proposals:** Der Vorschlag
-> sperrt **den ursprünglichen Slot** weiter (über die Booking selbst, deren
-> `slotId` unverändert bleibt — die Booking ist im Status COUNTER_PROPOSED, was
-> der Index als "aktiv" zählt). Der **vorgeschlagene** Slot
-> (`counterProposalSlotId`) wird **nicht** zusätzlich gesperrt — er bleibt
-> für andere Kunden buchbar, bis der Kunde den Vorschlag annimmt
-> (Übergang zu CONFIRMED auf dem neuen Slot, Index-Check zur Annahme-Zeit).
->
-> **Trade-off:** Nicht ideal — theoretisch könnte ein anderer Kunde den
-> vorgeschlagenen Slot in der Zwischenzeit buchen, sodass die Annahme später
-> mit 409 abgelehnt wird. **Mitigation für MVP:** Tom ist einziger Admin,
-> Vorschläge sind selten, Race-Risiko niedrig. Bei Bedarf: separate
-> `slot_holds`-Tabelle (Backlog).
-
-### Tabelle: `WeeklyAvailability` (Iteration 2 — US-15)
-
-| Feld         | Typ          | Constraints                              | Bemerkung                                            |
-| ------------ | ------------ | ---------------------------------------- | ---------------------------------------------------- |
-| `id`         | TEXT (cuid)  | PK                                       |                                                       |
-| `dayOfWeek`  | INT          | NOT NULL, UNIQUE, CHECK 0–6              | 0 = Sonntag, 1 = Montag, …, 6 = Samstag (JS-Convention). |
-| `isActive`   | BOOLEAN      | NOT NULL, DEFAULT false                  |                                                       |
-| `updatedAt`  | DATETIME     | UPDATE now()                             |                                                       |
-
-**Initial-Seed:** Migration legt 7 Datensätze an (alle 7 Wochentage,
-`isActive: false`). Tom toggelt die gewünschten Tage selbst über
-`PUT /api/availability` (Admin-UI unter `/admin/availability`).
-
-### Service-Werte
-
-Definiert in `src/lib/services.ts` als Konstante:
-
-```ts
-export const SERVICES = [
-  'entruempelung',
-  'entkernung',
-  'reinigung',
-  'gruenflaechenpflege',
-  'muelltonnenservice',
-  'entsorgung',
-] as const;
-```
-
-Frontend zeigt deutsche Labels (mit Mapping in derselben Datei), gespeichert wird der ID-Slug. **Single Source of Truth** ist `lib/services.ts` — `zod-schemas.ts` re-exportiert nur die Liste.
-
----
-
-## 4. API-Routen
-
-Vollständige Spec inkl. Request/Response-Beispielen in `contracts/api-routes.md`. Hier die Übersicht:
-
-| Methode | Pfad                                        | Auth      | Story  | Zweck                                              |
-| ------- | ------------------------------------------- | --------- | ------ | -------------------------------------------------- |
-| GET     | `/api/slots`                                | public    | US-03  | Verfügbare Slots (mit `isBooked`-Flag, Soft-Filter) |
-| POST    | `/api/slots`                                | admin     | US-05  | Neuen Slot anlegen (mit Sanity-Checks + Overlap)    |
-| DELETE  | `/api/slots/:id`                            | admin     | US-05  | Slot soft-löschen, PENDINGs auf REJECTED            |
-| POST    | `/api/bookings`                             | public    | US-04, US-08 | Buchungsanfrage + Mail (mit Retry)            |
-| GET     | `/api/bookings`                             | admin     | US-06  | Alle Anfragen (inkl. `mailSent`/`mailError`)        |
-| PATCH   | `/api/bookings/:id`                         | admin     | US-06  | Status setzen (idempotent)                          |
-| POST    | `/api/bookings/:id/resend-mail`             | admin     | US-08  | Mail-Versand erneut anstoßen                        |
-| POST    | `/api/auth/callback/credentials`            | public    | US-07  | Login (NextAuth)                                    |
-| POST    | `/api/auth/signout`                         | public    | US-07  | Logout (NextAuth)                                   |
-| GET     | `/api/admin/setup`                          | public    | Setup  | Verfügbarkeits-Check                                |
-| POST    | `/api/admin/setup`                          | public    | Setup  | Initial-User anlegen (einmalig)                     |
-| POST    | `/api/bookings/:id/counter-proposal`        | admin     | US-13  | Alternativtermin vorschlagen (Iteration 2)          |
-| GET     | `/api/bookings/respond?token=...&action=...` | public   | US-13/14 | Kunde nimmt an oder storniert (Token-basiert)     |
-| POST    | `/api/bookings/rebook`                      | public    | US-13  | Kunde wählt neuen Slot (Token-basiert)              |
-| GET     | `/api/availability`                         | public    | US-15/16 | Wochentag-Konfiguration                            |
-| PUT     | `/api/availability`                         | admin     | US-15  | Wochentag-Konfiguration aktualisieren                |
-| GET     | `/api/calendar?year=YYYY&month=M`           | public    | US-16  | Kalender-Daten pro Tag (verfügbar/blockiert)        |
-
-### Konventionen (verbindlich)
-
-- **Transport:** HTTPS, JSON.
-- **Content-Type:** `application/json` für alle Bodies.
-- **Datumsformat:** ISO 8601 mit Offset (z.B. `2026-05-15T08:00:00.000Z` oder `2026-05-15T10:00:00+02:00`). Backend normalisiert in UTC und liefert immer UTC mit `Z`-Suffix zurück. Frontend rendert in lokaler Zeit (Europe/Berlin).
-- **IDs:** `cuid` (Strings), niemals raten oder konstruieren.
-- **Fehlerformat:**
-  ```json
-  { "error": { "code": "VALIDATION_ERROR", "message": "Name ist ein Pflichtfeld", "field": "customerName" } }
-  ```
-  Codes: `VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `OVERLAP`, `GONE`, `RATE_LIMITED`, `MAIL_FAILED`, `INTERNAL_ERROR`.
-- **Status-Codes:** 200, 201, 204, 302, 400, 401, 403, 404, 409, 410, 429, 500, 502.
-- **Pagination:** Im MVP nicht erforderlich (erwartete Mengen <100). Ab >100 Bookings als Tech-Debt nachrüsten.
-- **Rate-Limit-Header:** `Retry-After` bei 429 gesetzt.
-- **Caching:** Schreib-Endpunkte invalidieren Next-Tag `slots`. Lese-Endpunkte
-  setzen `Cache-Control: no-store`.
-
----
-
-## 5. Authentifizierung & Autorisierung
-
-### Mechanismus: NextAuth.js mit Credentials Provider
-
-- Login auf `/admin/login` → POST an `/api/auth/callback/credentials`.
-- Bei Erfolg setzt NextAuth ein **HttpOnly-Session-Cookie** (`next-auth.session-token`).
-- Strategie: **JWT-Sessions** (kein DB-Lookup pro Request, leichtgewichtig).
-- Session-Lifetime: **24 Stunden**, sliding refresh.
-
-### Schutz von Routen
-
-- **Edge Middleware** (`src/middleware.ts`) matcht `/admin/:path*` (außer `/admin/login` und `/admin/setup`) und `/api/(slots|bookings)` mit Methoden `POST/PATCH/DELETE` ausgenommen `POST /api/bookings`.
-- Ohne gültige Session → 302 Redirect auf `/admin/login` (für UI) bzw. 401 JSON (für API).
-
-### `callbackUrl` — Open-Redirect-Schutz (BUG-005)
-
-NextAuth's `callbacks.redirect` (in `src/lib/auth.ts`) **muss** wie folgt
-implementiert werden:
-
-```ts
-// src/lib/auth.ts (NextAuth-Konfiguration)
-callbacks: {
-  async redirect({ url, baseUrl }) {
-    // 1. Relative Pfade (beginnend mit "/") sind erlaubt.
-    if (url.startsWith('/')) return `${baseUrl}${url}`;
-
-    // 2. Absolute URLs nur, wenn sie auf dieselbe Origin zeigen.
-    try {
-      const target = new URL(url);
-      if (target.origin === baseUrl) return target.toString();
-    } catch {
-      // Ungültige URL → fall through
-    }
-
-    // 3. Alles andere (externe Domains, nicht parsbare Werte) → /admin.
-    return `${baseUrl}/admin`;
-  },
-},
-```
-
-Damit wird ein Angreifer-Link wie
-`https://www.baerenstark-hausservice.app/admin/login?callbackUrl=https://evil.com/phish`
-auf `/admin` umgeleitet — keine externe Weiterleitung möglich.
-
-### Sicherheits-Praktiken
-
-- Passwörter via bcrypt (cost 10) — niemals plaintext speichern.
-- Login-Fehler: generische Meldung ("E-Mail oder Passwort falsch") — keine Auskunft, ob E-Mail existiert (US-07 AC2).
-- **Rate-Limiting** (BUG-004):
-  - **Empfohlen (Production):** Upstash Redis Free Tier + `@upstash/ratelimit`.
-    Ein Counter pro IP, shared über alle Vercel-Funktionen.
-    - Login: 5 Versuche / 15 min.
-    - Booking: 10 Anfragen / 60 min.
-  - **Implementation-Hinweis für Engineers:**
-    ```ts
-    // src/lib/ratelimit.ts
-    import { Ratelimit } from '@upstash/ratelimit';
-    import { Redis } from '@upstash/redis';
-
-    export const loginLimiter = new Ratelimit({
-      redis: Redis.fromEnv(),
-      limiter: Ratelimit.slidingWindow(5, '15 m'),
-      analytics: false,
-      prefix: 'rl:login',
-    });
-
-    export const bookingLimiter = new Ratelimit({
-      redis: Redis.fromEnv(),
-      limiter: Ratelimit.slidingWindow(10, '60 m'),
-      prefix: 'rl:booking',
-    });
-    ```
-    ENV-Variablen: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`.
-  - **Fallback (lokal/dev oder fehlende Upstash-Konfiguration):** Kein
-    serverseitiges Rate-Limit. Bcrypt-cost-10 (~100 ms/Versuch) wirkt als
-    natürliche Brute-Force-Bremse. Restrisiko ist akzeptabel, weil:
-    - Genau ein Admin-User existiert.
-    - Der Setup-Wizard erzwingt mindestens 12 Zeichen Passwort.
-    - In-Memory-Maps wären in Vercel serverless ohnehin wirkungslos
-      (mehrere Instanzen, eigener Speicher).
-  - **Ehrliche Doku:** Sollte Upstash später ausfallen, ist das System weiterhin
-    nutzbar — nur ohne wirksames Rate-Limit. Diese Eigenschaft wird in den
-    Engineering-Notes vermerkt.
-- CSRF: NextAuth handhabt das automatisch via Token.
-- HTTPS-only: Cookie-Flag `Secure` in Production.
-- **Security-Headers (BUG-017, leichtgewichtig):**
-  - `Strict-Transport-Security: max-age=63072000; includeSubDomains`
-  - `X-Content-Type-Options: nosniff`
-  - `X-Frame-Options: DENY`
-  - `Referrer-Policy: strict-origin-when-cross-origin`
-  - CSP minimal: `default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'`
-  - Konfiguration via `next.config.js` `headers()`.
-
-### Initial-Setup für Tom — Setup-Wizard (kein ENV-Seed)
-
-**Ablauf:**
-1. Beim ersten Aufruf von `/admin/login` prüft die Login-Seite per `GET /api/admin/setup`, ob die `users`-Tabelle leer ist. Wenn ja → Redirect auf `/admin/setup`.
-2. Tom füllt das Setup-Formular aus (E-Mail, Name, Passwort, Passwort-Bestätigung).
-3. `POST /api/admin/setup` legt den User an. Greift nur, solange die Tabelle leer ist; danach 409 `CONFLICT`.
-4. Anschließend wird Tom direkt eingeloggt und auf `/admin` weitergeleitet.
-
-**Vorteile:**
-- Kein Engineer kennt jemals das Initial-Passwort.
-- Kein `SEED_ADMIN_PASSWORD`-ENV-Geheimnis im Vercel-Dashboard.
-- Setup ist im Browser machbar — kein CLI-Zugang nötig.
-
-**Risiko:** Wer als Erster `/admin/setup` aufruft, wird Admin. Mitigation: Tom
-ruft die Seite direkt nach dem Deploy auf (im selben Browser-Tab, in dem er
-die Domain getestet hat). Die Setup-Seite ist sonst nicht öffentlich verlinkt,
-und Suchmaschinen werden via `robots.txt` ferngehalten.
-
-Passwort-Reset im MVP: manuell via Prisma Studio oder Turso-Dashboard. Self-Service-Reset ist Backlog.
-
----
-
-## 6. E-Mail-Versand (US-08, US-13, US-14)
-
-- E-Mail-Templates (Plaintext + HTML) liegen in `src/lib/mail.ts`. Inhalt: Name,
-  Telefon, E-Mail, Service, Zeitfenster (DE-formatiert via
-  `Intl.DateTimeFormat('de-DE', { timeZone: 'Europe/Berlin', dateStyle: 'full', timeStyle: 'short' })`),
-  Beschreibung, Aktions-Links (siehe Iteration 2).
-- Absender-Adresse: `noreply@<deine-domain>` (DNS-verified bei Resend) oder im ersten Schritt `onboarding@resend.dev`.
-- Empfänger Tom: `MAIL_TO_ADMIN` (Default `hausservice-baerenstark@outlook.com`).
-- Empfänger Kunde: `customerEmail` aus dem Booking (Iteration 2 ist es Pflicht).
-
-### Iteration-2-Mail-Templates
-
-| Template-Key                | Trigger                                                              | Empfänger | Wesentliche Inhalte                                                                                          |
-| --------------------------- | -------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------- |
-| `bookingNotificationToAdmin` | `POST /api/bookings` (US-08)                                        | Tom       | Name/Telefon/Mail/Service/Termin/Beschreibung + Link `/admin/bookings`.                                      |
-| `bookingReceiptToCustomer`   | `POST /api/bookings` (US-04 / Iteration 2)                          | Kunde     | "Ihre Anfrage ist eingegangen", Termin, Service, Storno-Link `/api/bookings/respond?token=…&action=cancel`.  |
-| `counterProposalToCustomer`  | `POST /api/bookings/:id/counter-proposal` (US-13 AC1)               | Kunde     | "Tom schlägt einen anderen Termin vor", neuer Termin, drei Aktionslinks (Annehmen / Neu wählen / Stornieren). |
-| `counterAcceptedToAdmin`     | `GET /api/bookings/respond?action=accept` (US-13 AC3)               | Tom       | "Kunde hat den Alternativvorschlag angenommen", Termin, Kontaktdaten.                                        |
-| `rebookingToAdmin`           | `POST /api/bookings/rebook` (US-13 AC4)                             | Tom       | "Kunde hat einen neuen Termin gewählt", neuer Termin, Kontaktdaten.                                          |
-| `cancellationToAdmin`        | `GET /api/bookings/respond?action=cancel` (US-14 AC2)               | Tom       | "Kunde hat die Anfrage storniert", ursprünglicher Termin, Kontaktdaten, Service.                             |
-
-**Aktionslink-Struktur (verbindlich):**
-
-```
-${BASE_URL}/api/bookings/respond?token=${cancelToken}&action=accept
-${BASE_URL}/api/bookings/respond?token=${cancelToken}&action=cancel
-${BASE_URL}/buchung?rebookToken=${cancelToken}
-```
-
-Wo `BASE_URL` aus `NEXT_PUBLIC_BASE_URL` (Fallback `NEXTAUTH_URL`) gelesen wird.
-Engineers: einen einzigen Helfer `actionUrl(token, action)` in `src/lib/mail.ts`
-zentral anlegen — keine ad-hoc-String-Konkatenation in Templates.
-
-### Reliability-Strategie (BUG-002 + BUG US-04 Fix 1)
-
-**Iteration 2 — Fire-and-forget Mail-Dispatch:**
-
-```ts
-// src/app/api/bookings/route.ts (POST, vereinfacht)
-const booking = await prisma.booking.create({ ... });
-
-void runMailDispatch(booking.id, payload).catch((err) =>
-  console.error('[mail-dispatch] unexpected error', err),
-);
-
-return apiSuccess({ id: booking.id, status, createdAt }, 201);
-```
-
-```ts
-// src/lib/mail.ts
-export async function runMailDispatch(
-  bookingId: string,
-  payload: BookingMailPayload,
-): Promise<void> {
-  // 1. Mail an Tom (US-08)
-  const adminResult = await sendBookingNotificationToAdmin(payload).catch(
-    (err) => ({ ok: false as const, error: String(err).slice(0, 500) }),
-  );
-
-  // 2. Eingangsbestätigung an Kunden (Iteration 2)
-  await sendBookingReceiptToCustomer(payload).catch((err) =>
-    console.warn('[mail] customer receipt failed', err),
-  );
-
-  // 3. Booking-Datensatz mit Mail-Status updaten (Sichtbarkeit für Admin).
-  await prisma.booking
-    .update({
-      where: { id: bookingId },
-      data: {
-        mailSent: adminResult.ok,
-        mailError: adminResult.ok ? null : adminResult.error.slice(0, 500),
-      },
-    })
-    .catch((err) => console.error('[mail] db-update failed', err));
-}
-```
-
-**Eigenschaften:**
-- Booking-201 wird an Kunden geliefert, **bevor** Mail-Versuch beginnt → kein
-  Bug-US-04-Symptom mehr (Booking ist in DB sichtbar, auch wenn Mail crasht).
-- Beide Mails (Tom + Kunde) werden nacheinander versucht. Tom-Mail bestimmt
-  `mailSent`/`mailError`-Felder (Admin-Dashboard nutzt das als Indikator).
-  Kunden-Receipt ist „nice to have" und schreibt nur ins Log.
-- Retry-Logik (3 Versuche, Backoff 0/300/1500 ms) bleibt **innerhalb** jedes
-  einzelnen Mail-Sends bestehen.
-- **Vercel-Hinweis:** Auf Vercel Functions wird die Function nach Response
-  möglicherweise terminiert. Engineers: `unstable_after` aus `next/server`
-  (Next.js 14.2+) verwenden — andernfalls reicht der MVP-Trade-off
-  (Function läuft i.d.R. noch ein paar 100 ms weiter, was für einen
-  Resend-Roundtrip ausreicht).
-
-**Sichtbarkeit für Tom (unverändert):**
-- Admin-Dashboard listet Bookings mit `mailSent === false` rot, mit
-  Resend-Button.
-- Bei Counter-Proposal-Mail-Fehlern (US-13): das Admin-UI zeigt den
-  Counter-Proposal-Status weiter an und bietet einen "Vorschlag neu
-  versenden"-Button (über `POST /api/bookings/:id/resend-mail` — der Endpoint
-  unterscheidet selbst, welche Mail je nach aktuellem Status fällig ist).
-
-**Begründung gegen Outbox-Pattern für MVP:** unverändert (siehe v1.1).
-
-### Reliability-Strategie (BUG-002)
-
-**Retry im Request-Handler (kein Outbox-Pattern für MVP):**
-
-```ts
-// src/lib/mail.ts (Pseudocode für Engineers)
-async function sendWithRetry(payload, maxAttempts = 3): Promise<MailResult> {
-  const delays = [0, 300, 1500]; // ms
-  let lastError: Error | null = null;
-  for (let i = 0; i < maxAttempts; i++) {
-    if (delays[i] > 0) await sleep(delays[i]);
-    try {
-      await resend.emails.send(payload);
-      return { ok: true };
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  return { ok: false, error: String(lastError).slice(0, 500) };
-}
-```
-
-Der `POST /api/bookings`-Handler:
-1. Persistiert die Buchung (Status PENDING).
-2. Triggert `sendWithRetry()` (max. ~4 Sekunden Gesamt-Timeout).
-3. Updated `mailSent` und `mailError` am Booking entsprechend.
-4. Antwortet dem Kunden mit 201 — unabhängig vom Mail-Ergebnis.
-
-**Sichtbarkeit für Tom:**
-- Admin-Dashboard listet Bookings mit `mailSent === false` mit einem **roten Indikator** (Badge "Mail nicht zugestellt") und einem **„Mail erneut senden"-Button**, der `POST /api/bookings/:id/resend-mail` aufruft.
-- Eine Zeile mit `mailSent === false` UND `status === 'PENDING'` älter als 1 Stunde wird zusätzlich als „dringend" markiert.
-
-**Begründung gegen Outbox-Pattern für MVP:**
-- 1 Admin, ~10 Mails/Tag, Resend SLA 99,9 %.
-- Outbox + Cron erhöht Komplexität (+1 Tabelle, +1 Vercel-Cron-Job).
-- Retry-im-Handler + sichtbarer Mail-Status im Dashboard liefert eine
-  ausreichende Recovery-UX (Tom sieht den Fehlversand und kann mit einem
-  Klick neu auslösen).
-- Outbox bleibt als Backlog-Story dokumentiert, falls Volumen steigt.
-
----
-
-## 7. Deployment
-
-### Empfohlener Workflow
-
-1. Code im GitHub-Repo `baerenstark-website`.
-2. Vercel-Account mit GitHub verbinden, Repo importieren.
-3. Upstash-Redis-Datenbank in der Free-Tier-Region nahe Vercel-Region erstellen.
-4. ENV-Variablen im Vercel-Dashboard hinterlegen (siehe §8).
-5. Push auf `main` → automatischer Build & Deploy. Prisma-Migrate läuft als Build-Step (`prisma migrate deploy`), inkl. der Raw-SQL-Migration für den Partial Unique Index.
-6. Domain in Vercel-Settings hinzufügen, DNS umbiegen.
-7. **Setup-Wizard:** Tom öffnet `/admin/setup` und legt sein Passwort fest.
-
-### Branching
-
-- `main` = Production.
-- Feature-Branches → Pull Request → Vercel erzeugt automatisch Preview-Deployments für QA.
-
-### Monitoring (kostenlos)
-
-- Vercel-Logs (eingebaut) genügen für MVP.
-- Mail-Reliability-Monitoring: Admin-Dashboard ist die primäre Sichtbarkeit (siehe §6).
-- Optional später: Sentry Free Tier für Frontend-Fehler.
-
-### Backups
-
-Turso Free Tier bietet Point-in-Time-Recovery für die letzten 24 Stunden.
-Manueller Export-Befehl: `turso db dump <db-name> > backup.sql` — empfohlen
-einmal/Woche von Tom über Turso-CLI oder via einfachem Vercel-Cron.
-
----
-
-## 8. Umgebungsvariablen
-
-Alle in `.env.local` (lokal) und Vercel-Dashboard (Production) zu setzen.
-
-| Variable                       | Pflicht | Wert / Beispiel                                      | Zweck                                       |
-| ------------------------------ | ------- | ---------------------------------------------------- | ------------------------------------------- |
-| `DATABASE_URL`                 | ja      | `libsql://baerenstark-...turso.io?authToken=...`     | Turso-Connection-String                     |
-| `DIRECT_DATABASE_URL`          | ja      | gleiche URL ohne Pooling                             | Für Prisma-Migrations                       |
-| `NEXTAUTH_URL`                 | ja      | `https://www.baerenstark-hausservice.app` (Prod, v1.5.1) | Basis-URL für NextAuth                      |
-| `NEXTAUTH_SECRET`              | ja      | 32+ Zeichen Zufallsstring (`openssl rand -base64 32`)| JWT-Signaturschlüssel                       |
-| `RESEND_API_KEY`               | ja      | `re_xxxxxxxxxxxx`                                    | Resend-API-Auth                             |
-| `MAIL_FROM`                    | ja      | `noreply@baerenstark-hausservice.app`                | Absender-Adresse                            |
-| `MAIL_TO_ADMIN`                | ja      | `hausservice-baerenstark@outlook.com`                | Empfänger der Buchungs-Mails (US-08)        |
-| `UPSTASH_REDIS_REST_URL`       | empfohlen | `https://...upstash.io`                            | Rate-Limit-Store (siehe §5)                 |
-| `UPSTASH_REDIS_REST_TOKEN`     | empfohlen | `AX...`                                            | Rate-Limit-Auth                              |
-| `NEXT_PUBLIC_BASE_URL`         | empfohlen | `https://www.baerenstark-hausservice.app` (Prod, v1.5.1) | Iteration 2: Public Base-URL für Mail-Aktionslinks. Fallback auf `NEXTAUTH_URL`. |
-
-**Entfernt** gegenüber v1.0: `SEED_ADMIN_EMAIL` und `SEED_ADMIN_PASSWORD`.
-Stattdessen wird `/admin/setup` verwendet.
-
-`.env.example` wird ohne Werte ins Repo committet als Vorlage.
-
----
-
-## 9. Frontend-Design-Konventionen
-
-### Farbtokens (Tailwind, in `tailwind.config.ts`)
-
-```ts
-colors: {
-  baerenstark: {
-    bark:   '#3D2B1F',  // dunkelbraun, primary text
-    wood:   '#7B5E3C',  // mittelbraun, primary action
-    cream:  '#F5EBDD',  // beige hell, page background
-    sand:   '#D9C2A2',  // beige mittel, cards/sections
-    forest: '#4A5D3A',  // grün-akzent (Grünflächenpflege)
-    accent: '#C8A064',  // honiggelb, CTAs / Hover
-  }
-}
-```
-
-### Typografie
-
-- Headings: `font-serif` (z.B. Merriweather oder system-serif).
-- Body: `font-sans` (Inter oder system-ui).
-
-### Breakpoints (Tailwind-Default)
-
-- Mobile-first: Basis-Styles für `<640px`.
-- `sm:` ≥640, `md:` ≥768, `lg:` ≥1024, `xl:` ≥1280.
-
-### Mobile-Layout für ServiceGrid (US-01 AC2)
-
-- `<640px`: 1 Spalte (`grid-cols-1`), Cards full-width mit 16 px Padding.
-- `≥640px`: 2 Spalten.
-- `≥1024px`: 3 Spalten.
-
-### Accessibility (WCAG 2.1 AA)
-
-- Alle Interaktiv-Elemente mit klarem Fokus-Ring (Tailwind `focus-visible:ring-2 ring-offset-2 ring-baerenstark-accent`).
-- Telefon im Footer als `<a href="tel:+4915774787512">` (US-02 AC2).
-- Formular-Labels immer sichtbar, nicht nur als Placeholder.
-- Form-Errors als `<p id="..." role="alert">` mit `aria-describedby` am Input.
-- Toast-Bestätigungen (US-04) in einer ARIA-Live-Region (`role="status"`, `aria-live="polite"`).
-- Kontrast-Targets (zu verifizieren mit Axe oder Stark während Implementation):
-  - `bark` (#3D2B1F) auf `cream` (#F5EBDD) → ≥7:1 (Headings).
-  - `wood` (#7B5E3C) auf `cream` → ≥4.5:1 (Body, Buttons).
-  - Falls Kombination unter AA fällt: Token anpassen (Variante `wood-dark`).
-
----
-
-## 10. UI-States pro Page (BUG-012)
-
-Jede dynamische Page hat dokumentierte Loading-, Error-, Empty- und Conflict-States. Frontend-Engineer setzt sie 1:1 um.
-
-### `/buchung` (öffentliche Buchungsseite — US-03/US-04)
-
-| State        | Trigger                                                | UI                                                                                                              |
-| ------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| Loading      | `GET /api/slots` läuft                                 | 3 Skeleton-Cards in der `SlotList`. BookingForm bleibt versteckt.                                                |
-| Empty        | Response 200 mit leerer `data`                          | Hinweisbox: „Aktuell sind keine Termine freigeschaltet. Bitte rufen Sie uns direkt an." + tel:-Link prominent.   |
-| Error        | `GET /api/slots` schlägt fehl (Netz, 5xx)               | Banner: „Termine konnten nicht geladen werden." + Retry-Button + sichtbarer tel:-Fallback.                       |
-| Idle/Success | Slots geladen, keiner ausgewählt                        | Slot-Cards anzeigen. BookingForm noch ausgegraut/disabled bis Slot gewählt.                                       |
-| Submitting   | `POST /api/bookings` läuft                              | Submit-Button disabled mit Spinner; alle Form-Inputs schreibgeschützt; `aria-busy="true"` auf Form.              |
-| Conflict     | `POST /api/bookings` → 409 `CONFLICT`                   | Inline-Banner über Form: „Dieser Termin wurde gerade vergeben. Bitte einen anderen wählen." Slot wird in der Liste sofort als belegt markiert (lokales Re-Fetch). |
-| RateLimited  | `POST /api/bookings` → 429 `RATE_LIMITED`               | Hinweis: „Sie haben zu viele Anfragen gesendet. Bitte später erneut versuchen." (mit `Retry-After`-Anzeige).      |
-| Success      | `POST /api/bookings` → 201                              | Toast (`role="status"`) „Anfrage erfolgreich gesendet — Tom meldet sich zeitnah." Form zurückgesetzt, Slot-Liste neu geladen. |
-| ValidationErr| Zod-Fehler (clientseitig oder 400 vom BE)               | Inline-Fehler unter dem betroffenen Feld; Fokus springt zum ersten ungültigen Feld.                              |
-
-### `/admin` und `/admin/bookings` (US-06)
-
-| State        | Trigger                                                | UI                                                                                                                                                            |
-| ------------ | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Loading      | `GET /api/bookings` läuft                               | Tabellen-Skeleton (5 Zeilen).                                                                                                                                 |
-| Empty        | Response 200 mit leerer `data`                          | Hinweis: „Noch keine Anfragen."                                                                                                                                |
-| Error        | 5xx                                                    | Banner mit Retry-Button.                                                                                                                                      |
-| MailFailed   | Booking mit `mailSent === false`                        | Zeile farblich hervorgehoben (rot/orange-Badge „Mail nicht zugestellt"); Tooltip mit `mailError`; Aktion „Mail erneut senden" → `POST /api/bookings/:id/resend-mail`. |
-| StatusUpdate | `PATCH /api/bookings/:id` läuft                         | Aktions-Button disabled mit Spinner.                                                                                                                          |
-| Conflict     | `PATCH` → 409 (REJECTED → CONFIRMED bei aktivem Slot)   | Toast: „Dieser Slot ist inzwischen anderweitig vergeben." Liste neu laden.                                                                                    |
-| ConfirmDialog| Tom klickt „Bestätigen" oder „Ablehnen"                  | Modal „Anfrage von Maria Müller wirklich bestätigen?" mit Cancel/OK (BUG-016). Verhindert versehentliches Doppel-Klick-Update.                                |
-
-### `/admin/slots` (US-05)
-
-| State        | Trigger                                                | UI                                                                                                                       |
-| ------------ | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| Loading      | `GET /api/slots` läuft                                  | Tabellen-Skeleton.                                                                                                       |
-| Empty        | Keine Slots                                             | Hinweis: „Noch keine Zeitfenster angelegt." + Großer „Neuen Slot anlegen"-Button.                                         |
-| Submitting   | `POST /api/slots` läuft                                 | Submit-Button disabled mit Spinner.                                                                                      |
-| Overlap      | `POST` → 409 `OVERLAP`                                  | Inline-Banner: „Dieses Zeitfenster überschneidet sich mit einem bestehenden. Bitte Zeit anpassen."                         |
-| ValidationErr| Zod / 400                                              | Inline-Fehler unter Feldern.                                                                                             |
-| DeleteConfirm| Tom klickt Löschen                                      | Modal: „Slot wirklich löschen? Offene Anfragen werden automatisch abgelehnt." (BUG-016).                                  |
-| DeleteConflict| `DELETE` → 409 (CONFIRMED-Buchungen)                   | Modal: „Dieser Slot hat bestätigte Buchungen. Erst die Bestätigung zurückziehen?" → Aktion „Bestätigung zurückziehen + Löschen". |
-
-### `/admin/login` und `/admin/setup` (US-07)
-
-| State        | Trigger                                                | UI                                                                                                              |
-| ------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| Setup-Check  | `/admin/login` lädt → `GET /api/admin/setup`            | Spinner, dann Redirect auf `/admin/setup` falls `available: true`.                                              |
-| Submitting   | Login oder Setup-POST läuft                             | Button disabled mit Spinner.                                                                                    |
-| AuthError    | NextAuth-Redirect mit `?error=CredentialsSignin`        | Banner: „E-Mail oder Passwort falsch." (generisch).                                                              |
-| RateLimited  | `?error=RateLimited`                                    | Banner: „Zu viele Anmelde-Versuche. Bitte 15 Minuten warten."                                                    |
-| SetupClosed  | Setup-Aufruf nach bereits angelegtem User → 409          | Hinweis: „Setup wurde bereits abgeschlossen." mit Link auf `/admin/login`.                                        |
-
----
-
-## 11. DSGVO / Legal
-
-### Datenschutz-Hinweis im Buchungsformular (US-04)
-
-- Direkt unter dem Submit-Button: Pflicht-Checkbox „Ich habe die [Datenschutzerklärung](/datenschutz) gelesen und stimme der Verarbeitung meiner Daten zur Bearbeitung der Anfrage zu." (`privacyAccepted: true`).
-- Frontend lehnt das Submit ohne Häkchen ab. Backend validiert dasselbe via Zod (`privacyAccepted: z.literal(true)`).
-- Das Häkchen wird **nicht** in der DB persistiert — die Bestätigung ergibt sich aus dem Vorhandensein des Booking-Datensatzes.
-
-### Aufbewahrungsfristen
-
-- **Bookings:** 2 Jahre nach `createdAt`. Danach werden sie via einfachem Vercel-Cron (1× pro Monat) aus der DB gelöscht. Die Cleanup-Logik ist nicht im MVP — bis dahin: manueller Export + Löschung.
-- **Slots:** unbegrenzt (auch soft-deleted). Slots enthalten keine personenbezogenen Daten.
-- **User:** unbegrenzt, einzelner Admin-Account.
-
-### Datenschutzerklärung-Inhalte (Backlog: Tom liefert finalen Text)
-
-- Was wird erhoben (Name, Telefon, optional E-Mail, Beschreibung).
-- Zweck (Bearbeitung der Anfrage).
-- Rechtsgrundlage (Art. 6 Abs. 1 lit. b DSGVO).
-- Speicherdauer (2 Jahre).
-- Auftragsverarbeiter: Resend (Mail), Turso (DB), Vercel (Hosting), Upstash (Rate-Limit).
-- Rechte der Betroffenen (Auskunft, Berichtigung, Löschung, Beschwerde).
-
-### `robots.txt`
-
-- `/admin/*` und `/api/*` sind disallowed.
-- Standard-Sitemap mit nur öffentlichen Pages: `/`, `/buchung`, `/impressum`, `/datenschutz`.
-
----
-
-## 12. Akzeptanzkriterien-Mapping (Sanity-Check)
-
-| Story | Erfüllt durch                                                                                                                                  |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| US-01 | `app/page.tsx` + `components/home/ServiceGrid.tsx` + statische Service-Liste in `lib/services.ts`. Mobile-Grid 1/2/3-Spalten siehe §9.        |
-| US-02 | `components/layout/Footer.tsx` mit `tel:`-Link, E-Mail und Standort.                                                                          |
-| US-03 | `app/buchung/page.tsx` ruft `GET /api/slots`, rendert via `SlotList.tsx` mit `isBooked`-Flag (PENDING+CONFIRMED). Loading/Empty/Error siehe §10. |
-| US-04 | `BookingForm.tsx` (React Hook Form + Zod) → `POST /api/bookings`, Inline-Validierung, DSGVO-Checkbox, Bestätigungs-Toast.                     |
-| US-05 | `app/admin/slots/page.tsx` → `POST /api/slots` (mit Sanity-Checks) und `DELETE /api/slots/:id` (Soft-Delete).                                  |
-| US-06 | `app/admin/bookings/page.tsx` → `GET /api/bookings`, Status-Buttons → `PATCH /api/bookings/:id`, Mail-Status-Anzeige + Resend-Action.         |
-| US-07 | `app/admin/login/page.tsx` + `middleware.ts` + NextAuth Credentials Provider mit Redirect-Validierung. Setup über `/admin/setup`.            |
-| US-08 | Innerhalb `POST /api/bookings`: `lib/mail.ts.sendWithRetry()` an `MAIL_TO_ADMIN`; Mail-Status persistiert; Admin-Dashboard zeigt Fehlversände. |
-| US-12 | Statische `app/impressum/page.tsx` + `app/datenschutz/page.tsx` mit Footer-Links.                                                              |
-| US-13 | `components/admin/CounterProposalDialog.tsx` → `POST /api/bookings/:id/counter-proposal`. Mail-Templates `counterProposalToCustomer`, `counterAcceptedToAdmin`, `rebookingToAdmin`. Endpunkte `GET /api/bookings/respond`, `POST /api/bookings/rebook`. Re-Booking-Flow in `app/buchung/BookingClient.tsx` (`?rebookToken=`). Siehe §15.   |
-| US-14 | `cancelToken` (Booking) + `GET /api/bookings/respond?action=cancel` + Mail-Template `cancellationToAdmin`. Öffentliche Bestätigungsseite `app/buchung/storno/page.tsx`. Storno-Link in jeder Kunden-Mail. Siehe §15.    |
-| US-15 | `WeeklyAvailability`-Modell + `app/admin/availability/page.tsx` → `PUT /api/availability`. Confirmierte Buchungen werden als Blocker im Admin-UI angezeigt. Siehe §15.                                                       |
-| US-16 | `app/buchung/page.tsx` rendert `components/booking/Calendar.tsx` mit Daten aus `GET /api/calendar?year=YYYY&month=M`. Klick auf grünen Tag triggert Slot-Auswahl. Touch-freundlich, mobile-first. Siehe §15.            |
-
----
-
-## 13. Offene Punkte / Annahmen
-
-- **Annahme (Iteration 2):** `customerEmail` ist im Buchungsformular ab sofort
-  Pflichtfeld. Kunden ohne E-Mail nutzen den prominent platzierten tel:-Link.
-  Diese Entscheidung vereinfacht US-13/US-14 (keine zwei Code-Pfade) und ist
-  vom Sub-Agent dokumentiert; Tom darf sie revidieren — siehe „Offene
-  Entscheidungen" unten.
-- **Annahme (Iteration 2):** Counter-Proposal-Slot wird nicht hart gesperrt
-  (Trade-off in §3 dokumentiert). Im MVP akzeptabel, da Tom einziger Admin
-  ist und Vorschläge selten sind.
-- **Annahme (Iteration 2):** `GET /api/bookings/respond` ist ein GET-Endpoint
-  trotz Zustandsänderung. Begründung: E-Mail-Klick muss ohne Browser-JS
-  funktionieren. Idempotenz wird über Status-Check (Token verbraucht → 410)
-  garantiert.
-- **Annahme:** Tom liefert Impressum-/Datenschutz-Texte als Fließtext.
-- **Annahme:** Eine Domain ist verfügbar oder Tom registriert sie. Aktive Produktions-Domain (v1.5.1): `https://www.baerenstark-hausservice.app`.
-- **Annahme:** Resend-Domain wird einmalig DNS-verifiziert; bis dahin nutzen wir `onboarding@resend.dev` als Absender. **Hinweis Iteration 2:** Mit `onboarding@resend.dev` als Absender erlaubt Resend nur Mail-Versand an die Resend-Account-E-Mail. Für US-13/US-14 (Mail an beliebige Kunden) ist eine DNS-verifizierte Absender-Domain Pflicht.
-- **Annahme:** Single-Admin-Setup (kein User-Management-UI im MVP).
-- **Annahme:** Tom ruft direkt nach dem ersten Deploy `/admin/setup` auf und legt sein Passwort fest, bevor jemand anderes die Seite findet.
-- **Annahme:** Upstash Redis Free Tier wird konfiguriert. Falls bewusst nicht: Engineers dokumentieren das im Deployment-Log; Login-Bremse durch bcrypt-cost-10.
-
-### Offene Entscheidungen (für Tom / Orchestrator)
-
-- [NEEDS INPUT] **DNS-verifizierte Absender-Domain für Resend.** Wenn die
-  Domain `baerenstark-hausservice.app` (v1.5.1) noch nicht bei Resend
-  verifiziert ist, kann Iteration 2 nicht produktiv gehen — Mails an Kunden
-  werden sonst von Resend abgewiesen. Tom muss DNS-Records (DKIM, SPF) bei
-  seinem Registrar setzen. Engineers liefern die Records.
-- [NEEDS INPUT] **`customerEmail` als Pflichtfeld?** Empfehlung: ja (siehe
-  Annahmen oben). Falls Tom das nicht will, müsste die State-Machine zwei
-  Pfade kennen (mit/ohne E-Mail), was den Iteration-2-Scope verdoppelt —
-  Empfehlung: gegen US-11 verschoben, hier konsequent Pflicht.
-- [NEEDS INPUT] **Geltungsbereich „Gegenvorschlag annehmen"-Mail an Tom.**
-  Soll Tom auch eine SMS-/Slack-Notification erhalten, oder reicht E-Mail?
-  Aktuell: nur E-Mail.
-
-### Backlog (nicht im MVP):
-
-- Bestätigungs-Mail an Kunden (US-11) — **wird durch Iteration 2 teilweise
-  umgesetzt**: `bookingReceiptToCustomer` ist bereits Teil der Iteration-2-
-  Mail-Templates.
-- Outbox-Pattern für E-Mail-Versand (sobald Volumen >50/Tag).
-- Self-Service-Passwort-Reset.
-- Pagination für `GET /api/bookings` (ab >100 Datensätzen).
-- Local-SEO (OG-Tags, Sitemap, Google-Business-Profile).
-- Auto-Cleanup-Cron für Bookings älter als 2 Jahre.
-- Instagram-Feed (US-09), Bewertungen (US-10).
-- Hard-Lock auf vorgeschlagenen Slot bei Counter-Proposal (`slot_holds`-Tabelle).
-- SMS-Benachrichtigung an Tom (parallel zu E-Mail).
-
----
-
-## 14. UI-States für Iteration-2-Pages
-
-(Ergänzt §10 — bestehende Pages bleiben unverändert.)
-
-### `/admin/availability` (US-15)
-
-| State        | Trigger                                                | UI                                                                                            |
-| ------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| Loading      | `GET /api/availability` läuft                           | Skeleton mit 7 Toggle-Switches.                                                               |
-| Ready        | Daten geladen                                           | 7 Switches (Mo–So), aktueller Stand. Speichern-Button disabled bis Änderung.                  |
-| Submitting   | `PUT /api/availability` läuft                           | Button disabled mit Spinner; Toggles read-only.                                               |
-| Success      | 200 erhalten                                            | Toast „Verfügbarkeit gespeichert".                                                            |
-| Error        | 4xx/5xx                                                 | Banner mit Retry-Button.                                                                      |
-| InfoBlocker  | Bestätigte Buchungen in dieser Woche                    | Unter den Toggles: kompakte Liste der CONFIRMED-Termine als „Blocker" (Datum, Slot, Kunde).    |
-
-### `/admin/bookings` Erweiterungen (US-13)
-
-| State                | UI                                                                                                                      |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Status-Filter        | Filter-Chips: Alle / Offen (PENDING) / Vorschlag offen (COUNTER_PROPOSED) / Bestätigt / Abgelehnt / Storniert.            |
-| Counter-Proposal-Action | Bei Booking-Status PENDING: Button „Alternativtermin vorschlagen" → Modal `CounterProposalDialog`. Slot-Picker mit `GET /api/slots`. |
-| Counter-Proposal-Anzeige | Bei Status COUNTER_PROPOSED: zwei Slots werden angezeigt (Original + Vorschlag), mit Hinweis „Wartet auf Kunden-Reaktion". |
-| Cancelled-Anzeige    | Bei Status CANCELLED: Datum + Hinweis „Vom Kunden storniert am …".                                                       |
-
-### `/buchung` Erweiterungen (US-16, US-13 Re-Booking)
-
-| State        | Trigger                                                | UI                                                                                                              |
-| ------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| Calendar-Loading | `GET /api/calendar?year=...&month=...` läuft         | Kalender-Grid mit Skeleton (5–6 Wochen-Reihen).                                                                  |
-| Calendar-Ready  | Daten geladen                                       | Kalendergrid: grüne Tage klickbar, rote Tage `aria-disabled="true"`, vergangene Tage ausgegraut.                  |
-| Klick auf grünen Tag | —                                              | Slot-Liste filtert auf diesen Tag (`?day=YYYY-MM-DD`); BookingForm bleibt bis Slot-Auswahl ausgeblendet.          |
-| Klick auf roten Tag | —                                              | Toast / Inline-Hinweis: „Dieser Tag ist nicht verfügbar." (US-16 AC3)                                              |
-| Rebook-Mode  | URL hat `?rebookToken=xxx`                              | Banner oben: „Du wählst einen neuen Termin für deine Anfrage." Form ist auf Slot-Auswahl reduziert; bei Submit → `POST /api/bookings/rebook`. |
-| RebookSuccess | 200 erhalten                                           | Banner: „Neuer Wunschtermin gespeichert. Tom meldet sich, sobald er ihn bestätigt." Redirect auf `/`.             |
-| RebookGone   | 410 GONE                                                | Banner: „Diese Anfrage ist nicht mehr aktiv (z.B. bereits bestätigt oder storniert)." Link zum Neu-Buchen.        |
-
-### `/buchung/storno` (US-14)
-
-Public Page, zeigt Bestätigung nach Storno-Aktion.
-
-| State          | Trigger                                                                                                | UI                                                                                                 |
-| -------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| FromAction     | Redirect von `GET /api/bookings/respond?action=cancel`                                                  | „Deine Anfrage wurde erfolgreich storniert. Tom wurde informiert." + Link zur Startseite.          |
-| AlreadyDone    | Redirect-Flag `?status=gone`                                                                            | „Diese Anfrage wurde bereits storniert oder ist nicht mehr aktiv."                                  |
-| TokenInvalid   | `?error=not_found`                                                                                      | „Der Storno-Link ist nicht mehr gültig. Bitte direkt anrufen: …"                                    |
-
-### `/buchung/bestaetigt` (US-13 Erfolgs-Page)
-
-| State        | UI                                                                                                                 |
-| ------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Default      | „Vielen Dank! Du hast den Alternativtermin bestätigt: <Datum>. Tom freut sich darauf." + tel:-Link.                |
-| Gone         | „Dieser Vorschlag ist nicht mehr offen. Bitte direkt anrufen: …"                                                    |
-
----
-
-## 15. Iteration 2 — Detail-Spec (US-13 bis US-16, BUG US-04)
-
-### 15.1 BUG US-04 (Zusammenfassung)
-
-Vollständige Analyse + Patch-Anweisungen: **`contracts/BUG_US04_ANALYSIS.md`**.
-
-Kurzfassung der Fixes:
-
-1. **Backend**: `POST /api/bookings` antwortet 201 vor dem Mail-Versand;
-   `runMailDispatch` läuft fire-and-forget.
-2. **Schema**: `customerEmail` via `z.preprocess` Whitespace-tolerant.
-3. **Operational**: `getResend()` filtert Placeholder-Keys aktiv;
-   `.env.example` mit Hinweistext.
-
-### 15.2 State-Machine (komplett)
-
-```
-            +-----------+
-            |  PENDING  |  ← initialer Zustand bei POST /api/bookings
-            +-----------+
-              |   |   |   |
-              |   |   |   +---- (Kunde, Token)        --> CANCELLED  [Endstatus, 410 ab hier]
-              |   |   +-------- (Admin, PATCH)        --> REJECTED   [Endstatus, kann zu CONFIRMED zurück]
-              |   +------------ (Admin, PATCH)        --> CONFIRMED  [Endstatus, kann zu REJECTED zurück]
-              +---------------- (Admin, counter-prop) --> COUNTER_PROPOSED
-                                                           |   |   |
-                                                           |   |   +---- (Kunde, Token)    --> CANCELLED
-                                                           |   +-------- (Kunde, Rebook)   --> PENDING (slotId neu)
-                                                           +------------ (Kunde, Token)    --> CONFIRMED (slotId = counterProposalSlotId)
-            +-----------+
-            | CANCELLED |  ← Endstatus, alle Token-Aktionen → 410 GONE
-            +-----------+
-```
-
-**Idempotenz (für Admin-PATCH):** Gleicher Zielstatus → 200 OK ohne Update.
-
-**Token-Validität:** `cancelToken` ist bis zum Erreichen eines Endstatus
-(CONFIRMED, REJECTED, CANCELLED) gültig. Danach 410 GONE für jede Aktion.
-
-### 15.3 Datenmodell-Änderungen (Zusammenfassung)
-
-| Modell             | Änderung                                                                                              |
-| ------------------ | ----------------------------------------------------------------------------------------------------- |
-| Booking            | `+cancelToken: String @unique @default(cuid())`                                                       |
-| Booking            | `+counterProposalSlotId: String?` (FK → Slot.id, ON DELETE SET NULL)                                  |
-| Booking            | `+status` erweitert um `COUNTER_PROPOSED`, `CANCELLED`                                                |
-| Booking            | `customerEmail` bleibt String? in DB, **App-Layer macht es zur Pflicht**                              |
-| Slot               | `+proposedForBookings` (opposite-Relation für `counterProposalSlotId`)                                |
-| WeeklyAvailability | **Neu**: `id, dayOfWeek (0–6, UNIQUE), isActive, updatedAt`. Initial 7 Datensätze, alle inaktiv.       |
-| Partial Index      | Erweitert: `WHERE status IN ('PENDING', 'CONFIRMED', 'COUNTER_PROPOSED')`                              |
-
-Migration:
-1. `prisma migrate dev --name iteration2_counter_proposal_and_cancel`
-   legt die Spalten + WeeklyAvailability-Tabelle an.
-2. Raw-SQL-Migration `iteration2_active_booking_index_v2/migration.sql`
-   droppt + recreated den Partial Unique Index.
-3. Seed-Migration `iteration2_seed_weekly_availability/migration.sql` fügt
-   die 7 Default-Datensätze in `weekly_availability` ein.
-
-### 15.4 Kalenderlogik (US-16) — Backend
-
-**Endpoint:** `GET /api/calendar?year=YYYY&month=M`.
-
-**Pseudocode:**
-
-```ts
-// Pseudocode (lib/calendar.ts)
-async function buildCalendarMonth(year: number, month: number): Promise<CalendarMonth> {
-  const tz = 'Europe/Berlin';
-  const firstDay = startOfMonthInTz(year, month, tz);
-  const lastDay = endOfMonthInTz(year, month, tz);
-
-  const [weekly, slots, confirmedBookings] = await Promise.all([
-    prisma.weeklyAvailability.findMany(),
-    prisma.slot.findMany({
-      where: {
-        deletedAt: null,
-        startsAt: { gte: firstDay, lte: lastDay },
-      },
-      include: { bookings: { where: { status: { in: ACTIVE_BOOKING_STATUSES } } } },
-    }),
-    prisma.booking.findMany({
-      where: {
-        status: 'CONFIRMED',
-        slot: {
-          startsAt: { gte: firstDay, lte: lastDay },
-          deletedAt: null,
-        },
-      },
-      include: { slot: true },
-    }),
-  ]);
-
-  const activeWeekdays = new Set(weekly.filter((d) => d.isActive).map((d) => d.dayOfWeek));
-  const blockedDates = new Set(
-    confirmedBookings.map((b) => formatDateInTz(b.slot.startsAt, tz)),
-  );
-  const today = formatDateInTz(new Date(), tz);
-
-  const days: CalendarDay[] = [];
-  for (let d = 1; d <= daysInMonth(year, month); d++) {
-    const date = `${year}-${pad2(month)}-${pad2(d)}`;
-    const weekday = getWeekdayInTz(date, tz); // 0..6
-    const isFuture = date > today;
-    const weeklyActive = activeWeekdays.has(weekday);
-    const hasBlocker = blockedDates.has(date);
-
-    const slotsForDay = slots.filter(
-      (s) => formatDateInTz(s.startsAt, tz) === date && s.bookings.length === 0,
-    );
-
-    days.push({
-      date,
-      available: weeklyActive && !hasBlocker && isFuture,
-      slotIds: slotsForDay.map((s) => s.id),
-    });
-  }
-
-  return { year, month, days };
-}
-```
-
-**Wichtig:** TZ-Konsistenz Berlin auf Backend. Frontend rendert mit
-demselben TZ-Mapping (Intl.DateTimeFormat) — keine Umrechnung mehr nötig.
-
-### 15.5 Frontend-Architektur Iteration 2
-
-**Neue Pages:**
-- `app/admin/availability/page.tsx` (US-15)
-- `app/buchung/storno/page.tsx` (US-14)
-- `app/buchung/bestaetigt/page.tsx` (US-13)
-
-**Neue Komponenten:**
-- `components/booking/Calendar.tsx` — Monats-Grid, mobile-first, touch-freundlich.
-- `components/admin/CounterProposalDialog.tsx` — Modal mit Slot-Picker (lädt
-  freie Slots via `GET /api/slots`).
-- `components/admin/WeeklyAvailabilityForm.tsx` — 7 Toggle-Switches.
-
-**Erweiterung Bestehende:**
-- `components/admin/BookingTable.tsx` — Status-Spalte zeigt 5 Werte; neue
-  Aktion „Alternativtermin vorschlagen" für PENDING-Zeilen.
-- `app/buchung/BookingClient.tsx` — Re-Booking-Mode bei `?rebookToken=`.
-- `components/booking/BookingForm.tsx` — `customerEmail` ist Pflichtfeld
-  (Label „E-Mail (für Bestätigung & Storno-Link)").
-
-**Neue API-Client-Funktionen** in `src/lib/api-client.ts`:
-- `proposeCounter(bookingId, newSlotId): Promise<BookingAdmin>`
-- `respondToBookingViaToken(token, action): Promise<{ redirectTo: string }>`
-- `rebookViaToken(token, newSlotId): Promise<CreateBookingResponse>`
-- `fetchAvailability(): Promise<WeeklyAvailabilityDay[]>`
-- `updateAvailability(days): Promise<WeeklyAvailabilityDay[]>`
-- `fetchCalendar(year, month): Promise<CalendarMonth>`
-
-### 15.6 E-Mail-Templates — Inhalt-Skizzen
-
-Engineers übernehmen 1:1 aus `src/lib/mail.ts`-Modulen, mit dem Branding aus §9.
-
-**`bookingReceiptToCustomer` (Eingangsbestätigung — neu in Iteration 2)**
-
-Subject: `Ihre Anfrage bei Bärenstark Hausservice ist eingegangen`
-Inhalt:
-- Anrede „Hallo {customerName},"
-- „Vielen Dank für Ihre Anfrage. Wir haben sie erhalten und melden uns bei Ihnen, sobald Tom Ihren Wunschtermin bestätigt hat."
-- Termin-Übersicht (Datum/Uhrzeit, Service, Beschreibung).
-- Link „Anfrage stornieren": `${BASE_URL}/api/bookings/respond?token=${cancelToken}&action=cancel`
-- Footer mit Telefon-Fallback.
-
-**`counterProposalToCustomer` (US-13)**
-
-Subject: `Bärenstark schlägt einen anderen Termin vor`
-Inhalt:
-- Anrede.
-- „Tom kann Ihren ursprünglichen Wunschtermin am {originalSlot} leider nicht anbieten und schlägt stattdessen vor: **{counterProposalSlot}**."
-- Drei prominente Buttons:
-  - „Vorschlag annehmen" → `${BASE_URL}/api/bookings/respond?token=${cancelToken}&action=accept`
-  - „Anderen Termin wählen" → `${BASE_URL}/buchung?rebookToken=${cancelToken}`
-  - „Anfrage stornieren" → `${BASE_URL}/api/bookings/respond?token=${cancelToken}&action=cancel`
-- Hinweis: „Die Buttons funktionieren nur einmalig — bitte nicht weiterleiten."
-
-**`counterAcceptedToAdmin` (US-13 AC3)**
-
-Subject: `{customerName} hat Ihren Alternativtermin angenommen`
-Inhalt:
-- „{customerName} hat den Alternativtermin am {newSlot} bestätigt."
-- Kontaktdaten + Service + Beschreibung + Link `/admin/bookings`.
-
-**`rebookingToAdmin` (US-13 AC4)**
-
-Subject: `{customerName} hat einen neuen Termin gewählt`
-Inhalt:
-- „{customerName} hat einen anderen Termin als Antwort auf Ihren Vorschlag gewählt: {newSlot}."
-- Kontaktdaten + Link `/admin/bookings`.
-- „Bitte prüfen und bestätigen oder ablehnen."
-
-**`cancellationToAdmin` (US-14 AC2)**
-
-Subject: `{customerName} hat die Anfrage storniert`
-Inhalt:
-- „{customerName} hat die Anfrage am {originalSlot} storniert."
-- Kontaktdaten + Service + Beschreibung.
-- „Der Slot ist wieder als verfügbar markiert."
-
-### 15.7 Sicherheit / Rate-Limits Iteration 2
-
-| Endpoint                                  | Rate-Limit                                                       |
-| ----------------------------------------- | ---------------------------------------------------------------- |
-| `POST /api/bookings/:id/counter-proposal` | Admin-only, kein zusätzliches Limit (Session ist die Authority). |
-| `GET /api/bookings/respond`               | Kein Limit — Token ist die Authority.                            |
-| `POST /api/bookings/rebook`               | 5 Anfragen / 60 min / IP — verhindert Bot-Scraping.              |
-| `GET /api/calendar`                       | Kein Limit (öffentlich, Read-Only, leichtgewichtig).             |
-| `PUT /api/availability`                   | Admin-only, kein zusätzliches Limit.                              |
-
-**Token-Sicherheit:** `cancelToken` ist cuid() (24+ Zeichen). Brute-Force über
-HTTPS gegen 2^120 Möglichkeiten ist statistisch chancenlos. Token werden
-**niemals** in URLs gelogged (Vercel-Logs maskieren Query-Params nicht
-automatisch — Engineers achten darauf, Token in `console.log`-Calls zu
-truncaten oder zu hashen).
-
----
-
-## 16. Iteration 3 — Detail-Spec (US-17 bis US-24, BUG IT3)
-
-### 16.1 BUG IT3 (Zusammenfassung)
-
-Vollständige Analyse + Patch-Anweisungen: **`contracts/BUG_BOOKING_IT3.md`**.
-
-**Kurzfassung:**
-
-Das Buchungsformular schlägt fehl, weil `register('slotId')` an einen
-Hidden-Input mit explizit gesetztem `value=` gebunden wurde — RHF ignoriert
-DOM-Werte, der Form-State bleibt auf `''`. Zod-Validation auf `slotId.min(1)`
-schlägt fehl, der Submit-Handler-Body wird nie erreicht, der Benutzer
-sieht keinen sichtbaren Fehler (hidden Input hat kein Error-Element).
-
-**Fix:** `slotId` (bzw. IT3: `date/startTime/endTime`) komplett aus dem
-RHF-Form-Schema entfernen. Stattdessen externes React-State und beim
-Submit programmatisch in `createBooking()`-Payload mergen. Siehe
-`BookingFormSchema` in `contracts/zod-schemas.ts`.
-
-### 16.2 Verfügbarkeitsfenster-Modell (US-17)
-
-#### Konzept
-
-Statt vorab manuell Slots anzulegen (IT1/IT2-Modell), definiert Tom in
-IT3:
-
-- **`AvailabilityTemplate`**: pro Wochentag (0–6) ein Standardfenster
-  `(isActive, startTime, endTime, slotDurationMinutes)`.
-- **`DayOverride`**: pro konkretem Datum eine Überschreibung
-  `(date, isActive, startTime?, endTime?, reason?)`.
-
-#### Resolver-Logik (`lib/availability.ts`)
-
-```ts
-// Pseudocode
-async function resolveDay(date: string): Promise<ResolvedDay> {
-  const tz = 'Europe/Berlin';
-
-  // 1. Vergangenheit?
-  if (date < todayInBerlin()) return { isActive: false };
-
-  // 2. Override?
-  const override = await prisma.dayOverride.findUnique({ where: { date } });
-  const weekday = getWeekdayInTz(date, tz); // 0..6
-  const template = await prisma.availabilityTemplate.findUnique({
-    where: { dayOfWeek: weekday },
-  });
-
-  if (override) {
-    if (!override.isActive) {
-      return { isActive: false, reason: override.reason ?? null };
-    }
-    // Override-Zeiten ODER Template-Defaults
-    return {
-      isActive: true,
-      startTime: override.startTime ?? template?.startTime ?? '08:00',
-      endTime: override.endTime ?? template?.endTime ?? '17:00',
-      slotDurationMinutes: template?.slotDurationMinutes ?? 60,
-    };
-  }
-
-  if (!template || !template.isActive) return { isActive: false };
-
-  return {
-    isActive: true,
-    startTime: template.startTime,
-    endTime: template.endTime,
-    slotDurationMinutes: template.slotDurationMinutes,
-  };
-}
-
-async function computeAvailableSlots(date: string): Promise<AvailableSlotsResponse> {
-  const day = await resolveDay(date);
-  if (!day.isActive) {
-    return { date, isDayActive: false, slots: [], overrideReason: day.reason ?? null };
-  }
-
-  const blocks = generateBlocks(day.startTime, day.endTime, day.slotDurationMinutes);
-
-  const activeBookings = await prisma.booking.findMany({
-    where: {
-      date,
-      status: { in: ['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED'] },
-    },
-    select: { startTime: true, endTime: true },
-  });
-
-  const taken = new Set(activeBookings.map((b) => `${b.startTime}-${b.endTime}`));
-
-  const slots = blocks.map((b) => ({
-    ...b,
-    available: !taken.has(`${b.startTime}-${b.endTime}`),
-  }));
-
-  return { date, isDayActive: true, slots };
-}
-```
-
-#### Buchungs-Flow (Iteration 3)
-
-```
-User öffnet /buchung
-  └→ ClientCalendar lädt:
-       GET /api/availability-template     (alle 7 Wochentage — Cache 60 s)
-       GET /api/day-overrides?month=YYYY-MM (Override-Liste — Cache 60 s)
-     Daraus Monatskalender-Rendering (rot/grün/Heute) ohne Backend-Roundtrip.
-
-User klickt grünen Tag
-  └→ TimeSlotPicker:
-       GET /api/slots/available?date=YYYY-MM-DD
-     → Liste von { startTime, endTime, available } anzeigen.
-     User klickt einen verfügbaren Block.
-
-User füllt Formular aus + Upload-Files (siehe §16.3)
-  └→ Form-Submit:
-       POST /api/upload (per Datei, vor Submit)  → attachmentIds[]
-       POST /api/bookings { date, startTime, endTime, ..., attachmentIds }
-     → 201, Eingangsbestätigung-Mail wird fire-and-forget versendet.
-```
-
-**Wichtig — öffentlicher Read-Endpoint für Availability-Template:**
-
-Der Calendar-Renderer braucht die Template-Daten ohne Admin-Login.
-Engineers haben zwei Optionen:
-
-1. **(empfohlen)** Den Endpoint `GET /api/availability-template`
-   öffentlich machen (read-only) — gleiche Response wie
-   `/api/admin/availability-template`, aber kein Auth-Check. Day-Overrides
-   ebenfalls als `GET /api/day-overrides?month=...`.
-2. **Alternative:** Server-Component auf `/buchung` rendert die Daten
-   direkt aus der DB (Prisma) und übergibt sie an den Client — kein
-   öffentlicher API-Endpoint nötig.
-
-Diese Architektur empfiehlt **Variante 2** (Server-Component), weil sie
-keinen weiteren öffentlichen Endpunkt erfordert und das Caching
-automatisch über Next.js abgebildet wird.
-
-#### Race-Condition-Schutz
-
-Der Partial Unique Index
-```sql
-CREATE UNIQUE INDEX uniq_active_booking_per_timeslot
-  ON bookings(date, start_time, end_time)
-  WHERE date IS NOT NULL
-    AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
-```
-verhindert Doppelbuchung auf DB-Ebene. Verstoß → SQLite P2002 →
-Handler wandelt in 409 `CONFLICT` um.
-
-**Beachte:** Der Index wirkt auf exakte Tupel `(date, startTime, endTime)`.
-Wenn das Frontend NUR die vom Backend angebotenen Blöcke wählen darf
-(was per Schema-Validation `endTime - startTime === slotDurationMinutes`
-erzwungen wird), passt das. Wenn Tom später die `slotDurationMinutes`
-ändert, können Bestandsbuchungen mit alter Dauer parallel zu neuen
-Buchungen mit neuer Dauer existieren — das ist im MVP akzeptabel
-(Tom moderiert Doppel-Konflikte manuell).
-
-### 16.3 Datei-Upload (US-18)
-
-#### Stack-Entscheidung: Vercel Blob
-
-| Alternative      | Begründung gegen                                              |
-| ---------------- | ------------------------------------------------------------- |
-| AWS S3           | Account-Setup, IAM, Kosten ab Day 1.                          |
-| Cloudflare R2    | DNS-Verifikation, kein Vercel-Integration.                    |
-| Lokales FS       | Vercel hat read-only FS, nicht möglich.                       |
-| Base64 in DB     | DB-Bloat, 33 % Overhead, keine direkten URLs.                 |
-| **Vercel Blob**  | **Native Integration, 2 GB free, Public-URL-Support, kein Setup.** |
-
-#### Architektur
-
-```
-[BookingForm]  →  selectFiles()
-       │
-       ├─→ FileUpload-Komponente:
-       │     for each file:
-       │       client-side check (size, type)
-       │       POST /api/upload (multipart) → { attachmentId, url, ... }
-       │     attachmentIds[] sammeln
-       │
-       └─→ Submit:
-             POST /api/bookings { ..., attachmentIds }
-             Backend: prisma.bookingAttachment.updateMany({
-               where: { id: { in: attachmentIds }, bookingId: null },
-               data:  { bookingId: newBookingId }
-             })
-```
-
-#### Schema-Anpassung Engineers
-
-`BookingAttachment.bookingId` muss nullable sein (in `prisma/schema.prisma`
-und `schema.sql`), damit Upload vor Booking-Insert möglich ist. Cascade-
-Delete bleibt erhalten — greift nur, wenn `bookingId` gesetzt ist.
-
-```prisma
-model BookingAttachment {
-  // ...
-  bookingId String?
-  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  // ...
-}
-```
-
-#### Cleanup orphan attachments (Backlog)
-
-Vercel Cron 1×/Tag:
-```ts
-// pseudocode (app/api/cron/cleanup-attachments/route.ts)
-const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-const orphans = await prisma.bookingAttachment.findMany({
-  where: { bookingId: null, createdAt: { lt: cutoff } },
-});
-for (const o of orphans) {
-  await del(o.url);  // Vercel Blob delete
-  await prisma.bookingAttachment.delete({ where: { id: o.id } });
-}
-```
-
-Im MVP nicht zwingend — die paar verwaisten Dateien kosten <1 ¢/Monat.
-
-#### Limits & Validation
-
-- **Client-side (BookingForm/FileUpload.tsx):**
-  - max. 5 Dateien.
-  - max. 20 MB pro Datei.
-  - Akzeptierte MIME-Types (siehe `UPLOAD_ACCEPTED_CONTENT_TYPES`).
-- **Server-side (`POST /api/upload`):**
-  - Doppelt validiert (Browser-Manipulation umgehen).
-  - 413 `PAYLOAD_TOO_LARGE` bei Größenverstoß.
-  - 415 `UNSUPPORTED_MEDIA_TYPE` bei MIME-Verstoß.
-  - Rate-Limit 20/h/IP.
-
-#### Sichtbarkeit für Tom
-
-`/admin/bookings` zeigt pro Booking eine Attachment-Liste mit:
-- Vorschaubild (für `image/*`).
-- Datei-Icon + Dateiname für PDF/Video.
-- Klick → öffnet `url` in neuem Tab (Public-Blob, kein Auth-Token nötig).
-
-### 16.4 Service-Erweiterung "Sonstiges" (US-19)
-
-In `lib/services.ts` und `contracts/zod-schemas.ts` wird `'sonstiges'`
-zur SERVICES-Liste hinzugefügt:
-
-```ts
-export const SERVICES = [
-  'entruempelung', 'entkernung', 'reinigung',
-  'gruenflaechenpflege', 'muelltonnenservice', 'entsorgung',
-  'sonstiges',  // IT3
-] as const;
-```
-
-UI-Verhalten (BookingForm):
-
-```tsx
-const watchService = watch('service');
-const isCustom = watchService === 'sonstiges';
-
-<Textarea
-  label={isCustom ? 'Beschreiben Sie Ihr Anliegen *' : 'Beschreibung'}
-  required
-  rows={isCustom ? 6 : 4}
-  hint={isCustom ? 'Mindestens 30 Zeichen, damit Tom Ihr Anliegen einschätzen kann.' : undefined}
-  error={errors.description?.message}
-  {...register('description')}
-/>
-```
-
-`CreateBookingSchema.superRefine` und `BookingFormSchema.superRefine`
-erzwingen `description.length >= 30` bei `service === 'sonstiges'`.
-
-### 16.5 Preise (US-20)
-
-Statische Anreicherung von `lib/services.ts`:
-
-```ts
-export interface ServiceInfo {
-  slug: Service;
-  label: string;
-  short: string;
-  description: string;
-  icon: string;
-  // IT3:
-  priceFrom: number | null;            // null bei 'sonstiges'
-  priceUnit: 'hour' | 'task' | null;   // 'hour' = "ab X €/h", 'task' = "ab X €/Entleerung"
-  priceNote: string;                    // freier Disclaimer-Text
-  // US-23:
-  details: ServiceDetails;
-}
-
-export interface ServiceDetails {
-  before: string;
-  after: string;
-  includes: string[];
-}
-```
-
-Preise (Richtwerte Darmstadt):
-
-| Slug                  | priceFrom | priceUnit | priceNote                                                      |
-| --------------------- | --------- | --------- | -------------------------------------------------------------- |
-| entruempelung         | 35        | hour      | "ab 35 €/Std., final nach Besichtigung"                        |
-| entkernung            | 45        | hour      | "ab 45 €/Std., individuell nach Aufwand"                       |
-| reinigung             | 25        | hour      | "ab 25 €/Std."                                                 |
-| gruenflaechenpflege   | 30        | hour      | "ab 30 €/Std."                                                 |
-| muelltonnenservice    | 20        | task      | "ab 20 €/Entleerung"                                           |
-| entsorgung            | 40        | hour      | "ab 40 €/Std., zzgl. Materialwert"                             |
-| sonstiges             | null      | null      | "Auf Anfrage — wir machen Ihnen ein individuelles Angebot."    |
-
-UI-Anzeige auf Service-Karte:
-
-```
-[Icon]
-Entrümpelungen
-Wohnungen, Keller, Dachböden, Garagen.
-🪙 ab 35 €/Std.
-[Mehr erfahren]
-```
-
-Mit Disclaimer (sichtbar auf Mobile, Hover/Aria-Tooltip auf Desktop):
-"Richtpreis für die Region Darmstadt. Finale Preise nach Besichtigung
-oder auf Anfrage."
-
-### 16.6 Admin-Dashboard "Heute & Bevorstehend" (US-21)
-
-`app/admin/page.tsx` (Dashboard) bekommt **oben** eine neue Sektion
-`<UpcomingBookingsList />`:
-
-```tsx
-// Server-Component
-async function UpcomingBookingsList() {
-  const bookings = await fetchUpcomingBookings({ limit: 10 });
-  return (
-    <section className="...">
-      <h2 className="...">Heute & Bevorstehend</h2>
-      {bookings.length === 0 && <Banner tone="info">Keine bevorstehenden Termine.</Banner>}
-      <ul>
-        {bookings.map((b) => (
-          <li key={b.id}>
-            {b.isToday && <Badge tone="warning">Heute</Badge>}
-            <Link href={`/admin/bookings#${b.id}`}>
-              {formatDate(b.date)} — {b.startTime}–{b.endTime} · {b.customerName} · {SERVICE_LABELS[b.service]}
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-```
-
-Daten: `GET /api/admin/upcoming-bookings?limit=10` (siehe API-Spec §5).
-
-Klick auf Eintrag → Anchor-Link auf den Eintrag in `/admin/bookings#<id>`.
-Engineers ergänzen einen passenden `id={...}` auf Booking-Rows.
-
-### 16.7 Feedback-Sektion (US-22)
-
-Statische Daten in `lib/reviews.ts`:
-
-```ts
-export interface Review {
-  id: string;
-  customerName: string;       // "Maria M."
-  service: Service | 'allgemein';
-  stars: 1 | 2 | 3 | 4 | 5;
-  text: string;               // Kurztext, max ~300 Zeichen
-  date: string;               // "2026-03-15", für Sortierung
-}
-
-export const REVIEWS: readonly Review[] = [
-  // 4× 5-Sterne, 5× 4-Sterne, 1× 4-Sterne — Ø ~4.4
-  // (Spec sagt "Ø ~4.5"; 4×5 + 6×4 = 44/10 = 4.4 — Engineers
-  // dürfen die Verteilung leicht justieren, um näher an 4.5 zu kommen,
-  // z.B. 5×5 + 4×4 + 1×4 = 4.4, oder 6×5 + 4×4 = 4.6).
-];
-
-export const REVIEWS_AVERAGE = computeAverage(REVIEWS); // ~4.5
-```
-
-UI-Komponente `components/home/ReviewSection.tsx`:
-
-- Initial 6 Bewertungen sichtbar, "Mehr anzeigen"-Button für die übrigen.
-- Sterne als 5 Span-Elemente mit gefülltem/leeren Bär-Icon (oder
-  ⭐ Unicode für MVP).
-- Karten-Layout (Mobile: 1 Col, Tablet: 2, Desktop: 3).
-- Header mit Durchschnitt: "★★★★★ 4,5 von 5 — basierend auf 10 Bewertungen".
-
-Auf Startseite (`app/page.tsx`) zwischen `ServiceGrid` und Footer
-einbinden.
-
-**Hinweis Iteration 4 (US-29):** Die `Review`-Datenstruktur ist
-zukunftskompatibel mit dem späteren Backend-Modell — Engineers achten
-darauf, identische Felder zu verwenden, sodass nur die Datenquelle
-gewechselt werden muss.
-
-### 16.8 Service-Popups (US-23)
-
-`components/home/ServiceModal.tsx`:
-
-- Klick auf Service-Karte (oder "Mehr erfahren"-Button) öffnet das
-  Modal mit:
-  - Service-Titel, Icon.
-  - Lange Beschreibung (`description` aus `services.ts`).
-  - "Vorher / Nachher"-Block (Platzhalter-Bilder + Texte aus
-    `details.before` / `details.after`).
-  - "Was wir tun" — Liste aus `details.includes` (Aufzählung).
-  - Preis-Block (siehe US-20).
-  - CTA "Jetzt anfragen" → schließt Modal, scrollt zu Buchungssektion
-    UND setzt `service` im Form vorausgewählt (via `?service=<slug>`-
-    Query-Parameter und `BookingForm.useEffect`).
-- Schließen via X-Button, Hintergrund-Klick (`onOverlayClick`),
-  Escape-Taste.
-- Focus-Trap im Modal (a11y).
-- Animation: Tailwind `transition-opacity` + `transition-transform`
-  (~150 ms).
-
-Daten in `lib/services.ts.SERVICE_LIST[i].details`:
-
-```ts
-{
-  slug: 'entruempelung',
-  // ...
-  details: {
-    before: 'Vollgestellte Räume, jahrelang gewachsene Sammlungen, schwere Möbel.',
-    after: 'Besenrein übergebene Räume, fachgerecht entsorgt, alles wiederverwertbar wo möglich.',
-    includes: [
-      'Sortierung wertvoller Gegenstände',
-      'Demontage von Möbeln',
-      'Fachgerechte Entsorgung (Sperrmüll, Wertstoff, Sondermüll)',
-      'Besenreine Übergabe',
-    ],
-  },
-}
-```
-
-Bilder: Platzhalter `images/popups/<slug>-before.jpg` /
-`<slug>-after.jpg` (8 Dateien). Tom liefert echte Bilder nach Iteration 3.
-
-### 16.9 Kunden-E-Mails (US-24)
-
-#### Templates (3 neue + 1 Bestand = 4 Mails an Kunden in IT3)
-
-| Template-Key                     | Trigger                                 | Status            |
-| -------------------------------- | --------------------------------------- | ----------------- |
-| `bookingReceiptToCustomer`       | `POST /api/bookings`                    | **Bestand IT2**   |
-| `bookingConfirmationToCustomer`  | `PATCH /api/bookings/:id` (PENDING→CONFIRMED) | **NEU IT3** |
-| `bookingRejectionToCustomer`     | `PATCH /api/bookings/:id` (PENDING→REJECTED, CONFIRMED→REJECTED) | **NEU IT3** |
-| `counterProposalToCustomer`      | `POST /api/bookings/:id/counter-proposal` | **Bestand IT2** |
-
-#### Implementation in `lib/mail.ts`
-
-Engineers ergänzen zwei neue Funktionen analog zu den IT2-Mails:
-
-```ts
-export interface BookingConfirmationMailPayload {
-  customerName: string;
-  customerEmail: string;
-  service: Service;
-  date: string;       // "YYYY-MM-DD"
-  startTime: string;  // "HH:MM"
-  endTime: string;    // "HH:MM"
-  cancelToken: string;
-}
-
-export async function sendBookingConfirmationToCustomer(
-  p: BookingConfirmationMailPayload,
-): Promise<MailResult> {
-  // Subject: "Ihr Termin am DD.MM.YYYY ist bestätigt"
-  // Body: Datum, Uhrzeit, Service, Adresse/Telefon Tom (0157-74787512),
-  //       Storno-Link (`actionUrl(token, 'cancel')`).
-  return sendWithRetry({ ... });
-}
-
-export interface BookingRejectionMailPayload {
-  customerName: string;
-  customerEmail: string;
-  service: Service;
-  // Optional: Original-Termin für Kontext im Mail-Text.
-  date?: string;
-  startTime?: string;
-  endTime?: string;
-}
-
-export async function sendBookingRejectionToCustomer(
-  p: BookingRejectionMailPayload,
-): Promise<MailResult> {
-  // Subject: "Leider können wir Ihren Termin nicht wahrnehmen"
-  // Body: Höfliche Absage, Telefon-CTA für Rückfrage,
-  //       Hinweis auf neue Anfrage (Link zur Buchungsseite).
-  return sendWithRetry({ ... });
-}
-```
-
-#### Trigger-Integration in `PATCH /api/bookings/:id`
-
-```ts
-// app/api/bookings/[id]/route.ts (PATCH, vereinfacht)
-const before = await prisma.booking.findUnique({ where: { id } });
-const updated = await prisma.booking.update({
-  where: { id },
-  data: { status: nextStatus },
-});
-
-// IT3: Kunden-Mail bei Status-Wechsel
-if (updated.customerEmail) {
-  if (before.status === 'PENDING' && updated.status === 'CONFIRMED') {
-    void sendBookingConfirmationToCustomer({
-      customerName: updated.customerName,
-      customerEmail: updated.customerEmail,
-      service: updated.service as Service,
-      date: updated.date ?? formatDateInTz(updated.slot.startsAt, 'Europe/Berlin'),
-      startTime: updated.startTime ?? formatTimeInTz(updated.slot.startsAt, 'Europe/Berlin'),
-      endTime: updated.endTime ?? formatTimeInTz(updated.slot.endsAt, 'Europe/Berlin'),
-      cancelToken: updated.cancelToken,
-    }).catch((err) => console.warn('[mail] confirm failed', err));
-  } else if (
-    (before.status === 'PENDING' || before.status === 'CONFIRMED') &&
-    updated.status === 'REJECTED'
-  ) {
-    void sendBookingRejectionToCustomer({
-      customerName: updated.customerName,
-      customerEmail: updated.customerEmail,
-      service: updated.service as Service,
-      date: updated.date,
-      startTime: updated.startTime,
-      endTime: updated.endTime,
-    }).catch((err) => console.warn('[mail] reject failed', err));
-  }
-}
-```
-
-Fire-and-forget — der PATCH-Handler antwortet sofort 200, unabhängig
-vom Mail-Ergebnis.
-
-### 16.10 Datenmodell-Migration (Iteration 3)
-
-#### Neue Tabellen
-
-1. `availability_template` (siehe Schema).
-2. `day_overrides` (siehe Schema).
-3. `booking_attachments` (siehe Schema).
-
-#### Neue Booking-Felder
-
-```sql
-ALTER TABLE bookings ADD COLUMN date TEXT NULL;
-ALTER TABLE bookings ADD COLUMN start_time TEXT NULL;
-ALTER TABLE bookings ADD COLUMN end_time TEXT NULL;
--- slot_id muss zu nullable migriert werden:
--- SQLite-Hack: neue Tabelle erstellen, Daten migrieren, alte droppen
--- (wird von Prisma migrate-dev automatisch ausgeführt).
-```
-
-#### Index-Anpassungen
-
-```sql
--- Bestand: nur greifen, wenn slot_id gesetzt
-DROP INDEX IF EXISTS uniq_active_booking_per_slot;
-CREATE UNIQUE INDEX uniq_active_booking_per_slot
-  ON bookings(slot_id)
-  WHERE slot_id IS NOT NULL
-    AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
-
--- NEU IT3
-CREATE UNIQUE INDEX uniq_active_booking_per_timeslot
-  ON bookings(date, start_time, end_time)
-  WHERE date IS NOT NULL
-    AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED');
-
--- Performance-Indexe
-CREATE INDEX idx_bookings_date_status        ON bookings(date, status);
-CREATE INDEX idx_bookings_status_date_time   ON bookings(status, date, start_time);
-```
-
-#### Seed (Iteration 3)
-
-Migration `iteration3_seed_availability_template/migration.sql`:
-
-```sql
--- Übernimmt isActive aus weekly_availability (falls vorhanden), sonst Defaults.
-INSERT INTO availability_template (id, day_of_week, is_active, start_time, end_time, slot_duration_minutes)
-SELECT
-  hex(randomblob(12)) AS id,
-  d.day_of_week,
-  COALESCE((SELECT is_active FROM weekly_availability WHERE day_of_week = d.day_of_week), 0),
-  '08:00', '17:00', 60
-FROM (
-  SELECT 0 AS day_of_week UNION ALL
-  SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL
-  SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6
-) d
-WHERE NOT EXISTS (SELECT 1 FROM availability_template WHERE day_of_week = d.day_of_week);
-```
-
-### 16.11 Frontend-Architektur Iteration 3
-
-#### Neue / geänderte Komponenten
-
-| Pfad                                                     | Status   | Zweck                                                                          |
-| -------------------------------------------------------- | -------- | ------------------------------------------------------------------------------ |
-| `components/booking/BookingForm.tsx`                     | UMGEBAUT | BUG IT3 Fix; Date/Time/Attachments via React-State außerhalb von RHF.          |
-| `components/booking/TimeSlotPicker.tsx`                  | NEU      | Zeigt verfügbare Blöcke nach Tag-Auswahl (US-17).                              |
-| `components/booking/FileUpload.tsx`                      | NEU      | Drag-and-Drop + Datei-Picker mit Vorschau (US-18).                             |
-| `components/booking/CalendarV2.tsx`                      | NEU      | IT3-Kalender: Template + Overrides als Datenquelle.                            |
-| `components/admin/AvailabilityTemplateForm.tsx`          | NEU      | 7 Wochentage konfigurieren (US-17).                                            |
-| `components/admin/DayOverrideManager.tsx`                | NEU      | Liste + Anlegen/Löschen von Tages-Überschreibungen (US-17).                    |
-| `components/admin/UpcomingBookingsList.tsx`              | NEU      | Dashboard-Top-Sektion (US-21).                                                 |
-| `components/admin/BookingAttachmentList.tsx`             | NEU      | Anhang-Anzeige in Booking-Detail (US-18).                                      |
-| `components/home/ReviewSection.tsx`                      | NEU      | Feedback-Sektion (US-22).                                                      |
-| `components/home/ServiceModal.tsx`                       | NEU      | Service-Popup (US-23).                                                          |
-| `components/home/ServiceGrid.tsx`                        | ERWEITERT | Klick-Handler für Modal; Preis-Anzeige (US-20).                              |
-| `lib/services.ts`                                        | ERWEITERT | `'sonstiges'`, `priceFrom/priceUnit/priceNote`, `details`.                    |
-| `lib/reviews.ts`                                         | NEU      | 10 statische Review-Datensätze (US-22).                                        |
-| `lib/availability.ts`                                    | NEU      | `resolveDay()`, `computeAvailableSlots()`, Helper für Berlin-TZ-Datum/Zeit.    |
-| `lib/api-client.ts`                                      | ERWEITERT | `fetchAvailableSlots()`, `uploadFile()`, `fetchUpcomingBookings()`, `fetchAvailabilityTemplate()`, `updateAvailabilityTemplate()`, `fetchDayOverrides()`, `createDayOverride()`, `deleteDayOverride()`. |
-| `lib/mail.ts`                                            | ERWEITERT | `sendBookingConfirmationToCustomer`, `sendBookingRejectionToCustomer`.        |
-
-#### Neue Pages
-
-- `/admin/availability` wird umgebaut: alte
-  `WeeklyAvailabilityForm` durch `AvailabilityTemplateForm` +
-  `DayOverrideManager` ersetzt (Tabs oder Stack-Layout).
-
-### 16.12 UI-States Iteration 3
-
-#### `/buchung` (umgebaut für IT3)
-
-| State                | Trigger                                                  | UI                                                                    |
-| -------------------- | -------------------------------------------------------- | --------------------------------------------------------------------- |
-| Calendar-Loading     | Initial-Load                                              | Skeleton-Grid für 5–6 Wochenreihen.                                   |
-| Calendar-Ready       | Template + Overrides geladen                              | Klickbare grüne Tage, ausgegraute rote Tage.                           |
-| TimeSlotsLoading     | `GET /api/slots/available` läuft                          | Spinner-Liste in TimeSlotPicker.                                       |
-| TimeSlotsReady       | Slots geladen                                             | Verfügbare Blöcke als klickbare Buttons; belegte als ausgegraut.       |
-| TimeSlotsEmpty       | `isDayActive: false` mit/ohne reason                      | Hinweis "Tag nicht verfügbar" + ggf. Override-Reason.                  |
-| FileUpload-Pending   | `POST /api/upload` läuft pro Datei                        | Liste mit Progressbar pro Datei; "Hochladen 2/3...".                   |
-| FileUpload-Error     | 413 / 415 / Netzwerk                                      | Inline-Fehler beim betreffenden Eintrag, andere bleiben gültig.        |
-| Submit-Conflict      | `POST /api/bookings` → 409 (Tag inaktiv oder Slot belegt) | Banner "Termin nicht mehr verfügbar"; TimeSlotPicker neu laden.        |
-| Submit-Validation    | Service=sonstiges + Beschreibung < 30                     | Inline-Fehler unter Beschreibungs-Feld.                                |
-
-#### `/admin` (Dashboard, IT3 erweitert)
-
-`<UpcomingBookingsList>` oben:
-
-| State        | UI                                                        |
-| ------------ | --------------------------------------------------------- |
-| Loading      | Skeleton mit 3 Zeilen.                                    |
-| Empty        | "Keine bevorstehenden bestätigten Termine."               |
-| Today-Badge  | Termine mit `isToday: true` mit gelb-orange Badge.        |
-
-#### `/admin/availability` (IT3 umgebaut)
-
-| Tab/Section                | UI                                                             |
-| -------------------------- | -------------------------------------------------------------- |
-| Default-Vorlage (US-17)    | 7 Karten (Mo–So) mit Toggle, Start/End-Time, Slot-Dauer-Select. |
-| Tages-Überschreibungen     | Kalender-Picker, Liste der bestehenden Overrides, Edit/Delete. |
-
-#### `/admin/bookings` (IT3 erweitert)
-
-- Spalte "Termin" zeigt jetzt entweder
-  `formatDate(date) startTime–endTime` (IT3-Buchungen) ODER
-  `formatSlotRange(slot.startsAt, slot.endsAt)` (Bestand).
-- Neue Spalte "Anhänge": Anzahl + Klick öffnet Lightbox-/Liste.
-
-### 16.13 Sicherheit Iteration 3
-
-#### Datei-Upload-Hardening (US-18)
-
-- **Server-side MIME-Check via `file.type`.** Browser kann
-  manipuliert werden — daher zusätzlich Magic-Byte-Check empfohlen
-  (Engineers: optional `file-type`-Lib, im MVP genügt `file.type`).
-- **Public-Bucket-Risiko:** Vercel Blob ist standardmäßig öffentlich.
-  Engineers sollten:
-  - Dateinamen mit `cuid()` randomisieren (kein erratbare Paths).
-  - Sensible Dokumente NICHT erlauben (z.B. keine Excel/Word — wird
-    durch MIME-Whitelist verhindert).
-  - Im Datenschutz-Hinweis explizit darauf hinweisen, dass Anhänge
-    auf einer öffentlichen URL liegen.
-- **Größenlimit:** 20 MB hart durchgesetzt (Vercel Blob hat eigenes
-  Limit von 500 MB — wir liegen weit darunter).
-- **Total-Quota-Sicht:** 2 GB Free-Tier. Bei ~10 Buchungen/Tag mit
-  ~5 MB Anhängen wären das 50 MB/Tag = 1.5 GB/Monat. Engineers
-  monitoren über Vercel Dashboard. Bei Annäherung an Limit:
-  Cleanup-Cron (siehe §16.3) priorisieren.
-
-#### Rate-Limits Iteration 3
-
-| Endpoint                                  | Rate-Limit                                              |
-| ----------------------------------------- | ------------------------------------------------------- |
-| `POST /api/upload`                        | 20 Anfragen / 60 min / IP.                              |
-| `POST /api/bookings` (mit Attachments)    | Bestand: 10 / 60 min / IP.                              |
-| `GET /api/slots/available`                | Kein Limit (öffentlich, Read-Only).                     |
-| `GET /api/admin/upcoming-bookings`        | Kein Limit (Admin-Session).                             |
-| `PUT /api/admin/availability-template`    | Kein Limit (Admin-Session).                             |
-| `POST /api/admin/day-overrides`           | Kein Limit (Admin-Session).                             |
-
-### 16.14 ENV-Variablen Iteration 3
-
-| Variable                  | Pflicht | Wert / Beispiel                                | Zweck                              |
-| ------------------------- | ------- | ---------------------------------------------- | ---------------------------------- |
-| `BLOB_READ_WRITE_TOKEN`   | ja      | `vercel_blob_rw_xxxxxxxxxxxx`                  | Vercel Blob (US-18).               |
-
-`.env.example` entsprechend ergänzen.
-
-### 16.15 Offene Punkte / Annahmen Iteration 3
-
-- **Annahme:** `BookingAttachment.bookingId` wird nullable, damit
-  Upload vor Booking-Insert möglich ist (siehe §16.3). Engineers
-  passen das Live-Schema entsprechend an.
-- **Annahme:** Counter-Proposal-Flow (US-13) bleibt im Bestand-Modus
-  (Slot-basiert) — neue IT3-Buchungen ohne `slotId` können in IT3
-  noch nicht counter-proposed werden. Diese Lücke ist akzeptabel,
-  weil Tom in der Praxis selten Counter-Proposals sendet und im
-  Worst Case manuell anrufen kann. Vollständige IT3-Counter-Proposal-
-  Logik ist Iteration 4.
-- **Annahme:** Vercel Blob-Region ist EU (DSGVO-konform). Engineers
-  setzen das beim Provisionieren über Vercel Dashboard.
-- **Annahme:** Statische Review-Daten (US-22) werden später durch
-  Backend-Modell ersetzt (Iteration 4 / US-29) — Datenstruktur ist
-  schon kompatibel.
-- **Annahme:** Service-Popup-Bilder (Vorher/Nachher) sind Platzhalter
-  in IT3; Tom liefert echte Fotos nach.
-- **Annahme:** Iteration 3 nutzt **Variante 2** der Calendar-Daten-
-  Beschaffung (Server-Component liest direkt aus Prisma), kein
-  öffentlicher GET-Endpoint für Template/Overrides.
-- **Annahme:** "Sonstiges"-Beschreibung wird mit 30 Zeichen
-  (`CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH`) abgesichert. Tom kann
-  diesen Wert später anpassen.
-
-### 16.16 Akzeptanzkriterien-Mapping IT3
-
-| Story | Erfüllt durch                                                                                                              |
-| ----- | -------------------------------------------------------------------------------------------------------------------------- |
-| BUG IT3 | `BookingForm.tsx`-Refactor (siehe `BUG_BOOKING_IT3.md`); slot/date/time aus RHF-Form-Schema entfernt.                   |
-| US-17 | `AvailabilityTemplate` + `DayOverride` Schemas; `GET /api/slots/available` als öffentlicher Calc-Endpoint; Admin-UI unter `/admin/availability`. |
-| US-18 | Vercel Blob via `POST /api/upload`; `BookingAttachment`-Modell; `FileUpload.tsx` + `BookingAttachmentList.tsx`.            |
-| US-19 | `'sonstiges'` in `SERVICES`; `superRefine` zwingt 30-Zeichen-Beschreibung.                                                |
-| US-20 | Statische Preise in `lib/services.ts` (`priceFrom`/`priceUnit`/`priceNote`); UI-Anzeige auf Service-Karten + Popups.       |
-| US-21 | `GET /api/admin/upcoming-bookings`; `<UpcomingBookingsList>` auf Dashboard-Page.                                          |
-| US-22 | `lib/reviews.ts` mit 10 statischen Datensätzen; `<ReviewSection>` auf Startseite.                                         |
-| US-23 | `<ServiceModal>` mit Vorher/Nachher, Inhalt aus `services.ts.details`.                                                    |
-| US-24 | `bookingConfirmationToCustomer` + `bookingRejectionToCustomer` in `lib/mail.ts`; Trigger im `PATCH /api/bookings/:id`.    |
-
----
-
-## 17. Iteration 4 — Detail-Spec (US-25 bis US-29)
-
-Iteration 4 ist die bisher umfangreichste Iteration. Sie führt drei
-voneinander entkoppelte Subsysteme ein:
-
-1. **Kunden-Auth & Portal** (US-25, US-26, US-27) — eigene Auth-Mechanik
-   neben NextAuth-Admin, ohne dass eines das andere beeinflusst.
-2. **Stripe-Zahlungen** (US-28) — externer Payment-Provider, integriert
-   via Checkout-Sessions + Webhook.
-3. **Bewertungs-Backend** (US-29) — Admin-moderierte Reviews ersetzen
-   die statische Liste aus IT3.
-
-Verbindendes Element: der neue Booking-Status `COMPLETED` schaltet den
-Bewertungs-Flow frei und kann optional Voraussetzung für die endgültige
-Zahlungs-Quittung sein (im MVP nicht erzwungen — Tom kann Zahlung schon
-vor COMPLETED hinterlegen).
-
-### 17.1 Kunden-Auth-Architektur (US-25)
-
-#### Entscheidung: Eigenes JWT-Cookie vs. zweite NextAuth-Instanz
-
-**Gewählt: Eigenes JWT-Cookie `customer-session`.**
-
-Begründung:
-
-- NextAuth v5 unterstützt zwar mehrere Provider, aber die Trennung von
-  zwei voneinander unabhängigen User-Tabellen (Admin vs. Kunde) führt
-  zu Komplexität in `auth.config.ts` (verschiedene `pages.signIn`-
-  Routen, getrennte Callbacks, Session-Cookie-Namensraum).
-- Eine eigene, leichtgewichtige JWT-Session ist ~150 Zeilen Code
-  (Cookie setzen / lesen / löschen + JWT-Sign/Verify). Sie hat:
-  - keine Auswirkung auf das bestehende Admin-Auth (BUG-005-Härtung
-    bleibt unverändert),
-  - einen eigenen Cookie-Namen (`customer-session`),
-  - identische Sicherheits-Eigenschaften (httpOnly, Secure, SameSite=Lax).
-- Beide Sessions können parallel im selben Browser existieren — ein
-  CustomerUser, der zufällig auch Admin ist (Tom?), kann sich in beide
-  Bereiche einloggen.
-
-#### Helper-Funktionen (`src/lib/customer-auth.ts`)
-
-```ts
-// Pseudocode
-import { SignJWT, jwtVerify } from 'jose';
-import { cookies } from 'next/headers';
-
-const SECRET = new TextEncoder().encode(
-  process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET!,
-);
-const COOKIE_NAME = 'customer-session';
-const MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 Tage
-
-export interface CustomerSession {
-  customerId: string;
-  email: string;
-}
-
-export async function createCustomerSession(
-  payload: CustomerSession,
-): Promise<string> {
-  return new SignJWT({ ...payload })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuedAt()
-    .setExpirationTime(`${MAX_AGE_SECONDS}s`)
-    .sign(SECRET);
-}
-
-export function setCustomerSessionCookie(token: string) {
-  cookies().set(COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    path: '/',
-    maxAge: MAX_AGE_SECONDS,
-  });
-}
-
-export function clearCustomerSessionCookie() {
-  cookies().delete(COOKIE_NAME);
-}
-
-export async function readCustomerSession(): Promise<CustomerSession | null> {
-  const token = cookies().get(COOKIE_NAME)?.value;
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, SECRET);
-    return { customerId: String(payload.customerId), email: String(payload.email) };
-  } catch {
-    return null;
-  }
-}
-
-/** Variante für Edge-Middleware (cookie-only — kein DB-Lookup). */
-export async function readCustomerSessionFromRequest(
-  req: NextRequest,
-): Promise<CustomerSession | null> { /* gleiche Logik mit req.cookies */ }
-```
-
-**Wichtig — Edge vs. Node:** Die Middleware (Edge-Runtime) darf nur
-`jose` (ESM, edge-kompatibel) und keinen Prisma-Client importieren. Sie
-prüft **nur** die JWT-Validität (Signatur + exp). Tieferer DB-Check
-(z.B. emailVerified) erfolgt im Route-Handler.
-
-#### Middleware-Erweiterung (`src/middleware.ts`)
-
-Die bestehende Middleware schützt nur `/admin/*`. Iteration 4 ergänzt
-einen zweiten Matcher für `/konto/*`:
-
-```ts
-// Pseudocode (vereinfacht — Engineers fassen die zwei matcher in einer
-// einzigen Middleware-Funktion zusammen).
-import { authConfig } from '@/lib/auth.config';
-import { readCustomerSessionFromRequest } from '@/lib/customer-auth';
-
-const PUBLIC_KONTO_PATHS = [
-  '/konto/login',
-  '/konto/registrieren',
-  '/konto/passwort-vergessen',
-  '/konto/passwort-zuruecksetzen',
-  '/konto/verifizieren',
-];
-
-export default async function middleware(req: NextRequest) {
-  const { pathname } = req.nextUrl;
-
-  // /admin/* — bestehende Logik
-  if (pathname.startsWith('/admin')) { /* unverändert */ }
-
-  // /konto/* — IT4
-  if (pathname.startsWith('/konto')) {
-    // /konto/zahlung/:id ist öffentlich, wenn ?token=cancelToken vorhanden
-    // ist — sonst Login-Pflicht.
-    if (pathname.startsWith('/konto/zahlung/')) {
-      const token = req.nextUrl.searchParams.get('token');
-      if (token) return NextResponse.next();
-    }
-    if (PUBLIC_KONTO_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
-      return NextResponse.next();
-    }
-    const session = await readCustomerSessionFromRequest(req);
-    if (session) return NextResponse.next();
-    const loginUrl = new URL('/konto/login', req.nextUrl.origin);
-    loginUrl.searchParams.set('callbackUrl', pathname);
-    return NextResponse.redirect(loginUrl);
-  }
-
-  return NextResponse.next();
-}
-
-export const config = {
-  matcher: ['/admin/:path*', '/konto/:path*'],
-};
-```
-
-#### Sicherheits-Praktiken (Kunden-Auth)
-
-- **Passwort-Hashing:** bcrypt cost 10 (gleich wie Admin).
-- **Login-Fehler:** generische Message — keine Auskunft, ob E-Mail
-  existiert (BUG-005-Pattern wiederverwendet, inkl. konstanter
-  bcrypt-Last gegen Timing-Angriff).
-- **Verifikations-Pflicht:** Login mit `emailVerified: false` schlägt
-  mit 422 fehl. Konto kann erst nach Verifikation genutzt werden.
-- **Token-Ablauf (BUG-401-Fix v1.4.1):**
-  - `verificationToken`: 24h, geprüft via dedizierter Spalte
-    `verificationTokenExpiry DateTime?`. Bei Registrierung UND bei
-    `POST /api/customer/resend-verification` wird das Feld gesetzt
-    auf `now + 24h`. Verify-Endpoint prüft `verificationTokenExpiry > now`.
-    Engineers-Hinweis: NICHT mehr `createdAt` für die Ablauf-Prüfung
-    nutzen — das ist das Symptom, das BUG-401 ausgelöst hat.
-  - `resetToken`: 1h (`resetTokenExpiry`).
-- **Profil-E-Mail-Änderung (BUG-402-Fix v1.4.1):**
-  - Im MVP **nicht erlaubt**. `CustomerProfileUpdateSchema` ist
-    `.strict()` und akzeptiert nur firstName/lastName/phone. Versuche,
-    `email` zu setzen, geben 400 `VALIDATION_ERROR` zurück.
-  - Begründung: Eine echte E-Mail-Änderung erfordert einen Pending-
-    State-Mechanismus (`pendingEmail`, `pendingEmailToken`,
-    `pendingEmailTokenExpiry`), damit der Login unter der alten
-    Adresse bedienbar bleibt, bis die neue verifiziert ist. Diese
-    drei Spalten + Verify-Endpoint sind Backlog (IT5, eigene Story).
-  - Frontend-Verhalten: Profil-Form zeigt das `email`-Feld read-only
-    mit Hinweistext: "E-Mail-Adresse kann derzeit nicht selbst geändert
-    werden. Bitte wenden Sie sich an unser Team."
-  - Engineers-Hinweis: Tom kann im Notfall (z.B. Tippfehler bei
-    Registrierung) eine E-Mail manuell via Prisma Studio korrigieren.
-- **Enumeration-Schutz:** `forgot-password` und `resend-verification`
-  antworten **immer** 200, unabhängig von Konto-Existenz.
-- **Brute-Force:** Rate-Limits via Upstash (siehe API-Spec §20).
-- **CSRF:** Da wir SameSite=Lax und JSON-Bodies nutzen, ist CSRF für
-  POST-Endpunkte automatisch entschärft. Engineers sollten KEIN
-  Form-Submit (multipart) für Customer-Endpunkte nutzen (außer Upload,
-  der keine Auth-Aktion ist).
-- **Open-Redirect-Schutz für Login (MAJOR-405-Fix v1.4.1):**
-  - `POST /api/customer/login` akzeptiert ein optionales `redirectUrl`
-    im Body. Middleware setzt es als `?callbackUrl=<pathname>` beim
-    Login-Redirect.
-  - Beide Werte werden vor Verwendung durch
-    `safeCustomerCallback(input)` (in `src/lib/customer-auth.ts`)
-    validiert:
-
-```ts
-/**
- * Akzeptiert NUR relative Pfade ohne Protokoll/Host.
- * Liefert bei Verstoß den Default '/konto'.
- *
- * Verworfen wird:
- *   - Strings ohne führendes '/' ('konto' → fail)
- *   - Protokoll-relative URLs ('//evil.example/login' → fail)
- *   - URLs mit Schema (':' oder '\\' enthalten → fail)
- *   - Strings mit Whitespace
- *   - Externe Origins (URL-Parse → host !== '')
- */
-export function safeCustomerCallback(input: unknown): string {
-  const FALLBACK = '/konto';
-  if (typeof input !== 'string' || input.length === 0) return FALLBACK;
-  if (!input.startsWith('/')) return FALLBACK;
-  if (input.startsWith('//')) return FALLBACK;       // protocol-relative
-  if (/[:\\\s]/.test(input)) return FALLBACK;        // scheme/backslash/whitespace
-  if (input.length > 512) return FALLBACK;           // sanity
-  return input;
-}
-```
-
-  - Wirkungs-Punkte:
-    1. `POST /api/customer/login` — Backend validiert `redirectUrl`
-       (Body) und gibt den geprüften Wert in `data.redirectUrl` zurück.
-    2. `LoginForm.tsx` — vor `router.push()` validieren, falls
-       Frontend zusätzlich aus der Query liest.
-    3. Middleware — `loginUrl.searchParams.set('callbackUrl', pathname)`
-       schreibt eingehende Pfade weiter, validiert wird beim Login.
-  - Engineers-Hinweis: Der Helper-Test (`safeCustomerCallback`) ist
-    Pflicht-Unit-Test im Test-Plan §17.8 (mit den oben genannten
-    Failure-Cases als Negative-Cases).
-
-### 17.2 Datenmodell-Änderungen IT4
-
-#### Neue Tabellen
-
-| Tabelle         | Zweck                                                                               | Schema-Detail                                                                     |
-| --------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `customer_users`| Kunden-Account (US-25).                                                             | id, email (UNIQUE), password_hash, first_name, last_name, phone?, email_verified, verification_token (UNIQUE), reset_token (UNIQUE), reset_token_expiry, created_at, updated_at. |
-| `payments`      | Stripe-Zahlung 1:1 zu Booking (US-28).                                              | id, booking_id (UNIQUE), stripe_session_id (UNIQUE), amount (Cents), currency, description, status, paid_at, created_at, updated_at. |
-| `reviews`       | Kundenbewertung 1:1 zu Booking (US-29).                                             | id, customer_id?, booking_id (UNIQUE), stars (1–5), text?, approved, created_at, updated_at. |
-
-#### Neue Felder an `bookings`
-
-| Feld           | Typ      | Constraints                                                  | Bemerkung                                            |
-| -------------- | -------- | ------------------------------------------------------------ | ---------------------------------------------------- |
-| `customer_id`  | TEXT     | NULL, FK → customer_users.id ON DELETE SET NULL, INDEX       | Verknüpfung zum Kundenkonto (Gastbuchung = NULL).    |
-
-#### Status-Erweiterung
-
-`BookingStatus` erhält den neuen Wert `COMPLETED`. CHECK-Constraint in
-`schema.sql` entsprechend erweitert. Prisma-Enum-Eintrag ebenso.
-
-#### Migration (Prisma)
+## 2. Datenmodell
+
+Alle Modelle liegen in `prisma/schema.prisma`. Geltende Grundsätze:
+
+- SQLite kennt kein natives `ENUM` → Status-Felder sind `String`,
+  Werte werden im App-Layer durch Zod-Schemas erzwungen
+  (`contracts/zod-schemas.ts`).
+- IDs sind durchgängig `cuid()`.
+- Zeitstempel sind UTC (`DateTime` in Prisma → ISO 8601).
+- Money: `Decimal?` für `Booking.finalPriceEur` (intern), `Int` (Cents) für `Payment.amount`.
+
+### 2.1 Tabellen-Übersicht
+
+| Tabelle                       | Zweck                                                                |
+|-------------------------------|----------------------------------------------------------------------|
+| `users`                       | Admins (NextAuth v5 Credentials). Status `ACTIVE`/`DISABLED`.        |
+| `customer_users`              | Kunden-Account (E-Mail/Pw + Google-OAuth). Profil-Adresse, Marketing-Opt-Out. |
+| `password_reset_tokens`       | SHA-256 Token-Hash, 1h-Ablauf, single-use (Customer-Reset).          |
+| `slots`                       | Admin-erstellte Zeitslots (DEPRECATED ab IT3 zugunsten Date/Time-Modus, aber für Bestand erhalten). |
+| `bookings`                    | Buchungen (PENDING/CONFIRMED/REJECTED/COUNTER_PROPOSED/CANCELLED/COMPLETED). |
+| `booking_attachments`         | Datei-Anhänge zu Bookings (Vercel-Blob-URL).                         |
+| `availability_template`       | Wochentag-Defaults (genau 7 Datensätze).                             |
+| `day_overrides`               | Tagesgenaue Verfügbarkeits-Überschreibungen.                         |
+| `weekly_availability`         | DEPRECATED ab IT3.                                                   |
+| `payments`                    | Stripe-Zahlung 1:1 zu Booking (IT4 — operativ ruhend).               |
+| `reviews`                     | Kundenbewertung 1..5 Sterne, Admin-Approval.                         |
+| `buffer_config`               | Singleton — globaler Puffer in Minuten (Default 30).                 |
+| `marketing_emails`            | IT12 — Audit pro versendeter Marketing-Mail.                         |
+| `marketing_email_recipients`  | IT12 — pro Empfänger ein Record + Resend-Message-ID.                 |
+| `idempotency_keys`            | IT12 — Cache für `Idempotency-Key`-Header bei `POST /api/bookings`.  |
+
+### 2.2 Wichtige Felder & Beziehungen
+
+**`User` (Admin)**
+- `email` UNIQUE, `passwordHash`, `name`, `status` ('ACTIVE'|'DISABLED').
+- Self-FK `createdById` (Audit), `lastLoginAt`.
+- Relation: `moderatedReviews`, `marketingEmailsSent` (RESTRICT — Admin-Löschung darf Audit-Trail nicht brechen).
+
+**`CustomerUser`**
+- `email` UNIQUE, `passwordHash` NULLABLE (OAuth-only-Konten).
+- `firstName`, `lastName`, `phone?`, `emailVerified`, `emailVerifiedAt?`.
+- OAuth: `oauthProvider?`, `oauthId?`, `avatarUrl?`. Index `[oauthProvider, oauthId]`.
+- Profil-Adresse (IT9): `streetAndNumber?`, `postalCode?` (5-stellig DE), `city?`.
+- Admin-intern (IT6): `adminNote?`, `adminRating?` — NIEMALS customer-facing (DTO-Filter).
+- Marketing (IT12 / DSGVO Variante 3): `unsubscribedAt?`, `unsubscribedReason?`. Sparse-Index auf `unsubscribedAt`.
+- Indizes: `[email]`, `[lastName, firstName]`, `[adminRating]`, `[unsubscribedAt]`.
+
+**`Booking`**
+- IT3: Date/Time-Modus (`date`, `startTime`, `endTime`). Slot-Modus (`slotId`) deprecated, bleibt für Bestand.
+- IT5: `durationMinutes` (Default 60), Adresse (`addressStreet?`, `addressZip?`, `addressCity?` — DB-nullable, API-Pflicht).
+- IT4: optional `customerId?` → `CustomerUser` (`onDelete: SetNull`).
+- IT6: `finalPriceEur Decimal?`, `finalPriceNote?` — INTERN, NIE customer-facing.
+- IT11 (Audit-Storno): `cancelledAt?`, `cancelledBy?` ('CUSTOMER'|'ADMIN'|'SYSTEM'), `cancellationReason?`.
+- Status-Werte: `PENDING` | `CONFIRMED` | `REJECTED` | `COUNTER_PROPOSED` | `CANCELLED` | `COMPLETED`.
+- `cancelToken` UNIQUE — Tom→Kunde-Counter-Proposal-Antwort (IT2).
+- `mailSent`, `mailError` für fire-and-forget Mail-Diagnose.
+- Indizes: `[date, status]`, `[status, date, startTime]`, `[customerId, date]`, `[customerId, status]`, `[status, createdAt]`.
+
+**`MarketingEmail` + `MarketingEmailRecipient`** (siehe §7)
+
+**`IdempotencyKey`**
+- Vom Frontend pro `POST /api/bookings` generiert (UUID), Header `Idempotency-Key`.
+- TTL 24h. JSON-Response wird bei Re-Submit zurückgespielt.
+
+### 2.3 Migrations-Workflow (Turso libSQL!)
+
+**Wichtige Eigenheit:** Prisma `migrate deploy` funktioniert **nicht**
+gegen `libsql://`-URLs (`prisma migrate` versteht nur native SQLite-Files
+und Postgres/MySQL). Die Migrationen werden in Production stattdessen
+direkt per Turso-Shell ausgerollt:
 
 ```bash
-prisma migrate dev --name iteration4_customer_portal_payments_reviews
+turso db shell baerenstark-prod < prisma/migrations/<id>/migration.sql
 ```
 
-Migrationsschritte (Engineers):
+**Ablauf in Production:**
 
-1. `customer_users`-Tabelle anlegen.
-2. `bookings.customer_id` als nullable Spalte mit FK ergänzen.
-3. `bookings.status`-CHECK aktualisieren (`COMPLETED` zusätzlich erlaubt).
-   Prisma erzeugt das automatisch aus dem Enum; SQLite erfordert ggf.
-   ein manuelles Recreate-Pattern (Engineers prüfen Prisma-Output).
-4. `payments`-Tabelle anlegen.
-5. `reviews`-Tabelle anlegen.
-6. Indexe anlegen (siehe `schema.sql`).
+1. Migration lokal erstellen (`npx prisma migrate dev --name <id>`).
+2. Migration in den passenden `prisma/migrations/`-Ordner committen.
+3. SQL in einer kontrollierten Shell gegen Turso ausführen:
+   `turso db shell baerenstark-prod < prisma/migrations/<id>/migration.sql`.
+4. `_prisma_migrations`-Tabelle manuell mit dem Migration-Eintrag erweitern,
+   damit `prisma migrate status` (Dev) keinen Drift mehr meldet.
+5. Vercel re-deploy → Prisma-Client kennt das neue Schema, App läuft mit den neuen Spalten.
 
-**Datenmigration:** Keine Backfill nötig. Bestehende Buchungen behalten
-`customer_id = NULL` (Gastbuchungen).
-
-### 17.3 Frontend-Architektur Iteration 4
-
-#### Neue Pages
+Aktuelle Migrationen (in Reihenfolge):
 
 ```
-src/app/
-├── konto/
-│   ├── layout.tsx                       # Kunden-Header + Footer
-│   ├── login/page.tsx                   # US-25 AC3
-│   ├── registrieren/page.tsx            # US-25 AC1
-│   ├── passwort-vergessen/page.tsx      # US-25 AC5
-│   ├── passwort-zuruecksetzen/page.tsx  # US-25 AC6 (?token=...)
-│   ├── verifizieren/page.tsx            # US-25 AC2 (?token=...)
-│   ├── page.tsx                         # Auftragsübersicht (US-26)
-│   ├── auftrag/[id]/page.tsx            # Detail (US-26 AC4, US-27, US-29)
-│   ├── profil/page.tsx                  # Profil-Update (US-25 AC10)
-│   └── zahlung/
-│       ├── [bookingId]/page.tsx         # Stripe-Checkout-Auslöser (US-28)
-│       └── erfolg/page.tsx              # Stripe-Redirect-Ziel (?session_id=...)
-└── admin/
-    └── reviews/page.tsx                 # NEU IT4 — Bewertungs-Moderation (US-29)
+20260502000000_init
+20260502000001_active_booking_per_slot
+20260502122601_iteration2
+20260502122700_iteration2_active_booking_index_v2_and_seed_availability
+20260502180205_iteration3
+20260502180206_iteration3_indexes_and_seed
+20260502194905_iteration4
+20260502235443_iteration5
+20260503000000_admin_password_reset
+20260503000001_iteration5_indexes_and_seed
+20260503083723_iteration_6
+20260503090000_iteration_7_email_auth
+20260503163821_add_customer_address
+20260504100000_add_booking_cancellation_audit
+20260504120000_iteration_12_marketing
 ```
-
-#### Neue Komponenten
-
-| Pfad                                             | Status   | Zweck                                                                |
-| ------------------------------------------------ | -------- | -------------------------------------------------------------------- |
-| `components/customer/CustomerHeaderMenu.tsx`     | NEU      | Header-Menü mit Logout-Button, Profil-Link.                          |
-| `components/customer/RegisterForm.tsx`           | NEU      | Registrierungs-Formular.                                             |
-| `components/customer/LoginForm.tsx`              | NEU      | Login-Formular.                                                      |
-| `components/customer/ForgotPasswordForm.tsx`     | NEU      |                                                                       |
-| `components/customer/ResetPasswordForm.tsx`      | NEU      |                                                                       |
-| `components/customer/CustomerBookingsList.tsx`   | NEU      | Liste mit Tabs "Bevorstehend"/"Vergangen".                           |
-| `components/customer/BookingDetailCard.tsx`      | NEU      | Detail-Anzeige inkl. Status-Badge.                                   |
-| `components/customer/CancelBookingButton.tsx`    | NEU      | Confirm-Dialog + POST `/api/customer/bookings/:id/cancel`.           |
-| `components/customer/ReviewForm.tsx`             | NEU      | 5-Sterne-Picker + Textarea.                                           |
-| `components/customer/StripeCheckoutButton.tsx`   | NEU      | "Mit PayPal/Karte/Apple Pay/Google Pay bezahlen" → POST create-session. |
-| `components/admin/PaymentEditor.tsx`             | NEU      | Modal: Betrag in Euro eingeben, in Cents umrechnen, POST.            |
-| `components/admin/ReviewModerationTable.tsx`     | NEU      | Reviews mit Approve/Reject-Buttons.                                  |
-| `components/home/ReviewSection.tsx`              | UMGEBAUT | Liest jetzt von `GET /api/reviews`; Fallback auf statische Daten falls < 4 approved. |
-
-#### API-Client-Erweiterungen (`src/lib/api-client.ts`)
-
-```ts
-// Neue Funktionen (Auswahl):
-export async function customerRegister(input: CustomerRegisterInput): Promise<...>;
-export async function customerLogin(input: CustomerLoginInput): Promise<CustomerUserPublic>;
-export async function customerLogout(): Promise<void>;
-export async function fetchMe(): Promise<CustomerUserPublic | null>;
-export async function fetchMyBookings(): Promise<CustomerBookingsResponse>;
-export async function cancelMyBooking(id: string): Promise<...>;
-export async function createPaymentSession(bookingId: string, cancelToken?: string): Promise<{ url: string }>;
-export async function createReview(input: CreateReviewInput): Promise<Review>;
-export async function fetchPublicReviews(limit?: number): Promise<{ items: PublicReview[]; average: number; total: number }>;
-```
-
-### 17.4 Stripe-Integration Architektur (US-28)
-
-#### Stack-Entscheidung: Stripe Checkout vs. Stripe Elements
-
-Wir nutzen **Stripe Checkout** (hosted page) statt Stripe Elements (embedded).
-
-| Kriterium             | Checkout (gewählt)                                        | Elements                                            |
-| --------------------- | --------------------------------------------------------- | --------------------------------------------------- |
-| PCI-Compliance        | Stripe handhabt alles (SAQ-A).                            | Wir hosten Karten-Eingabe — höhere PCI-Anforderung. |
-| Implementierungsaufwand | ~50 Zeilen Code (`stripe.checkout.sessions.create`).    | UI-Komponenten + Stripe.js + Theme-Anpassung.        |
-| PayPal/Apple/Google Pay | Out-of-the-box.                                          | Manuell zu konfigurieren.                            |
-| Branding              | Begrenzt (Logo + Farbe in Stripe Dashboard).              | Vollständig.                                         |
-| Mobile UX             | Stripe-optimiert (Wallets, Touch-friendly).               | Eigene Mobile-Optimierung nötig.                    |
-
-Stripe Checkout deckt unsere Anforderung (US-28: PayPal + Apple Pay +
-Google Pay) ab und reduziert PCI-Verantwortung auf SAQ-A. Branding-
-Trade-off ist akzeptabel.
-
-#### Beträge in Cents
-
-Stripe-Konvention: Beträge sind Integer in der Subwährungs-Einheit
-(Cents für EUR). Wir persistieren **immer** Cents (Spalte
-`payments.amount INTEGER`). Frontend rechnet bei Anzeige in Euro um.
-
-Begründung: Float-Persistenz verursacht Rundungsfehler (`14.99 € →
-1499 cent`, nicht `14.989999... €`). Stripe erwartet ohnehin Cents.
-
-#### Webhook-Sicherheit
-
-Stripe sendet Webhooks an `POST /api/payments/webhook`. Drei
-Verteidigungslinien:
-
-1. **Signatur-Check** mit `STRIPE_WEBHOOK_SECRET`. Verstoß → 400.
-2. **Idempotenz**: vor jedem Update Status-Check (PAID + erneuter
-   `checkout.session.completed` → keine zweite Mail).
-3. **Raw-Body-Lesen**: Next.js parst JSON automatisch. Für Webhook
-   muss der Handler `await req.text()` aufrufen (vor dem JSON-Parse),
-   damit die Signatur über den unveränderten Bytes berechnet werden
-   kann.
-
-```ts
-// Pseudocode src/app/api/payments/webhook/route.ts
-export async function POST(req: Request) {
-  const sig = req.headers.get('stripe-signature');
-  if (!sig) return new Response('Missing signature', { status: 400 });
-
-  const rawBody = await req.text();
-  let event: Stripe.Event;
-  try {
-    event = stripe.webhooks.constructEvent(rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET!);
-  } catch {
-    return new Response('Invalid signature', { status: 400 });
-  }
-
-  switch (event.type) {
-    case 'checkout.session.completed': await handleCompleted(event); break;
-    case 'checkout.session.expired':   await handleExpired(event); break;
-    case 'payment_intent.payment_failed': await handleFailed(event); break;
-    case 'charge.refunded':            await handleRefunded(event); break;
-    default: /* ignore */ break;
-  }
-
-  return Response.json({ received: true });
-}
-```
-
-#### Test-Mode vs. Live-Mode
-
-- **Development:** `STRIPE_SECRET_KEY=sk_test_...` + Stripe CLI
-  (`stripe listen --forward-to localhost:3000/api/payments/webhook`)
-  für lokale Webhook-Tests.
-- **Production:** `sk_live_...` + Webhook-Endpoint im Stripe Dashboard
-  registrieren mit den 4 oben genannten Event-Types.
-
-#### `lib/stripe.ts` — Singleton
-
-```ts
-import Stripe from 'stripe';
-
-let _stripe: Stripe | null = null;
-
-export function getStripe(): Stripe {
-  if (_stripe) return _stripe;
-  const key = process.env.STRIPE_SECRET_KEY;
-  if (!key) throw new Error('STRIPE_SECRET_KEY ist nicht gesetzt.');
-  _stripe = new Stripe(key, { apiVersion: '2024-04-10' });
-  return _stripe;
-}
-```
-
-### 17.5 E-Mail-Templates Iteration 4
-
-| Template-Key                       | Trigger                                          | Empfänger | Wesentliche Inhalte                                            |
-| ---------------------------------- | ------------------------------------------------ | --------- | -------------------------------------------------------------- |
-| `customerVerificationMail`         | `POST /api/customer/register` UND `POST /api/customer/resend-verification` | Kunde | Verifikations-Link `${BASE_URL}/konto/verifizieren?token=...`. **Hinweis (BUG-401-Fix):** beide Trigger setzen den Token UND `verificationTokenExpiry = now + 24h`. |
-| `customerPasswordResetMail`        | `POST /api/customer/forgot-password`             | Kunde     | Reset-Link `${BASE_URL}/konto/passwort-zuruecksetzen?token=...` |
-| `paymentRequestToCustomer`         | `POST /api/admin/bookings/:id/payment`           | Kunde     | Fälliger Betrag, Link `${BASE_URL}/konto/zahlung/:bookingId?token=...` |
-| `paymentReceivedToCustomer`        | Stripe `checkout.session.completed`              | Kunde     | "Vielen Dank, Zahlung eingegangen"; Auftragsdetails.           |
-| `paymentReceivedToAdmin`           | Stripe `checkout.session.completed`              | Tom       | "Zahlung eingegangen"; Kundendaten + Betrag.                    |
-| `paymentRefundedToCustomer`        | Stripe `charge.refunded`                         | Kunde     | "Rückerstattung erfolgt"; Betrag.                              |
-
-**ENTFERNT in v1.4.1 (BUG-402-Fix):** `customerEmailChangedMail` —
-E-Mail-Änderung im MVP nicht angeboten, Template entfällt damit
-ebenfalls. Wenn Tom dies in IT5 wieder aktiviert (Story
-"E-Mail-Änderung mit Pending-State"), kommt das Template zurück.
-
-Implementation analog zu IT2/IT3-Templates in `src/lib/mail.ts`.
-
-### 17.6 UI-States Iteration 4
-
-#### `/konto/login` (US-25 AC3, AC4)
-
-| State           | Trigger                                          | UI                                                                |
-| --------------- | ------------------------------------------------ | ----------------------------------------------------------------- |
-| Idle            | Initial-Load                                      | Form mit E-Mail + Passwort + "Passwort vergessen"-Link.            |
-| Submitting      | POST läuft                                        | Submit-Button disabled, Spinner.                                   |
-| AuthError       | 401                                               | Banner "E-Mail oder Passwort ungültig" (generisch).                |
-| EmailNotVerified| 422 EMAIL_NOT_VERIFIED                            | Banner + "Bestätigungs-E-Mail erneut senden"-Button (resend-verification). |
-| RateLimited     | 429                                               | Banner "Zu viele Anmelde-Versuche. Bitte 15 Minuten warten."        |
-| Success         | 200                                               | Redirect auf `?callbackUrl=...` oder `/konto`.                     |
-
-#### `/konto/registrieren` (US-25 AC1)
-
-| State        | UI                                                                                  |
-| ------------ | ----------------------------------------------------------------------------------- |
-| Idle         | Form: Vorname, Nachname, E-Mail, Passwort, Telefon (optional), DSGVO-Checkbox.       |
-| Submitting   | Disabled.                                                                           |
-| Success      | Banner "Bitte bestätigen Sie Ihre E-Mail-Adresse." + Hinweis auf Spam-Ordner.        |
-| EmailTaken   | 409 → Inline-Error am E-Mail-Feld: "Diese E-Mail ist bereits registriert."           |
-| Validation   | Inline-Errors (Passwort < 8, ungültige Mail, etc.).                                  |
-
-#### `/konto` (Übersicht, US-26)
-
-| State        | UI                                                                                          |
-| ------------ | ------------------------------------------------------------------------------------------- |
-| Loading      | Skeleton-Cards (3 Stück).                                                                    |
-| Empty        | "Sie haben noch keine Aufträge." + CTA "Ersten Auftrag buchen" → `/buchung`.                |
-| Ready        | Zwei Sektionen: "Bevorstehende Termine" und "Vergangene Aufträge", jeweils chronologisch.    |
-| Error        | Banner mit Retry-Button.                                                                     |
-
-#### `/konto/auftrag/:id` (Detail, US-26 AC4, US-27, US-29)
-
-| State              | UI                                                                                |
-| ------------------ | --------------------------------------------------------------------------------- |
-| Loading            | Skeleton-Card.                                                                    |
-| Ready              | Buchungsdetails, Status-Badge, ggf. Stornieren-Button, ggf. Bewerten-Button, ggf. Bezahlen-Button. |
-| CancelDialog       | "Möchten Sie diesen Termin wirklich stornieren?" mit Ja/Nein.                     |
-| Cancelled          | Status-Badge wechselt sofort, Stornieren-Button verschwindet, Toast.              |
-| CancelTooLate      | Stornieren-Button disabled mit Hint "Stornierung nur bis 24h vor Termin möglich. Bitte rufen Sie uns an: 0157-74787512." |
-| ReviewSubmitting   | Bewertungs-Button disabled mit Spinner.                                            |
-| ReviewSubmitted    | "Vielen Dank für Ihre Bewertung! Sie wird nach Freigabe veröffentlicht." + Form schreibgeschützt. |
-| ReviewExisting     | Schon bewertet: Sterne + Text werden read-only angezeigt.                          |
-
-#### `/konto/zahlung/:bookingId` (US-28)
-
-| State        | UI                                                                                                  |
-| ------------ | --------------------------------------------------------------------------------------------------- |
-| Loading      | Spinner.                                                                                            |
-| Ready        | Auftragsdetails + Betrag + "Mit PayPal/Karte/Apple Pay/Google Pay bezahlen"-Button (Stripe-Checkout). |
-| AlreadyPaid  | Banner "Diese Buchung wurde bereits bezahlt am ...".                                                 |
-| Failed       | Banner "Letzte Zahlung fehlgeschlagen — bitte erneut versuchen.".                                    |
-| Submitting   | Button disabled mit Spinner; nach Response: window.location = stripe-url.                            |
-
-#### `/konto/zahlung/erfolg` (Stripe-Redirect-Ziel) — MAJOR-402-Fix v1.4.1
-
-Client-Component liest `?session_id=...`, **polled** den öffentlichen
-Endpoint `GET /api/payments/session-status?session_id=...`
-(siehe API-Spec §13). Der Endpoint braucht **keine** Customer-Session —
-damit funktioniert die Erfolgsseite auch für Gäste, die ohne Login
-über einen Bezahl-Mail-Link zur Stripe-Checkout-Seite kamen.
-
-**Polling-Verhalten:**
-
-```ts
-// Frontend pseudocode
-const MAX = PAYMENT_SESSION_POLL_MAX_ATTEMPTS; // 5
-const INTERVAL = PAYMENT_SESSION_POLL_INTERVAL_MS; // 1000
-
-for (let i = 0; i < MAX; i++) {
-  const res = await fetch(`/api/payments/session-status?session_id=${sid}`);
-  const { data } = await res.json();
-  if (data.status === 'PAID')   { showSuccess(data); return; }
-  if (data.status === 'FAILED') { showFailed(data);  return; }
-  await sleep(INTERVAL);
-}
-showStillProcessing(); // Fallback nach 5 Tries
-```
-
-| State           | Trigger                                    | UI                                                                                                |
-| --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| WaitingWebhook  | Initial / `status === 'PENDING'`           | "Wir verarbeiten Ihre Zahlung..." mit Spinner. Polling läuft (max 5 × 1s).                        |
-| Success         | `status === 'PAID'`                        | "Vielen Dank! Zahlung erhalten." Eingeloggte Kunden bekommen zusätzlich einen Link auf `/konto/auftrag/<bookingId>`. Gäste sehen nur statischen Text. |
-| Failed          | `status === 'FAILED'`                      | "Die Zahlung konnte nicht abgeschlossen werden. Bitte erneut versuchen." + Retry-Link auf `/konto/zahlung/<bookingId>?token=...` (Gast) bzw. `/konto/zahlung/<bookingId>` (eingeloggt). |
-| StillProcessing | Nach 5 Polling-Versuchen weiterhin PENDING | "Wir verarbeiten Ihre Zahlung. Sie erhalten in Kürze eine E-Mail-Bestätigung." (kein weiterer Poll-Loop). |
-| NotFound        | 404 von session-status                     | Freundlicher Fallback "Bitte später erneut prüfen." (passiert im Race-Case, wenn Stripe schneller redirected als unsere DB den `stripeSessionId` schreibt — sollte selten sein). |
-
-**Gäste-Erkennung:** Frontend prüft, ob `customer-session`-Cookie
-clientseitig sichtbar ist (oder fragt `/api/customer/me` mit
-`credentials: 'include'`; bei 401 ist der User Gast). Der Detail-Link
-`/konto/auftrag/...` wird ausgeblendet — der Gast hätte sonst nur
-einen 401 nach dem Klick.
-
-#### `/admin/reviews` (US-29 Moderation)
-
-| State        | UI                                                                                  |
-| ------------ | ----------------------------------------------------------------------------------- |
-| Tabs         | "Wartend auf Freigabe" / "Veröffentlicht" / "Alle".                                  |
-| Per Eintrag  | Sterne, Text, Kunde, Service, Datum, "Freigeben"-Button bzw. "Zurückziehen"-Button. |
-| Confirm      | Modal: "Bewertung freigeben? Sie wird sofort auf der Startseite sichtbar."           |
-
-### 17.7 Sicherheits-Aspekte Iteration 4
-
-#### Authentifizierung (Kunden)
-
-- bcrypt cost 10 (gleich wie Admin).
-- JWT mit HS256, signiert mit `AUTH_SECRET` (32+ Zeichen Random).
-- Cookie httpOnly + Secure + SameSite=Lax.
-- Rate-Limits siehe API-Spec §20.
-
-#### Autorisierung
-
-- Jeder `/api/customer/*`-Endpunkt (außer Auth-Aktionen) prüft die
-  Session am Anfang und antwortet 401 ohne Cookie.
-- Ressourcen-Zugriff: jeder Booking/Review/Payment-Endpunkt prüft
-  Ownership (`customerId === me.id`) und antwortet **404** (NICHT 403)
-  bei Fremdzugriff — verhindert Existenz-Enumeration.
-
-#### Open-Redirect-Schutz für Customer-Login (MAJOR-405-Fix v1.4.1)
-
-Identische Pattern wie BUG-005-Fix für Admin: `redirectUrl` (Body) und
-`callbackUrl` (Query) werden via `safeCustomerCallback()` geprüft.
-Akzeptiert sind ausschließlich relative Pfade ohne Protokoll/Host
-(siehe §17.1 für Helper-Code). Ungültige Werte → Fallback `/konto`.
-
-#### Stripe-Webhook-Authentizität
-
-Pflicht-Signatur-Check via `STRIPE_WEBHOOK_SECRET`. Ohne Check
-könnte jeder POSTen und Bezahl-Status faken — deshalb **harte
-Anforderung**, dass die Signatur vor jeder DB-Schreibaktion validiert
-ist (siehe §17.4).
-
-#### Stripe-Session-Status-Endpoint (MAJOR-402-Fix v1.4.1)
-
-`GET /api/payments/session-status?session_id=cs_...` ist öffentlich
-(kein Auth-Cookie). Begründung: Stripe-Session-IDs sind hochentropisch
-und nur dem Käufer bekannt — sie wirken token-artig. Der Endpoint
-liefert ausschließlich `{ sessionId, status, paidAt, bookingId }` —
-**kein** Kunden-PII, keine Booking-Details. Damit ist eine Enumerierung
-auch im Worst Case (Angreifer kennt die Session-ID) unproblematisch:
-er erfährt nur "wurde bezahlt: ja/nein", was er als Käufer eh wüsste.
-
-Rate-Limit: 60 / 5 min / IP (das FE-Polling braucht max. 5 Calls in 5s,
-die Begrenzung ist ein Sanity-Cap gegen Polling-Loop-Bugs).
-
-#### Datenschutz
-
-- Reviews: `customerName` wird auf der öffentlichen API auf "Vorname N."
-  gekürzt (Backend, im Response-Mapper, MAJOR-403-Fix v1.4.1 — kein
-  DB-Snapshot, nur Live-Join).
-- Konto-Löschung: im MVP kein Self-Service. Wird Tom benötigt, kann er
-  via Prisma Studio einen `CustomerUser` löschen — die FK
-  `Booking.customerId` wird dann auf NULL gesetzt (SET NULL); Reviews
-  bleiben ebenfalls erhalten (nur ohne Bezug zum gelöschten Konto).
-  In diesem Fall greift der Review-Anzeige-Fallback `customerName = 'Anonym'`.
-  Engineers ergänzen einen `DELETE /api/customer/me`-Endpunkt nur
-  auf Anforderung. Wird Tom später Account-Delete einführen, müssen
-  Engineers eine Snapshot-Spalte `Review.customerName` ergänzen, damit
-  ältere Reviews ihren Anzeigenamen nicht verlieren.
-- Aufbewahrung: CustomerUser-Daten unbegrenzt (analog zum Admin). Bei
-  Anfrage zur DSGVO-Löschung manuell in Prisma Studio.
-
-#### Race-Conditions
-
-- **Doppelter Stripe-Webhook**: Status-Check vor Update verhindert
-  doppelten Mail-Versand.
-- **Doppelte Review-Erstellung**: UNIQUE-Index auf `reviews.booking_id`
-  fängt parallele Inserts auf DB-Ebene → 409.
-- **Stornierung kurz vor 24h-Frist**: Frontend-Check + Server-Check
-  beide vorhanden; Server-Check ist Authority.
-
-#### Storno-Frist-Algorithmus — Berlin-Zeitzone & DST (MAJOR-401-Fix v1.4.1)
-
-**Frist:** 24 Stunden physische Echtzeit (NICHT 24 naïve Berlin-
-Wand-Uhr-Stunden). Algorithmus:
-
-```ts
-// Pseudocode in src/lib/cancellation.ts
-import { fromZonedTime } from 'date-fns-tz';
-
-const TZ = 'Europe/Berlin';
-
-/**
- * Interpretiert "YYYY-MM-DD" + "HH:MM" als Berlin-Wall-Clock und
- * liefert einen UTC-Date. DST-fest: am letzten Sonntag im März
- * existiert die Stunde 02:00–03:00 nicht (Spring-Forward); wenn ein
- * Termin in dieser Lücke liegt, gibt date-fns-tz die nächst-folgende
- * gültige Wall-Clock zurück. Am letzten Sonntag im Oktober existiert
- * die Stunde 02:00–03:00 doppelt; wir wählen die SPÄTERE (zweite)
- * Belegung — Stripe-Mail-Versand und Tom-Tagesplanung sind so
- * deterministisch.
- */
-export function parseBerlinDateTime(date: string, time: string): Date {
-  return fromZonedTime(`${date}T${time}:00`, TZ);
-}
-
-export function isCancellableConfirmed(date: string, time: string, now = new Date()): boolean {
-  const start = parseBerlinDateTime(date, time);
-  return start.getTime() - now.getTime() > 24 * 60 * 60 * 1000;
-}
-```
-
-**Konsequenz für DST-Tage:**
-
-- *Spring-forward (März):* Termin Sonntag 10:00 Berlin nach DST. Storno
-  Samstag 10:00 Berlin → Differenz physisch nur **23 Stunden** → 24h-
-  Test schlägt fehl → Storno gesperrt. (Korrekt: weniger als 24h echte
-  Vorlaufzeit für Tom.)
-- *Fall-back (Oktober):* Termin Sonntag 10:00 Berlin nach DST. Storno
-  Samstag 10:00 Berlin → Differenz physisch **25 Stunden** → 24h-Test
-  passiert → Storno erlaubt. (Korrekt: Tom hat physisch 25h Vorlauf.)
-
-Dies ist die intuitive Lesart aus Tom-Sicht („wirklich 24 h vor dem
-Termin Bescheid geben"); die andere Lesart („1 Kalendertag vorher")
-wird damit bewusst verworfen.
-
-**Test-Plan §17.8 Pflichttests:**
-1. Termin am 26.10.2026 10:00 Berlin (Fall-back-Sonntag), Storno am
-   25.10.2026 10:00 Berlin → erlaubt (25h echte Differenz).
-2. Termin am 29.03.2026 10:00 Berlin (Spring-forward-Sonntag), Storno
-   am 28.03.2026 10:00 Berlin → gesperrt (23h echte Differenz).
-
-#### `isCancellable()` Null-Robustheit (MAJOR-404-Fix v1.4.1)
-
-Der Algorithmus für die Cancellable-Bewertung muss drei Eingangs-Fälle
-sauber behandeln:
-
-```ts
-function bookingStartUTC(b: Booking & { slot?: Slot | null }): Date | null {
-  if (b.date && b.startTime) return parseBerlinDateTime(b.date, b.startTime);
-  if (b.slot?.startsAt)      return new Date(b.slot.startsAt);   // IT1/IT2-Bestand
-  return null;                                                    // unbekannt
-}
-
-function isCancellable(b: Booking & { slot?: Slot | null }): boolean {
-  if (!PORTAL_CANCELLABLE_STATUSES.includes(b.status)) return false;
-  const start = bookingStartUTC(b);
-  if (!start) return true;          // unbekannter Termin → defensiv true; Server prüft erneut
-  if (b.status === 'CONFIRMED') {
-    return start.getTime() - Date.now() > 24 * 60 * 60 * 1000;
-  }
-  return start.getTime() > Date.now();
-}
-```
-
-**Begründung:**
-
-- Buchungen mit `date && startTime` (Standard-Fall IT3+) → Berlin-DST-fest.
-- Buchungen mit `slot.startsAt` (IT1/IT2-Bestand) → UTC direkt.
-- Buchungen ohne beides → semantisch: unbekannter Termin. Wir geben
-  `true` zurück, damit der Kunde nicht in einer Sackgasse hängt; der
-  POST-Cancel-Endpoint wiederholt den Check und 409, falls die Frist
-  nicht erfüllt ist (Server bleibt Authority).
-
-**Frontend-Komponente:** `<CancelBookingButton>` zeigt bei
-`isCancellable === false` und `b.status === 'CONFIRMED'` den 24h-
-Hinweis mit Telefonnummer (siehe §17.6 UI-State `CancelTooLate`). Bei
-Status nicht in `PORTAL_CANCELLABLE_STATUSES` (REJECTED/CANCELLED/
-COMPLETED) wird der Button gar nicht gerendert.
-
-#### Review-Anzeigename — Datenschutz & Anonymisierung (MAJOR-403-Klärung v1.4.1)
-
-`Review.customerName` ist **kein DB-Feld**. Stattdessen leitet der
-Backend-Response-Mapper den Anzeigenamen aus der include'd
-`customer`-Relation ab:
-
-```ts
-function reviewToPublic(r: Review & { customer: CustomerUser | null; booking: { service: string } | null }): PublicReview {
-  const customerName =
-    r.customer != null
-      ? `${r.customer.firstName} ${r.customer.lastName.charAt(0)}.`  // "Maria M."
-      : 'Anonym';                                                     // FK SetNull-Fall
-  return {
-    id: r.id,
-    customerName,
-    service: r.booking?.service ?? null,
-    stars: r.stars,
-    text: r.text,
-    createdAt: r.createdAt.toISOString(),
-  };
-}
-```
-
-Im Admin-Endpoint `GET /api/admin/reviews` wird `customerName` aus
-demselben Relation-Lookup gebildet — dort allerdings UNGEKÜRZT
-(`firstName + ' ' + lastName`), weil Tom die volle Identität für die
-Moderations-Entscheidung braucht.
-
-**Wichtig — MVP-Annahme:** Solange kein Self-Service-Account-Delete
-existiert, wird `customer === null` praktisch nie auftreten. Wenn Tom
-aber eine DSGVO-Löschung manuell ausführt, greift der `'Anonym'`-
-Fallback automatisch. Engineers brauchen also keinen Snapshot — bis
-Self-Service-Delete (Backlog) kommt.
-
-### 17.8 Test-Plan Iteration 4 (Engineer-Hinweise)
-
-| Bereich          | Test                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------ |
-| Customer-Auth    | E2E: Register → Verify-Mail-Klick → Login → /konto sichtbar.                                |
-| Forgot-Password  | E2E: Forgot → Mail → Reset-Link → neues Passwort → Login mit neuem Passwort.                |
-| Booking-Zuordnung| Eingeloggt: Buchung absenden → erscheint in `/konto`. Nicht eingeloggt: erscheint nicht.    |
-| Cancel 24h-Frist | Buchung 26h in Zukunft → cancellable. 22h → not cancellable, server check 409.              |
-| Payment-Flow     | Test-Mode: Tom legt Betrag → Mail an Kunden → Stripe-Checkout (Test-Karte 4242…) → Webhook → Status PAID. |
-| Webhook-Idempotenz | Webhook 2× senden → nur 1× Mail.                                                          |
-| Webhook-Signatur | Manueller POST ohne Signatur → 400; mit invalider Signatur → 400.                           |
-| Review-Flow      | Booking auf COMPLETED → Bewerten-Button sichtbar → Review submit → Tom genehmigt → Review auf Startseite. |
-| **BUG-401 Resend** | Konto registrieren, 25h warten (Mock `Date.now`), `resend-verification`, Link sofort klicken → Verifikation **erfolgreich** (NICHT 400). |
-| **BUG-402 Profile** | `PATCH /api/customer/me` mit `{ email: 'neu@example.com' }` → 400 `VALIDATION_ERROR`. Mit `{ firstName: 'Maria' }` → 200. |
-| **MAJOR-401 DST Spring** | Termin 29.03.2026 10:00 Berlin (Spring-Forward), Storno-Versuch 28.03.2026 10:00 Berlin → 409 (23h echte Differenz). |
-| **MAJOR-401 DST Fall** | Termin 26.10.2026 10:00 Berlin (Fall-Back), Storno-Versuch 25.10.2026 10:00 Berlin → 200 (25h echte Differenz). |
-| **MAJOR-402 Gast-Erfolg** | Stripe-Checkout ohne Login abschließen → `/konto/zahlung/erfolg?session_id=...` zeigt Success ohne 401. Polling auf `session-status` läuft. |
-| **MAJOR-403 Anonym** | Review mit `customerId = NULL` (manuell in DB gesetzt) → `GET /api/reviews` liefert `customerName: "Anonym"`, KEIN 500. |
-| **MAJOR-404 Slot-Bestand** | Buchung mit `slotId` und `date = NULL`, Status CONFIRMED, slot.startsAt 26h in Zukunft → `isCancellable === true`. |
-| **MAJOR-405 Open-Redirect** | `POST /api/customer/login` mit `redirectUrl: "https://evil.example/login"` → Login OK, Response `data.redirectUrl === '/konto'`. Mit `"//evil.example/login"` → ebenfalls Fallback. Mit `"/konto/auftrag/abc"` → durchgereicht. |
-| **safeCustomerCallback unit** | Pflicht-Unit-Tests: `'/konto'` → ok; `''` → `/konto`; `'//x'` → `/konto`; `'http://x'` → `/konto`; `'\\\\x'` → `/konto`; `'/konto?a=b'` → ok. |
-
-### 17.9 ENV-Variablen Iteration 4
-
-| Variable                  | Pflicht | Wert / Beispiel                        | Zweck                                  |
-| ------------------------- | ------- | -------------------------------------- | -------------------------------------- |
-| `STRIPE_SECRET_KEY`       | ja      | `sk_test_...` / `sk_live_...`          | Stripe-API-Auth (Server-side, US-28).  |
-| `STRIPE_PUBLISHABLE_KEY`  | ja      | `pk_test_...` / `pk_live_...`          | Optional (Embedded-Forms, im MVP nicht genutzt — bleibt Backlog für Stripe Elements). |
-| `STRIPE_WEBHOOK_SECRET`   | ja      | `whsec_...`                            | Webhook-Signatur-Validierung (US-28).  |
-| `AUTH_SECRET`             | ja      | bestehender NEXTAUTH_SECRET-Wert       | Wird für Customer-JWT-Signing wiederverwendet. Engineers können auch ein eigenes `CUSTOMER_AUTH_SECRET` setzen — dann Helper anpassen. |
-
-`.env.example` wird entsprechend ergänzt mit Hinweisen auf den
-Test-Mode (`sk_test_...`).
-
-### 17.10 Offene Punkte / Annahmen Iteration 4
-
-- **Annahme:** Stripe-Account ist verfügbar / wird von Tom angelegt
-  (kostenlos im Test-Mode). DNS-Verifikation der Stripe-Empfangsdomäne
-  ist nicht nötig — nur API-Key + Webhook-URL im Stripe-Dashboard.
-- **Annahme (BUG-402-Fix v1.4.1):** Im MVP wird **keine** E-Mail-Änderung
-  via Profil angeboten. Der Pending-Email-Mechanismus
-  (`pendingEmail` / `pendingEmailToken` / `pendingEmailTokenExpiry`)
-  ist Backlog (eigene Story IT5). Wenn ein Kunde die E-Mail unbedingt
-  ändern muss, korrigiert Tom sie manuell in Prisma Studio.
-- **Annahme:** "Termin abschließen" wird **manuell** von Tom im Admin-UI
-  ausgelöst (`PATCH /api/bookings/:id { status: 'COMPLETED' }`). Eine
-  automatische Markierung via Cron (z.B. 24h nach Termin-Datum) ist
-  Backlog.
-- **Annahme:** Stripe-Sessions laufen nach 24h ab (Stripe-Default).
-  Wenn ein Kunde eine alte Mail nach >24h klickt, wird automatisch eine
-  neue Session erstellt (`POST create-session` ist idempotent / handled
-  failed-state).
-- **Annahme:** Der Apple-Pay-/Google-Pay-Button wird **automatisch** von
-  Stripe Checkout gerendert, wenn das Endgerät kompatibel ist
-  ("progressive enhancement" — siehe US-28 AC4/AC5). Engineers
-  konfigurieren in Stripe-Dashboard die Wallet-Optionen.
-- **Annahme:** Im MVP kein Self-Service-Account-Delete (`DELETE /api/customer/me`)
-  — wird auf Backlog gesetzt. DSGVO-Löschung läuft über Tom + Prisma
-  Studio.
-- **Annahme (MAJOR-403-Klärung v1.4.1):** Statt einer separaten
-  `Review.customerName`-Snapshot-Spalte bleibt der Anzeigename live aus
-  `CustomerUser.firstName + lastName[0]` per Join. Backend liefert für
-  öffentlich `"Vorname N."`, im Admin-Endpoint `"Vorname Nachname"`
-  (volle Identität). Bei `customerId === null` (theoretisch nach
-  Konto-Löschung) greift der Fallback `'Anonym'`. Wird Tom später
-  Account-Delete einführen, müssen Engineers eine Snapshot-Spalte
-  ergänzen — solange kein Self-Service-Delete existiert, ist das
-  unkritisch.
-- [NEEDS INPUT] **Stripe-Account-Region & Steuerregeln.** Tom muss in
-  Stripe-Dashboard sein Steuersystem konfigurieren (Kleinunternehmer-
-  Status nach §19 UStG?). Das beeinflusst die `tax_behavior`-
-  Einstellung der Checkout-Session (`inclusive` vs. `exclusive`).
-  Engineers warten auf Tom-Input, sonst Default `inclusive` (Bruttopreis).
-- [NEEDS INPUT] **Mail-Versand vor Stripe-PaymentRequest:** Soll das
-  System bei Anlegen eines Payment-Datensatzes wirklich automatisch
-  eine Mail an den Kunden schicken? Annahme: **ja** (US-28 AC1
-  impliziert es). Wenn Tom erst manuell prüfen will, müsste ein
-  separater `POST /api/admin/bookings/:id/payment/send-request`-
-  Endpunkt entstehen.
-
-### 17.11 Akzeptanzkriterien-Mapping IT4
-
-| Story | Erfüllt durch                                                                                                                       |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| US-25 | `customer_users`-Tabelle, `/api/customer/*`-Endpunkte, `customer-session`-Cookie, `/konto/login` + `/konto/registrieren` Pages, Verifikations-Mail-Flow, Forgot/Reset-Flow, Profil-Update unter `/konto/profil`. Middleware schützt `/konto/*` (außer Public-Whitelist). |
-| US-26 | `Booking.customerId`-Feld (auto-befüllt aus Cookie), `GET /api/customer/bookings` mit upcoming/past-Split, `/konto`-Page mit Liste, `/konto/auftrag/:id`-Detail. Status-Badges DE-Mapping. Empty-State mit CTA. |
-| US-27 | `POST /api/customer/bookings/:id/cancel` mit serverseitigem 24h-Frist-Check und Status-Whitelist. `<CancelBookingButton>` mit Confirm-Dialog. Disabled-State + Hinweistext bei < 24h. |
-| US-28 | `Payment`-Modell, Stripe-Integration via `lib/stripe.ts`, `POST /api/admin/bookings/:id/payment` (Tom hinterlegt Betrag), `POST /api/payments/create-session` (Stripe Checkout mit card/paypal/wallets), `POST /api/payments/webhook` (Status-Update + Mails), `/konto/zahlung/:id` Page, Status-Badge "Bezahlt". |
-| US-29 | `Review`-Modell mit Admin-Freigabe, `POST /api/customer/reviews` (nur bei COMPLETED + ohne bestehende Review), `GET /api/reviews` (öffentlich, kürzt Namen, sortiert), `GET/PATCH /api/admin/reviews/:id` (Moderation), `/admin/reviews`-UI, `<ReviewSection>` umgebaut. `BookingStatus.COMPLETED` neu. |
 
 ---
 
-## 18. Iteration 5 — Detail-Spec (US-30 bis US-34)
+## 3. API-Verträge (Übersicht)
 
-### 18.1 Admin-Passwort-Reset (US-30) — UX & Konfigurations-Fix
+Detail-Verträge: `contracts/api-routes.md`,
+`contracts/iteration-12.openapi.yaml`,
+`contracts/bookings-cancel.openapi.yaml`. Hier nur die Endpoint-Liste mit
+einer Zeile Zweck. Auth-Spalten:
 
-**Problem-Analyse:**
-Der bestehende Reset-Flow funktioniert prinzipiell (siehe IT4-Vorarbeit
-`src/app/api/admin/forgot-password/route.ts`), hat aber drei UX-Mängel:
+- **Public** = ohne Auth.
+- **Public (Token)** = HMAC/JWT-Token im Query-Param.
+- **CustomerSession** = Cookie `customer-session` (Custom-JWT, 7d).
+- **AdminSession** = NextAuth-v5-Session-Cookie + `requireActiveAdmin()`.
 
-1. **Mehrdeutige BASE_URL-Auflösung.** Der bisherige Code priorisiert
-   `NEXT_PUBLIC_BASE_URL` über `VERCEL_URL` über `localhost:3000`.
-   Wenn jemand `NEXT_PUBLIC_BASE_URL` lokal mit einer Vercel-Preview-
-   URL setzt, schickt der Reset-Mailer auf der Production-Maschine
-   evtl. einen Localhost-Link — Tom kann dann nicht klicken.
-2. **Reset-Link-Sichtbarkeit auf der Login-Seite.** Aktuell ist der
-   Link an einer Stelle versteckt; muss prominent unter dem
-   Passwort-Feld erscheinen (US-30 AC1).
-3. **Mindest-Passwort-Länge.** Schema verlangt 12 Zeichen, US-30 AC4
-   verlangt 8. Anpassen auf 8.
+### 3.1 Public
 
-**Fix-Strategie:**
+| Path                                              | Method | Zweck                                                      |
+|---------------------------------------------------|--------|------------------------------------------------------------|
+| `/api/availability/calendar?from&to`              | GET    | Tages-Verfügbarkeitsstatus für 62-Tage-Range (Calendar-UI). |
+| `/api/slots/available?date&duration?`             | GET    | Slot-Liste für ein Datum, optional gefiltert auf Dauer.     |
+| `/api/bookings`                                   | POST   | Neue Buchung anlegen (Gast oder Kunde). Akzeptiert `Idempotency-Key`-Header. |
+| `/api/bookings/[id]/public-summary?token`         | GET    | Read-only-Buchungsdetails — Token-Scope `booking-confirmation` ODER `booking-cancellation`. Auch per CustomerSession-Cookie. |
+| `/api/bookings/[id]/cancel?token?`                | POST   | Storno (Token oder CustomerSession). Idempotent. Audit-Felder. |
+| `/api/bookings/respond?token`                     | GET    | Tom→Kunde-Counter-Proposal-Antwort (legacy `cancelToken`).  |
+| `/api/customer/register`                          | POST   | Self-Service-Registrierung (E-Mail/Pw).                    |
+| `/api/customer/register-from-booking`             | POST   | Konto aus Anfrage anlegen (Token-gated mit Confirmation-Token). |
+| `/api/customer/login`                             | POST   | E-Mail/Pw-Login → setzt `customer-session`-Cookie.         |
+| `/api/customer/logout`                            | POST   | Cookie löschen.                                            |
+| `/api/customer/verify`                            | GET    | E-Mail-Verifikation (Token).                               |
+| `/api/customer/resend-verification`               | POST   | Verifikations-Mail nochmal anfordern.                      |
+| `/api/customer/forgot-password`                   | POST   | Reset-Mail anfordern (E-Mail-Enumeration-Schutz, 750 ms Floor). |
+| `/api/customer/reset-password`                    | POST   | Token einlösen, neues Passwort setzen.                     |
+| `/api/customer/oauth-finalize`                    | GET    | Setzt `customer-session`-Cookie nach NextAuth-OAuth-Callback. |
+| `/api/customer/unsubscribe?token`                 | GET    | DSGVO-Unsubscribe via stateless HMAC-Token (302-Redirect).  |
+| `/api/auth/customer/[...nextauth]`                | GET/POST | NextAuth Customer (Google OAuth).                        |
+| `/api/auth/[...nextauth]`                         | GET/POST | NextAuth Admin (Credentials).                            |
+| `/api/auth/diagnose`                              | GET    | Diagnose-Endpoint (Dev/ENV-gated).                          |
+| `/api/upload`                                     | POST   | Multipart-Upload, Magic-Bytes-Check, Vercel-Blob.           |
 
-#### 18.1.1 BASE_URL-Resolver (`lib/baseUrl.ts.adminBaseUrl()`)
+### 3.2 Customer
 
-```ts
-/**
- * Liefert die korrekte Basis-URL für Reset-/Verifikations-Links im
- * Admin-Kontext.
- *
- * Priorität (von zuverlässig zu fallback):
- *   1. NEXTAUTH_URL — Single source of truth für NextAuth-Routes,
- *      ist auf Vercel auto-injected.
- *   2. NEXT_PUBLIC_BASE_URL — wenn Engineers explizit gesetzt haben.
- *   3. VERCEL_URL — Vercel injected, ohne Schema → wir präfixen `https://`.
- *   4. http://localhost:3000 — Dev-Fallback.
- *
- * Garantiert ohne trailing slash.
- */
-export function adminBaseUrl(): string {
-  const candidates = [
-    process.env.NEXTAUTH_URL,
-    process.env.NEXT_PUBLIC_BASE_URL,
-    process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
-    'http://localhost:3000',
-  ];
-  const first = candidates.find((c) => typeof c === 'string' && c.length > 0)!;
-  return first.replace(/\/+$/, '');
-}
-```
+| Path                                              | Method | Zweck                                                      |
+|---------------------------------------------------|--------|------------------------------------------------------------|
+| `/api/customer/me`                                | GET    | Eigenes Profil (inkl. Adress-Felder).                      |
+| `/api/customer/me`                                | PATCH  | Profil aktualisieren (firstName, lastName, phone, Adresse). E-Mail-Wechsel NICHT erlaubt. |
+| `/api/customer/bookings`                          | GET    | `{ upcoming, past }` mit `isCancellable`-Flag pro Booking. |
+| `/api/customer/bookings/[id]`                     | GET    | Booking-Detail (incl. Anhänge).                            |
+| `/api/customer/bookings/[id]/cancel`              | POST   | Customer-Storno (eingeloggt). Delegiert an `/api/bookings/[id]/cancel`. |
+| `/api/customer/reviews`                           | POST   | Bewertung anlegen (zu COMPLETED-Booking).                  |
 
-Engineers ersetzen den inline-Resolver in
-`src/app/api/admin/forgot-password/route.ts` durch diesen Helper.
-Ergebnis: Reset-URL ist immer korrekt, egal ob localhost oder Vercel.
+### 3.3 Admin
 
-#### 18.1.2 Login-Page UX
+| Path                                              | Method  | Zweck                                                      |
+|---------------------------------------------------|---------|------------------------------------------------------------|
+| `/api/admin/setup`                                | POST    | Bootstrap-Allowlist: nur wenn `count(users) === 0`. Sonst 410 GONE. |
+| `/api/admin/admins`                               | GET/POST | Admin-Liste / neuen Admin anlegen.                        |
+| `/api/admin/admins/[id]`                          | PATCH/DELETE | Admin-Status ändern, Lock-out-Schutz (atomarer Conditional-Update). |
+| `/api/admin/users?search&page&pageSize&sort`      | GET     | Customer-Liste mit Pagination, Filter, Sort (Whitelist). Response `{ data: { items, total, page, pageSize } }`. |
+| `/api/admin/users/[id]`                           | GET/PATCH/DELETE | Customer-Detail, Admin-Note/Rating, DSGVO-Delete.   |
+| `/api/admin/bookings` (alias `/api/bookings` admin GET) | GET | Buchungs-Liste für Tom.                              |
+| `/api/admin/upcoming-bookings`                    | GET     | Bevorstehende Termine (Status PENDING/CONFIRMED, future).  |
+| `/api/admin/bookings/[id]`                        | PATCH   | Status, finalPriceEur, finalPriceNote, adminNote.          |
+| `/api/admin/bookings/[id]/payment`                | POST    | Stripe-Session anlegen (operativ ruhend).                  |
+| `/api/admin/calendar/events?from&to`              | GET     | FullCalendar-Events (admin-Sicht).                          |
+| `/api/admin/availability-template`                | GET/PUT | Wochentag-Defaults (7 Datensätze).                         |
+| `/api/admin/day-overrides?from&to`                | GET/POST/DELETE | Tagesgenaue Overrides.                              |
+| `/api/admin/buffer-config`                        | GET/PUT | Singleton-Buffer in Minuten (Whitelist 0/15/30/45/60).     |
+| `/api/admin/reviews?status`                       | GET     | Moderation-Queue (PENDING/APPROVED/REJECTED).              |
+| `/api/admin/reviews/[id]`                         | PATCH   | Approve/Reject (setzt `moderatedAt`, `moderatedById`, `rejectedAt`). |
+| `/api/admin/analytics`                            | GET     | Aggregierte Stats (Umsatz, Top-Kunden). ISR `revalidate: 300`. |
+| `/api/admin/forgot-password` / `reset-password`   | POST    | Admin-Passwort-Reset.                                       |
+| `/api/admin/marketing/recipients?service&search&page&limit` | GET | Empfänger-Liste mit Service-Filter (nur COMPLETED-Bookings). |
+| `/api/admin/marketing/emails`                     | GET/POST | Marketing-Mail-Liste / Draft anlegen.                      |
+| `/api/admin/marketing/emails/[id]`                | GET     | Detail (inkl. failedRecipients).                           |
+| `/api/admin/marketing/emails/[id]/test-send`      | POST    | An eigene Admin-Mail senden (kein Audit-Insert).           |
+| `/api/admin/marketing/emails/[id]/send`           | POST    | Bulk-Send (Hard-Cap 50 Empfänger). Synchron + State-Machine. |
+| `/api/payments/session-status?session_id`         | GET     | Stripe-Session-Polling für Erfolgsseite (Gäste-tauglich).  |
 
-`app/admin/login/page.tsx` muss:
-- **Sichtbaren Link** „Passwort vergessen?" direkt unter dem
-  Passwort-Feld rendern (Schriftgröße ≥ 14px, Padding ausreichend
-  klickbar, Tab-Reihenfolge nach Pw, Farbe nicht heller als
-  `#7B5E3C` für Kontrast).
-- Kein zweiter „Zurück"-Link (Doppel-Navigation vermeiden).
+### 3.4 Integrations-Konventionen
 
-#### 18.1.3 Reset-Schema
-
-`src/app/api/admin/reset-password/route.ts` Schema:
-- `password.min(8)` (vorher 12). Erfüllt US-30 AC4.
-
-#### 18.1.4 Middleware-Whitelist (verifizieren)
-
-Bereits in `src/middleware.ts` enthalten:
-```ts
-const PUBLIC_ADMIN_PATHS = [
-  '/admin/login',
-  '/admin/setup',
-  '/admin/passwort-vergessen',
-  '/admin/passwort-reset',
-];
-```
-
-Engineers MÜSSEN sicherstellen, dass diese Liste unverändert bleibt.
-QA-Test: anonyme HTTP-GET auf `/admin/passwort-vergessen` muss 200
-liefern (kein Redirect).
-
-#### 18.1.5 Mail-Template
-
-`sendPasswordResetEmail(to, resetUrl)` aus `lib/mail.ts` ist bereits
-für Admin-Kontext korrekt (Subject „Passwort zurücksetzen — Bärenstark
-Hausservice"). Keine Änderung nötig. Engineers prüfen, ob der
-Resend-Key in der Production-Env korrekt ist (war historisch eine
-Stolperfalle, siehe BUG-002).
+- **Transport:** REST/JSON über HTTPS.
+- **Envelope:**
+  - Single: `{ "data": <object> }`.
+  - List + Pagination: `{ "data": { "items": [...], "total": N, "page": N, "pageSize": N } }`.
+  - Error: `{ "error": { "code": "VALIDATION_ERROR", "message": "...", "details"?: ... } }`.
+- **Auth-Header / Cookie:** `customer-session` (Custom-JWT, 7d) oder NextAuth-Session-Cookie.
+- **Token-Query:** `?token=<jwt|hmac>` für public-Token-gated Routes.
+- **Idempotency:** `Idempotency-Key`-Header (UUID, 24h-Cache) bei `POST /api/bookings`.
+- **Datumsformat:** ISO 8601, UTC. Zeit-Vergleiche in Berlin-Zeitzone via `parseBerlinDateTime()` (DST-fest).
+- **IDs:** `cuid()` (kein UUID).
+- **Fehlercodes (Auswahl, nicht abschließend):**
+  `VALIDATION_ERROR` (400), `UNAUTHORIZED` (401), `TOKEN_EXPIRED` (401),
+  `TOKEN_INVALID` (401), `FORBIDDEN` (403), `NOT_FOUND` (404),
+  `CONFLICT` (409, subcodes z. B. `ACCOUNT_EXISTS`, `SLOT_TAKEN`),
+  `FILE_EMPTY` / `FILE_TOO_LARGE` / `FILE_TYPE_MISMATCH` (400/413),
+  `RECIPIENT_CAP_EXCEEDED` (413), `RATE_LIMITED` (429), `BLOB_NOT_CONFIGURED` (503),
+  `OAUTH_ONLY_ACCOUNT` (422), `OAUTH_UNVERIFIED_CONFLICT` (422),
+  `RESEND_ERROR` (502).
 
 ---
 
-### 18.2 OAuth2-Login für Kunden (US-31)
-
-#### 18.2.1 Architektur-Entscheidung: NextAuth als zweiter Layer
-
-**Ausgangslage:** Das bestehende Kunden-Auth-System (IT4) nutzt ein
-Custom-JWT-Cookie (`customer-session`) ohne NextAuth. OAuth2-Provider
-direkt auf Custom-JWT zu setzen wäre aufwendig (Token-Exchange,
-PKCE-Flow, State-Verwaltung — alles selbst implementieren).
-
-**Strategie:** NextAuth als **OAuth-Adapter** verwenden, **aber nicht
-als Session-Layer**. Konkret:
-
-1. Wir installieren NextAuth (bereits via Admin-Auth in der App
-   verfügbar) mit Google + GitHub Providers, **separater Pfad**:
-   `/api/auth/customer/[...nextauth]` (statt
-   `/api/auth/[...nextauth]`).
-2. Im `signIn`-Callback nach erfolgreichem OAuth-Flow:
-   a. Profile via `OAuthProfileNormalizedSchema` normalisieren.
-   b. CustomerUser per `(oauthProvider, oauthId)` lookup, fallback
-      auf E-Mail.
-   c. Anlegen / Verknüpfen / Updaten.
-   d. **Custom-JWT-Cookie** (`customer-session`) setzen via bestehender
-      `createCustomerSession(customerId, email)`-Funktion.
-   e. NextAuth-eigene Session ist **redundant** — wir ignorieren sie;
-      sie expired automatisch. (Engineers können sie in der Config
-      auf `strategy: 'jwt'` mit kurzer `maxAge: 60` setzen, um den
-      Speicherbedarf zu minimieren.)
-3. Bestehende `/api/customer/*`-Endpunkte und Middleware lesen
-   weiterhin nur das `customer-session`-Cookie — kein Branching
-   nach Auth-Methode.
-
-**Vorteile:**
-- Single source of truth für Kunden-Identität: `customer-session`-
-  JWT. Backend-Code in `/api/customer/*` muss nicht zwischen
-  „OAuth" und „E-Mail/Pw" unterscheiden.
-- E-Mail/Pw-Login bleibt 100% intakt — kein Risiko für Bestandskunden.
-- OAuth-Provider können erweitert werden, ohne Custom-JWT-Logik zu
-  verändern.
-
-**Nachteile:**
-- Zwei NextAuth-Konfigurationen (Admin + Customer). Engineers müssen
-  die Pfade strikt trennen — Helper-Modul `lib/customer-oauth.ts`
-  (Customer-Config), getrennt von `lib/auth.ts` (Admin-Config) und
-  `lib/auth.config.ts` (Edge-shared).
-
-#### 18.2.2 Datei-Struktur
+## 4. Modulare Architektur
 
 ```
 src/
-├── lib/
-│   ├── auth.ts                       # Admin (Bestand, IT1)
-│   ├── auth.config.ts                # Edge-shared (Bestand)
-│   ├── customer-auth.ts              # Custom-JWT (Bestand IT4)
-│   ├── customer-auth-server.ts       # Bestand IT4
-│   └── customer-oauth.ts             # NEU IT5 — NextAuth-Customer-Config
-├── app/
-│   └── api/
-│       └── auth/
-│           ├── [...nextauth]/        # Bestand — Admin
-│           │   └── route.ts
-│           └── customer/             # NEU IT5 — Kunden-OAuth
-│               └── [...nextauth]/
-│                   └── route.ts
+├── app/                       # Next.js App Router
+│   ├── (public)               # Hero, Service-Grid, Reviews-Block
+│   ├── services/[slug]/       # Service-Detailseite (mit Hero-Bild — IT12)
+│   ├── buchung/               # Inline-Buchungs-Flow (Fallback)
+│   │   ├── BookingClient.tsx
+│   │   ├── bestaetigung/[bookingId]/   # Initial-Confirmation (IT11)
+│   │   ├── bestaetigt/                 # Counter-Proposal-Antwort (IT2 — separat!)
+│   │   ├── [id]/stornieren/            # Gast-Storno-Page (IT11)
+│   │   └── storno/                     # Counter-Proposal-Storno-Erfolg
+│   ├── konto/                 # Customer-Portal
+│   │   ├── login, registrieren, profil
+│   │   ├── passwort-vergessen, passwort-zuruecksetzen
+│   │   └── anfragen/[id]/
+│   ├── admin/                 # Admin-Portal
+│   │   ├── calendar/, users/, admins/, analytics/, reviews/
+│   │   └── marketing/         # IT12 — Marketing-Composer + Historie
+│   ├── marketing/abgemeldet/  # Public Bestätigungsseite Unsubscribe
+│   └── api/                   # Route-Handlers (siehe §3)
+│
+├── components/
+│   ├── booking/               # BookingForm, BookingCalendar, TimeSlotPicker, DurationPicker
+│   │                          # QuickBookingModal, BookingDialogProvider, FileUpload
+│   │                          # CancelConfirmationDialog
+│   ├── calendar/              # AppCalendar (FullCalendar-Wrapper)
+│   ├── admin/                 # AdminLayout (3-Gruppen-Sidebar — IT12), BookingTable,
+│   │                          # AdminCalendarView, UserTable, ReviewTable, AnalyticsView
+│   │   └── marketing/         # MarketingEmailComposer, RecipientPicker
+│   ├── customer/              # ProfileForm, BookingsList
+│   ├── home/                  # Hero, ServiceGrid, ServiceDetailModal
+│   ├── layout/                # Header, Footer
+│   └── seo/                   # ServiceHeroImage, JSON-LD-Helpers
+│
+└── lib/
+    ├── prisma.ts              # Prisma-Client-Singleton
+    ├── api.ts                 # apiSuccess(), apiError(), internalError(), envelope-helpers
+    ├── api-client.ts          # Customer-fetch-Helper (credentials: 'include')
+    ├── api-client-it6.ts      # Admin-Helper (typed)
+    ├── auth.ts                # NextAuth Admin (v5)
+    ├── auth.config.ts
+    ├── auth-diagnose.ts       # /api/auth/diagnose-Logik
+    ├── customer-auth.ts       # E-Mail/Pw-Helper (bcryptjs)
+    ├── customer-auth-server.ts # getCustomerFromRequest()
+    ├── customer-oauth.ts      # NextAuth Customer (Google OAuth)
+    ├── customer-session.ts    # Custom-JWT-Cookie sign/verify
+    ├── customer-sync.ts       # IT12 — EventTarget-Bus für Header-Re-Render
+    ├── use-customer.ts        # Client-Hook (useCustomer())
+    ├── customer-portal.ts
+    ├── booking-create.ts      # Serializable-Tx, Overlap-Check, Buffer-Check
+    ├── booking-tokens.ts      # signBookingConfirmationToken / Cancellation (jose, JWT, 30d)
+    ├── cancellation.ts        # isCancellable() (24h-Frist, Status-Whitelist)
+    ├── availability.ts
+    ├── calendar-range.ts
+    ├── calendar.ts
+    ├── time-utils.ts          # Berlin-Zeitzone, DST-fest
+    ├── buffer-config.ts
+    ├── services.ts            # SERVICES-Konstante (slug → label, priceFrom)
+    ├── service-images.ts      # IT12 — slug → /public/<image>.png Mapping
+    ├── reviews.ts
+    ├── analytics.ts
+    ├── mail.ts                # Resend-Wrapper, Templates (Plain-Text)
+    ├── marketing-mail.ts      # IT12 — Plain-Text + DSGVO-Footer-Render
+    ├── marketing-bulk-send.ts # IT12 — Promise-Pool, Concurrency 5, Throttle
+    ├── marketing-tokens.ts    # IT12 — HMAC-deterministisch, stateless
+    ├── marketing/             # Builder/Helper
+    ├── idempotency.ts         # IT12 — Idempotency-Key-Cache
+    ├── ratelimit.ts
+    ├── require-admin.ts       # requireActiveAdmin() (Status-Check)
+    ├── admin-status.ts        # disableAdminSafely() — Conditional-UPDATE
+    ├── stripe.ts              # ruhend
+    ├── format.ts, contact.ts, baseUrl.ts, scroll-into-view.ts (IT12), toast.ts
+    ├── seo/
+    └── dto/
+        └── user.ts            # selectCustomerUserPublic / Admin (DTO-Trennung)
 ```
 
-#### 18.2.3 Account-Verknüpfungs-Logik (Pseudo-Code)
+### 4.1 Conventions
+
+- **DTO-Trennung:** `customer_users` darf NIEMALS direkt aus
+  `prisma.findMany()` an Customer-facing-Routes durchgereicht werden.
+  `selectCustomerUserPublic()` (filtert `adminNote`, `adminRating`,
+  `passwordHash`) vs. `selectCustomerUserAdmin()`. CI-Test
+  `tests/architecture/no-internal-sort-in-customer.test.ts` blockt
+  Drift.
+- **Envelope:** Alle JSON-Responses durch `apiSuccess(...)` /
+  `apiError(...)` aus `src/lib/api.ts`. Listen mit Pagination
+  verwenden `{ items, total, page, pageSize }` als inneres Objekt.
+- **`internalError(err, route)`** loggt mit `console.error('[route] ...')`,
+  gibt 500 + `{ code: 'INTERNAL_ERROR', message: 'Interner Serverfehler' }`
+  zurück. Niemals Stack-Trace an den Client.
+- **Microcopy:** Niemals "Interner Serverfehler" pur — UI-Layer
+  übersetzt zu "Bitte später erneut versuchen oder anrufen: 0157 74787512".
+- **Auth-Server-Helpers:** `requireActiveAdmin()` (redirected zu
+  `/admin/login` bei DISABLED), `getCustomerFromRequest()`
+  (returns `null` wenn keine Session).
+- **Server vs. Client:** Server-Components fetchen über `prisma`
+  direkt; Client-Components über `api-client.ts` mit
+  `credentials: 'include'` und `cache: 'no-store'`.
+
+---
+
+## 5. Auth-Architektur
+
+### 5.1 Admin (`/admin/*`)
+
+- **Provider:** NextAuth v5 mit `Credentials`-Provider (E-Mail + Passwort, bcryptjs).
+- **Routen:** `/admin/login`, NextAuth-Handler unter `/api/auth/[...nextauth]`.
+- **Helper:** `requireActiveAdmin()` (`src/lib/require-admin.ts`) prüft
+  Session + `User.status === 'ACTIVE'`. Bei `DISABLED` →
+  Redirect mit `?error=account_disabled`. Edge-Middleware kann den
+  Status nicht prüfen (kein Prisma in Edge-Runtime), die Prüfung
+  läuft im Page-Loader / Route-Handler.
+- **Bootstrap:** `/api/admin/setup` antwortet mit 410 GONE, sobald
+  `count(users) >= 1`. Lock-out → CLI-Skript
+  `scripts/promote-admin.ts` mit `ALLOW_ADMIN_PROMOTE=true`-ENV-Guard.
+- **Multi-Admin (IT6):** Self-Service-Page `/admin/admins`. Letzter aktiver
+  Admin darf sich nicht selbst sperren — atomarer Conditional-UPDATE
+  in `disableAdminSafely()`.
+
+### 5.2 Customer (`/konto/*`)
+
+Zwei parallele Eingangswege, ein gemeinsamer Session-Cookie:
+
+1. **E-Mail/Passwort** (IT4 + IT7):
+   `POST /api/customer/login` → bcryptjs-Verify →
+   `setCustomerSessionCookie()` (Custom-JWT, 7d, HttpOnly, SameSite=Lax).
+2. **Google OAuth** (IT5 + IT12-Bugfix):
+   - NextAuth-Customer-Handler unter `/api/auth/customer/[...nextauth]`
+     (separat von Admin-NextAuth, eigener Cookie-Namespace
+     `__customer-next-auth.*`, eigener Secret).
+   - Nach erfolgreichem Provider-Callback → Redirect zu
+     `/api/customer/oauth-finalize`, dort wird der CustomerUser
+     gefunden/angelegt (Account-Linking via E-Mail) und das
+     `customer-session`-Cookie gesetzt.
+   - **CRITICAL** (IT12): `NEXTAUTH_URL` und `NEXT_PUBLIC_BASE_URL`
+     müssen exakt `https://www.baerenstark-hausservice.app` sein
+     (mit `www`, ohne Trailing-Slash). Domain-Apex wird per 301 auf
+     `www.` umgeleitet. Google-Console-Authorized-Redirect-URI exakt
+     `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google`.
+
+**Account-Linking-Sicherheit (IT5 BUG-IT5-004):**
+- Verifiziertes lokales Konto + OAuth same email → automatische Verknüpfung.
+- Unverifiziertes lokales Konto → KEINE automatische Verknüpfung,
+  Fehler `OAUTH_UNVERIFIED_CONFLICT` (422).
+
+**Passwort-Reset:**
+- `password_reset_tokens` (SHA-256-Hash, 1h-Ablauf, single-use).
+- Atomarer Token-Verbrauch via Conditional-UPDATE.
+- E-Mail-Enumeration-Schutz: `forgot-password` antwortet konstant 200
+  mit 750 ms-Latenz-Floor.
+
+### 5.3 Session-Sync (IT12)
+
+- `useCustomer()` (`src/lib/use-customer.ts`) ist ein Client-Hook ohne
+  globalen Store; jede Component-Instanz fetcht `GET /api/customer/me`
+  beim Mount.
+- Bei Network-Fehler bleibt der vorherige State erhalten (kein
+  Fallback auf `unauthenticated` — IT12-S07-Fix).
+- Globaler Event-Bus `src/lib/customer-sync.ts` (EventTarget-basiert):
+  ```ts
+  emitCustomerChanged()  // bei Login/Logout/Profile-Save/Register-from-Booking/OAuth-Finalize
+  onCustomerChanged(cb)  // useCustomer() subscribed → re-fetch
+  ```
+- `PATCH /api/customer/me` darf das Cookie NICHT invalidieren (verifiziert).
+
+---
+
+## 6. Booking-Flow
+
+### 6.1 Eingangspunkte
+
+- **Header-CTA „Termin buchen"** (Site-weit) → öffnet
+  `BookingDialog`-Modal (IT11).
+- **Hero-CTA „Jetzt Termin buchen"** (Startseite) → gleiches Modal.
+- **`/buchung`-Page** (Fallback für No-JS / Direkt-Aufruf / Re-Book) →
+  Inline-`BookingForm` mit eigenem Slot-Picker.
+- **Service-Detail-Modal** → optional mit `defaultService=<slug>` ins
+  Modal.
+
+`BookingDialogProvider` (Client-Component im RootLayout) hält
+`{ isOpen, defaultService }`-State und exposed `open()`, `close()`,
+`reset()`. `reset()` inkrementiert einen `key`-Prop am inneren
+Modal → Form-State wird per Remount geleert (IT11 BUG-MAJOR-09).
+
+### 6.2 Slot-Verfügbarkeit
+
+Verfügbarkeit wird **dynamisch berechnet** aus:
+
+1. `AvailabilityTemplate` (Wochentag-Defaults) +
+2. `DayOverride` (tagesgenaue Überschreibung) → ergeben das Tagesfenster.
+3. `Booking WHERE status NOT IN ('CANCELLED', 'REJECTED', 'COMPLETED')` →
+   blockierte Zeitfenster.
+4. `BufferConfig.bufferMinutes` (Singleton) → Puffer **nach
+   CONFIRMED-Buchungen** (nicht nach PENDING/COUNTER_PROPOSED).
+
+**Performance (IT12-S03):** `/api/availability/calendar` liefert
+einen 62-Tage-Range. Targets: p95 < 300 ms (kalter Cache, 100 Bookings).
+Caching: `revalidateTag('availability')`, `revalidateTag('available-slots')`.
+Indizes vorhanden: `bookings(date, status)`, `bookings(status, date, startTime)`,
+`day_overrides(date)` UNIQUE, `availability_template(dayOfWeek)`.
+
+### 6.3 Booking-Submission
+
+`POST /api/bookings`:
+
+1. **Idempotency-Key (IT12):** Header `Idempotency-Key` (UUID).
+   Cache-Lookup → Cached-Response zurück, kein neuer Insert.
+2. **Doppel-Submit-Schutz (IT11 BUG-MAJOR-03):** 60-s-Window-Dedup auf
+   `customerEmail`/`customerId` + `slotId`. Bei Match: gleiche
+   Booking-ID + frisch signierte Tokens, KEINE zweite Mail.
+3. **Validation (Zod):** `CreateBookingSchema` mit `superRefine` (Date-
+   ODER Slot-Modus, Adress-Pflicht, Privacy-Accept).
+4. **Adress-Pflicht:** Eingeloggte Customer mit Profil-Adresse →
+   Backend übernimmt Profil-Adresse, falls Body fehlt. Sonst Pflicht-
+   Validation greift.
+5. **Slot-Reservierung (Serializable-Tx):**
+   `prisma.$transaction(...)` mit Isolation `serializable`,
+   `timeout: 5000ms`, `maxWait: 2000ms`. Innerhalb: Overlap-Check
+   (`start < requestedEnd AND end > requestedStart`) gegen aktive
+   Buchungen + Buffer-Check + Insert. Partial-Unique-Index als
+   zweite Verteidigungslinie. Race-Resolution gegen parallel-laufende
+   Cancel-Operationen ist deterministisch (siehe §6.4).
+6. **Token-Issue:** Nach Insert werden zwei JWTs signiert
+   (`booking-tokens.ts`):
+   - `signBookingConfirmationToken({ bookingId, customerId })` — Scope `booking-confirmation`.
+   - `signBookingCancellationToken({ bookingId, customerId })` — Scope `booking-cancellation`.
+   Beide HS256, 30 Tage gültig, `BOOKING_TOKEN_SECRET` separat von `AUTH_SECRET`.
+7. **Mail-Dispatch:** `void runMailDispatch(...).catch(...)` —
+   fire-and-forget. Bestätigungsmail an Kunde + Notification an Tom.
+   `mailSent`/`mailError` werden persistiert.
+8. **Response:** `201 { data: { id, status, createdAt, confirmationToken, cancellationToken } }`.
+9. **Frontend:** `router.push('/buchung/bestaetigung/<id>?token=<jwt>')`.
+   `BookingDialogProvider.reset()` vor dem Push.
+10. **Konto-Anbieten (IT12-S05):** Wenn Gast-Buchung mit
+    `customerEmail` und kein bestehendes Konto → embedded Card auf
+    Bestätigungsseite ("Konto anlegen?") → `POST /api/customer/register-from-booking`
+    mit `confirmationToken` + `password`. Backend verknüpft alle
+    Bookings mit dieser E-Mail.
+
+### 6.4 Bestätigungsseite (IT11 — reload-fest)
+
+Route: `/buchung/bestaetigung/[bookingId]?token=<jwt>` (Server-Component,
+verifiziert Token serverseitig, lädt Summary via interner Funktion oder
+`GET /api/bookings/[id]/public-summary`).
+
+Alte Route `/buchung/bestaetigt` bleibt **separat erhalten** — sie
+behandelt den Counter-Proposal-Antwort-Flow (Tom→Kunde mit
+`?accepted=true` / `?status=gone`). Klare semantische Trennung.
+
+### 6.5 Stornierung (IT11 — Audit + Gast-Token)
+
+**Endpoints:**
+- `POST /api/bookings/[id]/cancel?token?` — kanonisch. Akzeptiert
+  Cancellation-Token ODER `customer-session`-Cookie.
+- `POST /api/customer/bookings/[id]/cancel` — dünner Wrapper, intern
+  delegiert.
+
+**Logik (`isCancellable()` in `src/lib/cancellation.ts`):**
+- Status muss in `['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED']` sein.
+- 24-h-Vorlauf-Frist auf `start = parseBerlinDateTime(date, startTime)`
+  (DST-fest). Auch Token-basierter Cancel unterliegt der Frist.
+
+**Idempotenz (atomarer Conditional-UPDATE):**
+```ts
+await prisma.booking.updateMany({
+  where: { id, status: { in: ['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED'] } },
+  data: { status: 'CANCELLED', cancelledAt: now(), cancelledBy: 'CUSTOMER', ... }
+})
+// Wenn count === 0 und current.status === 'CANCELLED' → 200 + alreadyCancelled: true,
+// keine zweite Mail, kein Cache-Revalidate.
+```
+
+`cancelledBy` ist einheitlich `'CUSTOMER' | 'ADMIN' | 'SYSTEM'` —
+Gast-Token-Cancel wird als `'CUSTOMER'` markiert (keine Differenzierung).
+
+**Mail-Scanner-Race-Schutz:** Storno-Page rendert NUR UI; Submit ist
+explizit `<form method="POST">` nach User-Klick. Mail-Provider-Preview-
+Fetch (GET) konsumiert den Token nicht versehentlich.
+
+**Slot-Re-Freigabe:** Implizit — Verfügbarkeit wird aus Status berechnet.
+`revalidateTag('available-slots')` triggert Cache-Refresh.
+
+---
+
+## 7. Marketing-Mails (DSGVO Variante 3)
+
+### 7.1 Rechtliche Basis
+
+**UWG §7 Abs. 3** Bestandskunden-Sonderregel: Wer im Rahmen einer
+Geschäftsbeziehung E-Mails der Kunden erhalten hat, darf diese für
+Direktwerbung ähnlicher Leistungen nutzen — solange (a) Widerspruchs-
+hinweis bei Erhebung, (b) Widerspruchshinweis in jeder Mail,
+(c) Widerspruchsmöglichkeit kostenlos.
+
+→ **Kein Opt-In-Modell**. Stattdessen: jeder Customer mit
+`unsubscribedAt = NULL` darf Bulk-Marketing erhalten. Footer enthält
+zwingend Unsubscribe-Link.
+
+### 7.2 Datenmodell
+
+`MarketingEmail` (Audit pro Sendvorgang) und
+`MarketingEmailRecipient` (pro Empfänger ein Record). Status-Werte:
+
+```
+MarketingEmail.status: 'draft' → 'queued' → 'sending' → 'sent'
+                                                     | 'partial_failure'
+                                                     | 'failed'
+MarketingEmailRecipient.status: 'PENDING' | 'SENT' | 'FAILED'
+```
+
+`CustomerUser.unsubscribedAt` + `unsubscribedReason` direkt am Kunden.
+Sparse-Index `[unsubscribedAt]`. **`onDelete: Restrict`** auf
+`MarketingEmail.sentByAdmin` (Admin-Löschung darf Audit-Trail nicht brechen).
+
+### 7.3 Stateless HMAC-Unsubscribe-Tokens
+
+Kein Token-Tabellen-State. Token deterministisch pro Customer:
 
 ```ts
-// In customer-oauth.ts → signIn callback
-async function handleCustomerOAuthSignIn(
-  provider: 'google' | 'github',
-  profile: OAuthProfileNormalized,
-): Promise<{ customerId: string; email: string }> {
-  // 1. Provider-ID-Match (existierender OAuth-Login).
-  let user = await prisma.customerUser.findFirst({
-    where: { oauthProvider: provider, oauthId: profile.oauthId },
-  });
+// src/lib/marketing-tokens.ts
+const SECRET = process.env.UNSUBSCRIBE_TOKEN_SECRET; // separater Secret
 
-  // 2. E-Mail-Match (existierender Account → Verknüpfung).
-  if (!user) {
-    user = await prisma.customerUser.findUnique({
-      where: { email: profile.email },
-    });
-
-    if (user) {
-      // Verknüpfen — passwordHash bleibt erhalten.
-      user = await prisma.customerUser.update({
-        where: { id: user.id },
-        data: {
-          oauthProvider: provider,
-          oauthId: profile.oauthId,
-          avatarUrl: profile.avatarUrl ?? user.avatarUrl,
-          // Provider-Identitäts-Trust: emailVerified auf true setzen,
-          // falls noch nicht.
-          emailVerified: true,
-        },
-      });
-    }
-  }
-
-  // 3. Neu anlegen.
-  if (!user) {
-    user = await prisma.customerUser.create({
-      data: {
-        email: profile.email,
-        firstName: profile.firstName,
-        lastName: profile.lastName,
-        avatarUrl: profile.avatarUrl ?? null,
-        passwordHash: null,           // OAuth-only
-        emailVerified: true,
-        oauthProvider: provider,
-        oauthId: profile.oauthId,
-      },
-    });
-  }
-
-  return { customerId: user.id, email: user.email };
-}
+generateUnsubscribeToken(customerId) → base64url(`${customerId}:${hmac32}`)
+verifyUnsubscribeToken(token) → customerId | null   // HMAC-compare
 ```
 
-**Race-Condition-Hinweis:** Zwei gleichzeitige OAuth-Erst-Logins für
-dieselbe E-Mail könnten zwei `create()` triggern. Engineers nutzen
-entweder einen Datenbank-Mutex (Postgres `SELECT ... FOR UPDATE` —
-in SQLite nicht relevant, da single-writer) oder den UNIQUE-Constraint
-auf `email` als Race-Schutz (zweiter Insert schlägt mit P2002 fehl,
-Helper ruft sich rekursiv mit `findUnique(email)` neu auf). Auf
-SQLite ist die Wahrscheinlichkeit minimal.
+Vorteile: keine Token-Tabelle, keine Migration, keine TTL nötig
+(gültig solange Customer existiert), gleicher Token in allen Mails.
 
-#### 18.2.4 Cookie-Setzen nach OAuth-Callback (verbindlich, v1.5.1 Fix BUG-IT5-002)
+### 7.4 Bulk-Send-Strategie (Vercel Hobby + Resend Free)
 
-**Problem:** NextAuth v5's `signIn`-Callback hat **keinen Response-
-Zugriff** — wir können dort kein `Set-Cookie` für unser Custom-JWT
-`customer-session` anhängen. Die `cookies`-Config in NextAuth setzt
-zwar Cookies in der Response, aber **nicht dynamisch mit Werten, die
-erst aus der DB ermittelt werden** (CustomerId nach Lookup/Create).
+- **Hard-Cap: 50 Empfänger pro Send-Operation** (Vercel-10 s-Timeout).
+- **Daily-Cap UI: 100/Tag** (Resend-Free); Frontend zeigt aktuelles
+  Tageskontingent (`Heute: X von 100`).
+- **Concurrency 5** parallel via Promise-Pool / Semaphor in
+  `src/lib/marketing-bulk-send.ts`. Throttle 200 ms zwischen Batches.
+- Synchroner Send mit sofortiger Response — kein Polling-Endpoint
+  notwendig im Happy-Path (50 × Send ≈ 5 s).
+- **Bei > 50 Empfängern:** Frontend-Confirm blockiert, Hinweis "Bitte
+  in Schüben oder warten auf IT13 mit Cron".
+- **Test-Send:** `/api/admin/marketing/emails/[id]/test-send` sendet
+  nur an Admin-Mail aus Session, KEIN Audit-Insert, footer 1:1.
 
-**Verbindliche Strategie: Redirect-basiert via Custom Finalize-Route.**
-(Variante 1 — „Inline im Callback" — ist verworfen, weil sie in
-NextAuth v5 ohne undokumentierte Internals nicht funktioniert.)
+### 7.5 Plain-Text-Footer (verbindlich)
 
-**Flow im Detail:**
+```
+--
+Sie erhalten diese E-Mail, weil Sie Kunde bei Bärenstark Hausservice
+sind. Wenn Sie keine weiteren Marketing-Mails von uns erhalten möchten,
+melden Sie sich hier ab: {unsubscribeUrl}
 
-1. Frontend: User klickt „Mit Google anmelden" →
-   `signIn('google', { callbackUrl: '/konto' })` (NextAuth-Helper aus
-   `next-auth/react`, mit `basePath: '/api/auth/customer'`).
-2. NextAuth leitet zum Provider, übernimmt OAuth-Flow (state, PKCE).
-3. Provider-Callback: `GET /api/auth/customer/callback/[provider]`
-   (NextAuth-Handler).
-4. NextAuth ruft den **`signIn`-Callback** auf (siehe §18.2.3):
-   - Profile via `OAuthProfileNormalizedSchema` normalisieren.
-   - CustomerUser per `(oauthProvider, oauthId)` lookup, sonst
-     E-Mail-Lookup, sonst `create()`.
-   - Account-Linking-Sicherheits-Check (siehe §18.9.2): bei
-     `emailVerified: false` auf dem lokalen Konto → return `false`
-     mit Error-URL `?error=oauth_unverified_conflict`.
-   - **Wichtig:** Hier wird **kein** Cookie gesetzt. Die
-     CustomerId wird stattdessen in die NextAuth-Session geschrieben
-     (`token.customerId = user.id` im `jwt`-Callback) — sie steht
-     nach dem Callback per `auth()` zur Verfügung.
-5. NextAuth ruft den **`redirect`-Callback** auf — der leitet
-   verbindlich auf
-   `/api/customer/oauth-finalize?provider=<google|github>`.
-   (NextAuth-eigene Session bleibt kurz aktiv, NICHT als Authority
-   benutzt — sie expired automatisch nach 60s, siehe `maxAge`.)
-6. **`GET /api/customer/oauth-finalize`** (neuer Route-Handler, siehe
-   §18.2.4.1 unten und `contracts/api-routes.md` §21.2.1):
-   - Liest die NextAuth-Session via `auth()` (Server-Side).
-   - Extrahiert `customerId` aus `session.token.customerId`.
-   - Liest CustomerUser aus DB (`prisma.customerUser.findUnique`).
-   - Setzt das `customer-session`-JWT-Cookie via
-     `setCustomerSession(customerId, email)` (Bestand IT4).
-   - Antwortet 302 Redirect auf `/konto?oauth=success`.
-7. Frontend (`/konto`-Page) erkennt `?oauth=success` und kann
-   optional einen Toast „Erfolgreich angemeldet" anzeigen.
+Bärenstark Hausservice · Tom Siefert · Darmstadt · Impressum: {baseUrl}/impressum
+```
 
-**`redirect`-Callback in `lib/customer-oauth.ts`:**
+`unsubscribeUrl = ${NEXT_PUBLIC_BASE_URL}/api/customer/unsubscribe?token=${token}`
+
+`/api/customer/unsubscribe` ist public, validiert Token, setzt
+`CustomerUser.unsubscribedAt = now()` + `unsubscribedReason = 'EMAIL_FOOTER'`,
+302 → `/marketing/abgemeldet`.
+
+### 7.6 Sende-Filter-Logik (Backend, hart)
 
 ```ts
-async redirect({ url, baseUrl }) {
-  // Wir ignorieren externe `url`-Werte (Open-Redirect-Schutz);
-  // jeder erfolgreiche OAuth-Flow geht IMMER über die Finalize-Route.
-  // Die Finalize-Route liest die Session selbst und entscheidet, wohin
-  // sie redirectet (Default: /konto).
-  return `${baseUrl}/api/customer/oauth-finalize`;
-},
+const validRecipients = await prisma.customerUser.findMany({
+  where: { id: { in: recipientIds }, unsubscribedAt: null, email: { not: null } },
+});
+// Differenz zu intendedRecipients sichtbar im Response (actualRecipients).
 ```
 
-**`jwt`-Callback (zur Übergabe der CustomerId in die NextAuth-Session):**
-
-```ts
-async jwt({ token, user, account, profile }) {
-  if (account && profile) {
-    // Erst-Login: Profile-Lookup/Create durchführen, customerId speichern.
-    const result = await handleCustomerOAuthSignIn(
-      account.provider as 'google' | 'github',
-      normalizeProfile(account.provider, profile, account),
-    );
-    if (!result.ok) {
-      // Sicherheits-Block (siehe §18.9.2). NextAuth-Session bleibt leer.
-      // signIn-Callback gibt im Anschluss false zurück mit Error-URL.
-      token.linkError = result.error;  // z.B. 'oauth_unverified_conflict'
-    } else {
-      token.customerId = result.customerId;
-      token.customerEmail = result.email;
-    }
-  }
-  return token;
-},
-```
-
-**`signIn`-Callback:**
-
-```ts
-async signIn({ user, account, profile }) {
-  // Pre-Check: GitHub kein E-Mail? -> Redirect oauth_no_email (BUG-IT5-003).
-  if (!profile?.email) {
-    return '/konto/login?error=oauth_no_email';
-  }
-  // Lookup/Create + Linking-Check passiert im jwt-Callback.
-  // Hier prüfen wir nur, ob jwt einen Linking-Fehler gesetzt hat.
-  // Da signIn vor jwt läuft, machen wir den Lookup ZUSÄTZLICH hier
-  // (der Doppel-Aufruf ist günstig, da idempotent).
-  const result = await handleCustomerOAuthSignIn(
-    account!.provider as 'google' | 'github',
-    normalizeProfile(account!.provider, profile, account!),
-  );
-  if (!result.ok) {
-    return `/konto/login?error=${result.error}`;  // 'oauth_unverified_conflict' etc.
-  }
-  return true;
-},
-```
-
-##### 18.2.4.1 Endpoint `GET /api/customer/oauth-finalize`
-
-**Auth:** öffentlich (liest NextAuth-Customer-Session via `auth()`).
-**Story:** US-31, Fix BUG-IT5-002.
-
-**Verhalten:**
-
-```ts
-// app/api/customer/oauth-finalize/route.ts
-import { auth } from '@/lib/customer-oauth'; // NextAuth v5 helper
-import { setCustomerSession } from '@/lib/customer-auth-server';
-import { NextResponse } from 'next/server';
-
-export async function GET(req: Request) {
-  const session = await auth();
-  if (!session?.user || !session.token?.customerId) {
-    // Kein gültiger OAuth-Flow durchlaufen → zurück auf Login.
-    return NextResponse.redirect(
-      new URL('/konto/login?error=oauth_finalize_failed', req.url),
-    );
-  }
-
-  const customerId = session.token.customerId as string;
-  const email = session.token.customerEmail as string;
-
-  // Custom-JWT setzen (HttpOnly, Secure, SameSite=Lax, 7d).
-  const response = NextResponse.redirect(
-    new URL('/konto?oauth=success', req.url),
-  );
-  await setCustomerSession(response, customerId, email);
-  return response;
-}
-```
-
-**Wichtige Eigenschaften:**
-
-- **Idempotent** — mehrfacher Aufruf ist OK; setzt einfach erneut das
-  Cookie. Kein One-Time-Token nötig, weil die NextAuth-Session selbst
-  schon auth-getrust ist (HMAC-signiert mit `AUTH_SECRET`).
-- **Nicht direkt callbar** ohne vorherigen OAuth-Flow — wenn keine
-  NextAuth-Customer-Session existiert, redirect zu `/konto/login` mit
-  Fehler.
-- **Kein Body, keine Query-Pflichtparams** — alle Daten kommen aus der
-  NextAuth-Session.
-- **Cache-Control:** `no-store`.
-- **Kein Rate-Limit** nötig (NextAuth-Session ist Authority + nur
-  Cookie-Set, keine teure Operation).
-
-**Logout:** Nach `POST /api/customer/logout` (Bestand IT4) muss
-ZUSÄTZLICH die NextAuth-Customer-Session gelöscht werden. Engineers
-ergänzen den Logout-Handler um `signOut({ basePath:
-'/api/auth/customer', redirect: false })`-Call (oder löschen die
-NextAuth-Cookies manuell: `next-auth.session-token`,
-`next-auth.csrf-token` mit Customer-Prefix-Path).
-
-#### 18.2.5 Frontend-UI
-
-`app/konto/login/page.tsx` erhält unter dem Pw-Formular eine zweite
-Sektion mit den OAuth-Buttons:
-
-```tsx
-<button onClick={() => signIn('google', { callbackUrl: '/konto' })}>
-  Mit Google anmelden
-</button>
-<button onClick={() => signIn('github', { callbackUrl: '/konto' })}>
-  Mit GitHub anmelden
-</button>
-```
-
-`signIn()` ist der NextAuth-Helper aus `next-auth/react`. **Wichtig:**
-Engineers müssen den **Customer-NextAuth-Provider** registrieren —
-nicht den Admin. Konkret in `app/konto/layout.tsx` einen
-`<SessionProvider basePath="/api/auth/customer">` setzen, oder
-clientseitig den Helper mit `basePath: '/api/auth/customer'`
-aufrufen.
-
-#### 18.2.6 Profil-Seite (US-31 AC6)
-
-`app/konto/profil/page.tsx`:
-- Wenn `me.oauthProvider !== null` → Passwortfeld **nicht** anzeigen
-  (Hinweis: „Sie sind mit <Provider> angemeldet — kein lokales Passwort
-  hinterlegt.").
-- Wenn `me.oauthProvider !== null && me.hasPassword === true` (gemischt
-  durch Account-Verknüpfung): Passwortfeld zeigen, mit Hinweis
-  „Sie können auch mit <Provider> anmelden."
-- Wenn `me.oauthProvider === null` → Verhalten wie IT4 (Pw-Feld lesbar,
-  Änderung nur via Pw-Reset-Flow).
-
-#### 18.2.7 ENV-Setup für Tom
-
-Tom muss zwei OAuth-Apps anlegen:
-
-**Google (Google Cloud Console):**
-1. Projekt erstellen → APIs & Services → Credentials.
-2. „OAuth 2.0 Client ID" → Web application.
-3. Authorized redirect URIs hinzufügen:
-   - `http://localhost:3000/api/auth/customer/callback/google` (Dev)
-   - `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google` (Prod, v1.5.1)
-4. Client-ID + Client-Secret kopieren → an Engineers für
-   `.env.local` und Vercel-Environment.
-
-**GitHub (Settings → Developer settings → OAuth Apps):**
-1. „Register a new application".
-2. Authorization callback URL:
-   - Dev: `http://localhost:3000/api/auth/customer/callback/github`
-   - Prod: `https://www.baerenstark-hausservice.app/api/auth/customer/callback/github` (v1.5.1)
-   (GitHub erlaubt nur eine; Engineers können zwei Apps registrieren —
-   eine für Dev, eine für Prod.)
-3. Client-ID + Generated Client-Secret an Engineers liefern.
-
-**Hinweis zur URL-Migration (v1.5.1):** Die Produktions-URL hat sich
-von `https://baerenstark.vercel.app` auf
-`https://www.baerenstark-hausservice.app` geändert. Tom muss die
-Authorized Redirect URIs in beiden Provider-Konsolen entsprechend
-aktualisieren. Bestehende Dev-URLs bleiben unverändert.
+Frontend-Filter ist informativ, Backend-Filter ist verbindlich.
 
 ---
 
-### 18.3 Adressfeld in der Buchung (US-32)
+## 8. Storage & Uploads (Vercel Blob)
 
-#### 18.3.1 Datenmodell
+**`POST /api/upload`** — Multipart-Upload, gibt `{ attachmentId, url }` zurück.
 
-`Booking` erhält drei nullable String-Felder. **DB-nullable**, weil
-Bestandsbuchungen aus IT1–IT4 keine Adresse haben — Migration ohne
-Backfill möglich. **API-Pflicht** ab IT5: `CreateBookingSchema` zwingt
-alle drei Felder im IT3/IT5-Modus (mit `date`/`startTime`).
+- ENV-Pflicht: `BLOB_READ_WRITE_TOKEN`. Fehlt → 503 `BLOB_NOT_CONFIGURED`,
+  UI blendet die Sektion aus mit Hinweis "ohne Anhang absenden".
+- **Limits (IT11):** 10 MB Bilder (`image/*`), 50 MB Videos (`video/*`),
+  10 MB PDFs. Max 5 Dateien pro Booking, max 3 parallele Uploads.
+- **Validation:**
+  - Min-Size 1 Byte (0-Byte → 400 `FILE_EMPTY`).
+  - Magic-Bytes-Check via `file-type`-Package (Schutz vor MIME-Spoof).
+    Bei Mismatch → 400 `FILE_TYPE_MISMATCH`.
+  - Body-Stream-Check vor `put()` → 413 `FILE_TOO_LARGE`.
+- **Datenmodell:** `BookingAttachment` mit nullable `bookingId` —
+  Upload erstellt Attachment mit `bookingId=null`, das Booking-POST
+  setzt die Verknüpfung über `attachmentIds[]`.
+- **Cleanup:** Orphan-Attachments mit `bookingId=null` werden NICHT
+  automatisch gelöscht. Backlog für IT13.
+- **Admin-Anzeige:** `BookingTable.tsx` rendert Thumbnail bei `image/*`,
+  Dateiname, Dateigröße, Download-Link in neuem Tab. Empty-State
+  "Keine Dateien hochgeladen". Lightbox ist Backlog.
 
-```prisma
-addressStreet String?    // "Musterstraße 12"
-addressZip    String?    // "64283"
-addressCity   String?    // "Darmstadt"
+**Service-Bilder (IT12-S02):**
+- `src/lib/service-images.ts` — Single-Source-of-Truth Mapping
+  Slug → `/public/<image>.png`.
+- Komponente `ServiceHeroImage` mit `next/image` + Fallback-Container
+  bei `onError`.
+- Slug → File:
+  ```
+  entruempelung      → /entruemplungen.png
+  entkernung         → /entkernungsarbeiten.png
+  reinigung          → /reinigungsarbeiten.png
+  gruenflaechenpflege → /grünflächenpflege.png
+  muelltonnenservice → /mülltonnenservice.png
+  entsorgung         → /metal_schrott.png
+  ```
+- Umlaute werden von `next/image` URL-encoded; aktuell verifiziert in
+  Production. Falls QA-Probleme: Dateien umbenennen (kein User-facing
+  Breaking-Change, da Mapping zentral).
+
+---
+
+## 9. Performance & Caching
+
+### 9.1 ISR / Cache-Tags
+
+| Tag                    | Verbraucher                                   | Trigger zur Re-Validierung                                     |
+|------------------------|-----------------------------------------------|----------------------------------------------------------------|
+| `availability`         | `/api/availability/calendar`                  | Slot-/AvailabilityTemplate-/DayOverride-Änderung               |
+| `available-slots`      | `/api/slots/available`                        | Booking-Insert / Cancel / DayOverride                          |
+| `slots`                | Admin-Slot-Liste                              | Slot-CRUD                                                      |
+| (analytics, ISR 300 s) | `/admin/analytics`                            | Auto-Revalidate                                                |
+
+### 9.2 Calendar-Performance (IT12-S03)
+
+- `BookingCalendar` ruft `fetchAvailabilityCalendar(from, to)` für
+  62-Tage-Range.
+- Backend muss Bookings + DayOverrides + Template in **einem**
+  Round-Trip laden (kein N+1 pro Tag).
+- Cache-Header: `s-maxage=60, stale-while-revalidate=300`.
+- Frontend Render-Time Skeleton-zu-Grid p95 < 200 ms.
+- E2E Step-Wechsel zu sichtbarem Grid p95 < 1500 ms.
+
+### 9.3 Datenbank-Indizes (Pflicht-Liste)
+
+```sql
+bookings(date, status)
+bookings(status, date, startTime)
+bookings(customerId, date)
+bookings(customerId, status)
+bookings(status, createdAt)
+day_overrides(date)               UNIQUE
+availability_template(dayOfWeek)
+customer_users(email)
+customer_users(oauthProvider, oauthId)
+customer_users(lastName, firstName)
+customer_users(adminRating)
+customer_users(unsubscribedAt)    SPARSE
+users(status)
+reviews(approved, rejectedAt, createdAt)
+marketing_emails(sentByAdminId, createdAt)
+marketing_emails(status, createdAt)
+marketing_email_recipients(marketingEmailId, status)
+marketing_email_recipients(sentAt)
+idempotency_keys(expiresAt)
 ```
 
-#### 18.3.2 Validierung (Zod)
+---
 
-```ts
-addressStreet: z.string().trim().min(3).max(100),
-addressZip:    z.string().trim().regex(/^\d{5}$/, 'PLZ muss 5 Ziffern enthalten'),
-addressCity:   z.string().trim().min(2).max(100),
+## 10. Deployment & Env-Vars
+
+### 10.1 Vercel-Konfiguration
+
+- **Plan:** Hobby (10 s Function-Timeout, 100 GB Bandwidth/Monat).
+- **Region:** Auto.
+- **Domain:** `https://www.baerenstark-hausservice.app`. Apex
+  `baerenstark-hausservice.app` 301-Redirect auf `www.`.
+- **Build-Command:** `npm run build` (Next.js 14, Turbo).
+- **Install-Command:** `npm install`.
+- **Storage:** Vercel Blob aus dem Marketplace (setzt
+  `BLOB_READ_WRITE_TOKEN` automatisch).
+
+### 10.2 Pflicht-Env-Vars
+
+| Variable                    | Beispiel                                                  | Begründung |
+|-----------------------------|-----------------------------------------------------------|------------|
+| `DATABASE_URL`              | `libsql://baerenstark-prod-…?authToken=…`                  | Turso-Prod-DB. |
+| `AUTH_SECRET`               | 32+ Random-Bytes                                          | NextAuth-Sign. |
+| `NEXTAUTH_URL`              | `https://www.baerenstark-hausservice.app`                  | OAuth-Callback-URL-Berechnung. **MIT www!** |
+| `NEXT_PUBLIC_BASE_URL`      | `https://www.baerenstark-hausservice.app`                  | E-Mail-Links, Token-URLs. |
+| `RESEND_API_KEY`            | `re_…`                                                    | Mail-Provider. |
+| `MAIL_FROM`                 | `noreply@<verifizierte-domain>`                           | Resend Sender. Sandbox-Fallback `onboarding@resend.dev`. |
+| `MAIL_TO_ADMIN`             | `hausservice-baerenstark@outlook.com`                     | Tom-Notifications. |
+| `BLOB_READ_WRITE_TOKEN`     | `vercel_blob_rw_…`                                        | Vercel-Blob. |
+| `BOOKING_TOKEN_SECRET`      | 48 Byte Base64 (separat von AUTH_SECRET)                   | Confirmation/Cancellation-JWT. |
+| `UNSUBSCRIBE_TOKEN_SECRET`  | 32+ Random-Bytes (separat von BOOKING_TOKEN_SECRET)        | HMAC-Unsubscribe-Token. |
+| `GOOGLE_CLIENT_ID`          | `…apps.googleusercontent.com`                             | Customer-OAuth. |
+| `GOOGLE_CLIENT_SECRET`      | `GOCSPX-…`                                                | Customer-OAuth. |
+
+**Optional:**
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` — operativ ruhend.
+- `ALLOW_ADMIN_PROMOTE=true` — nur lokal für `scripts/promote-admin.ts`.
+- `ALLOW_USER_WIPE=true` — nur lokal für `scripts/reset-users.ts`.
+
+### 10.3 Google Cloud Console
+
+- Authorized JavaScript Origin: `https://www.baerenstark-hausservice.app`
+- Authorized Redirect URI:
+  `https://www.baerenstark-hausservice.app/api/auth/customer/callback/google`
+  (exakt — kein Trailing-Slash, mit `www`!).
+
+### 10.4 Turso-Migrations-Workflow (siehe §2.3)
+
+```bash
+# Lokal Migration erstellen
+npx prisma migrate dev --name <migration_id>
+
+# In Production gegen Turso ausrollen
+turso db shell baerenstark-prod < prisma/migrations/<id>/migration.sql
+
+# Dann Vercel re-deploy (oder Auto-Deploy nach Commit)
 ```
 
-Engineers nutzen das wiederverwendbare `BookingAddressSchema` und
-`ZipCodeSchema` aus `lib/schemas.ts` (synchron mit
-`contracts/zod-schemas.ts`).
+`prisma migrate deploy` funktioniert NICHT gegen `libsql://`-URLs.
 
-#### 18.3.3 Frontend
+### 10.5 Operative Skripte
 
-`components/booking/BookingForm.tsx`:
-- Drei neue `<Input>`-Felder zwischen „Telefon" und
-  „Beschreibung", mit Pflicht-Markierung.
-- Inline-Validierung (RHF + Zod) — analog zum bestehenden
-  Phone-Feld.
-- PLZ-Feld: `inputMode="numeric"`, `pattern="[0-9]*"`, `maxLength={5}`.
-- Mobile-First: drei Felder untereinander auf <640px, Straße full-width
-  + (PLZ | Ort) zwei-spaltig auf ≥640px.
-
-#### 18.3.4 Admin-Anzeige
-
-- `app/admin/bookings/page.tsx` (Liste): kurze Anzeige `{addressZip} {addressCity}`
-  pro Zeile (z.B. „64283 Darmstadt").
-- `app/admin/bookings/[id]/page.tsx` (Detail): eigener Abschnitt
-  „Auftragsadresse" mit allen drei Feldern.
-- `app/admin/page.tsx` (Dashboard, „bevorstehende Termine"): PLZ + Ort
-  kompakt pro Card.
-
-#### 18.3.5 Kunden-Portal-Anzeige
-
-- `app/konto/auftrag/[id]/page.tsx`: Adresse im Detail-Bereich
-  (read-only — Änderung erfordert neue Anfrage).
+- `scripts/promote-admin.ts` — Admin-Bootstrap-Reset, ENV-Guard `ALLOW_ADMIN_PROMOTE=true`.
+- `scripts/reset-users.ts` — DSGVO-Wipe, ENV-Guard `ALLOW_USER_WIPE=true`. Stripe-Customer-Cleanup ist **manuell** in Stripe-Dashboard nach dem Skript-Lauf (Skript gibt Liste der `stripeSessionId`s aus).
 
 ---
 
-### 18.4 Buchungsdauer (US-33)
+## 11. Iterations-Notizen (kurze History)
 
-#### 18.4.1 Konzept
+Die Architektur entwickelte sich in 12 Iterationen. Diese Sektion gibt
+für jede Iteration 2–3 Sätze Kontext, damit zukünftige Eingriffe die
+historischen Entscheidungen verstehen.
 
-Kunde wählt **Startzeit** + **Dauer**. Backend berechnet
-`endTime = startTime + durationMinutes` (Authority).
+**IT1–IT5 (Foundation, 2026-05-02):**
+IT1 — Initiales Setup, Admin-Auth, Slot-CRUD. IT2 — Booking-CRUD,
+Counter-Proposal-Flow (`cancelToken`), Mail-Versand. IT3 — Date/Time-
+Modus löst Slot-Modus ab; AvailabilityTemplate + DayOverride;
+File-Upload (BookingAttachment). IT4 — Customer-Portal mit eigener
+Auth (`customer-session`-Cookie, getrennt von Admin), Stripe Payment,
+Reviews. IT5 — OAuth2 (Google) für Kunden via separatem NextAuth-
+Customer-Handler unter `/api/auth/customer/[...nextauth]` mit
+`oauth-finalize`-Redirect-Pattern; Adresse pro Buchung;
+DurationPicker; BufferConfig (Singleton, Default 30 min).
 
-**Dauer-Optionen (Whitelist):**
-| Wert (Minuten) | Anzeige | Hinweis                          |
-| -------------- | ------- | -------------------------------- |
-| 60             | „1 h"   |                                  |
-| 120            | „2 h"   |                                  |
-| 180            | „3 h"   |                                  |
-| 240            | „4 h"   |                                  |
-| 300            | „5 h"   |                                  |
-| 360            | „6 h"   |                                  |
-| 480            | „8 h"   |                                  |
-| -1 (Sonderwert)| „Ganztag" | Reserviert das gesamte Verfügbarkeitsfenster |
+**IT6 — Admin-Reife & Auth-Bereinigung (2026-05-03):**
+Multi-Admin (`User.status`, `createdById`, Self-Service `/admin/admins`,
+atomarer Lock-out-Schutz via Conditional-UPDATE). FullCalendar-Adoption.
+Reviews mit COMPLETED-Trigger + Admin-Approval. SEO-Pass. **Auth-Bereinigung:**
+Customer-E-Mail/Pw temporär deaktiviert (D3) — wurde in IT7 reverted.
+DTO-Trennung (`selectCustomerUserPublic` vs. `…Admin`) verbindlich.
+Admin-User-Verwaltung (`adminNote`, `adminRating`). `finalPriceEur`.
+Analytics mit Recharts.
 
-Engineers definieren die Werte als `BOOKING_DURATION_OPTIONS` und
-`BOOKING_DURATION_ALL_DAY` in `lib/schemas.ts`.
+**IT7 — Email-Auth wiederherstellen (2026-05-03):**
+Customer-Credentials-Provider re-aktiviert (6 Endpoints + 4 Pages
+wiederhergestellt). Diagnose-Endpoint `/api/auth/diagnose` für
+OAuth-Setup-Probleme. CLI-Skript `scripts/promote-admin.ts` für
+Admin-Lock-out (kein Public-Setup-Endpoint). Neue Tabelle
+`PasswordResetToken` (SHA-256-Hash, 1h, single-use, atomarer
+Conditional-UPDATE).
 
-#### 18.4.2 Slot-Berechnung-Änderung
+**IT8 — Bugfix-Sweep (2026-05-03):**
+Fünf Production-Bugs nach IT7-Go-Live: `/admin/admins`-Crash
+(Envelope-Mismatch — Backend gab `apiSuccess({ data, total })` mit
+doppelter `data`-Verschachtelung), Admin-Kalender-Deadlock (Kalender
+nur gemountet wenn `status==='ready'`, aber Status erforderte
+gemounteten Kalender), `/api/slots`-Filter (`startsAt >= now()`
+versteckte heutige Slots), DayOverride-Liste (alle Einträge nicht nur
+aktueller Monat), Diagnose-Endpoint mit `actionRequired`-Verdikt.
 
-`GET /api/slots/available?date=...&duration=NNN` (Detail siehe
-api-routes.md §21.4):
-- Schrittweite bleibt `slotDurationMinutes` aus dem Template (z.B.
-  alle 30 Min).
-- Block-Größe = `effectiveDuration` (vom Kunden gewählt).
-- Verfügbarkeit pro Block: keine Überlappung mit aktiven Buchungen
-  UND keine Überlappung mit Buffer (siehe §18.5).
-- Bei `duration === -1` (Ganztag): genau **ein** Block über das
-  gesamte Fenster.
+**IT7-Erinnerung — Customer-Address im Profil (IT9, 2026-05-03):**
+`CustomerUser.streetAndNumber/postalCode/city` (alle nullable),
+PLZ-Validation `/^\d{5}$/`. Profil-Adresse ist Default für Booking-Form,
+Booking-Adresse ist Auftrags-Snapshot. Public Buchungs-Kalender-Bug
+(gleicher Deadlock wie IT8 in `BookingCalendar.tsx`). `/admin/users`
+Envelope-Bug repariert (jetzt `{ items, total, page, pageSize }`).
 
-#### 18.4.3 Preisschätzung (Frontend)
+**IT10 — Form-Polish & Bug-Triage (2026-05-03):**
+Reset-Mail-Diagnose (`MAIL_FROM` vs. `RESEND_FROM_EMAIL`-Verwirrung
+gelöst — kanonisch `MAIL_FROM`). `/admin/users` und `POST /api/bookings`
+500-Bugs als Production-Migrations-Drift erkannt
+(`20260503163821_add_customer_address` nicht in Prod). Quick-Booking-Modal
+als Wiederverwendung von `BookingForm` (Modal-Wrapper). Customer-Self-
+Service: SSR-Pre-Fill aus `CustomerUser` für Booking-Form.
 
-`lib/services.ts.priceFrom` × `durationHours` → Min-Schätzung.
-Range = Min × 1.0 bis Min × 2.0 (Engineering: Faktor 2 ist
-konservativer Buffer für „Aufwand variiert"). Beispiel:
+**IT11 — Storno + E-Mail-Sending + Vercel Blob (2026-05-04):**
+Buchungs-Flow mit Bestätigungsseite/Reload-Festigkeit via signiertem
+JWT (`BOOKING_TOKEN_SECRET`, Scope `booking-confirmation`, 30 d).
+Storno-Feature für Kunden (eingeloggt) UND Gäste (Token-basiert) —
+einheitlicher kanonischer Endpoint `POST /api/bookings/[id]/cancel`,
+idempotent via atomarem `updateMany`. Audit-Spalten `cancelledAt`,
+`cancelledBy` ('CUSTOMER'|'ADMIN'|'SYSTEM' — keine Differenzierung
+zwischen Login und Gast-Token), `cancellationReason`. Mail-Scanner-
+Race-Schutz: Storno-Page rendert UI, Submit ist explizit POST. Vercel
+Blob produktionsfertig integriert (`BLOB_READ_WRITE_TOKEN`),
+File-Upload-Limits 10 MB Bilder / 50 MB Videos / 10 MB PDFs,
+Magic-Bytes-Check via `file-type`-Package, Parallel-Upload-Limit 3.
+Doppel-Submit-Schutz für `POST /api/bookings` (60-s-Window-Dedup).
+Resend-Sandbox-Sign-off-Checkliste eingeführt.
 
-```
-Service: Entrümpelung (priceFrom: 35 €/h)
-Dauer: 3 h
-Range: ca. 105–210 €
-```
-
-Bei Service `'sonstiges'` (`priceFrom: null`) → „Auf Anfrage" statt
-Range. Disclaimer aus US-20 bleibt sichtbar.
-
-#### 18.4.4 Backend-Authority bei Konflikt
-
-Wenn Frontend `endTime: '12:00'` und `durationMinutes: 240` sendet,
-aber `startTime: '09:00'` (also `09 + 240min = 13:00`, Mismatch):
-**Backend nimmt durationMinutes als Authority** und berechnet
-`endTime = '13:00'`. Kein Validation-Fehler — Frontend hat sich
-verzählt, die Logik ist deterministisch.
-
-**Engineers-Hinweis:** Im API-Layer-Code unbedingt **keine**
-`addIssue()`-Validation auf `endTime`-Konsistenz, sonst werden
-legitime Buchungen abgewiesen. Stattdessen: silent-overwrite +
-Log-Eintrag „endTime corrected from X to Y based on durationMinutes".
-
-#### 18.4.5 Ganztag-Auflösung
-
-Bei `durationMinutes === -1`:
-1. `getAvailabilityForDate(date)` aufrufen.
-2. Wenn Tag inaktiv → 409 `CONFLICT`.
-3. Wenn aktiv: `startTime = template.startTime`,
-   `endTime = template.endTime`,
-   `durationMinutes = endTimeMin - startTimeMin`.
-4. Persistieren als reguläre Buchung.
-
-**Side-Effect:** Andere Buchungen am gleichen Tag sind nicht mehr
-möglich (aktive Buchung belegt das gesamte Fenster, der Partial
-Unique Index `uniq_active_booking_per_timeslot` schützt mit).
-
----
-
-### 18.5 Buffer-Zeit (US-34)
-
-#### 18.5.1 Datenmodell
-
-```prisma
-model BufferConfig {
-  id            String   @id @default(cuid())
-  bufferMinutes Int      @default(30)
-  updatedAt     DateTime @updatedAt
-}
-```
-
-**Singleton-Pattern:** Engineers stellen sicher, dass max. 1 Datensatz
-existiert. Helper:
-
-```ts
-async function getBufferConfig(): Promise<{ bufferMinutes: number; updatedAt: Date }> {
-  let cfg = await prisma.bufferConfig.findFirst();
-  if (!cfg) {
-    cfg = await prisma.bufferConfig.create({ data: { bufferMinutes: 30 } });
-  }
-  return cfg;
-}
-
-async function setBufferConfig(value: number): Promise<{ bufferMinutes: number; updatedAt: Date }> {
-  const cfg = await prisma.bufferConfig.findFirst();
-  if (!cfg) {
-    return prisma.bufferConfig.create({ data: { bufferMinutes: value } });
-  }
-  return prisma.bufferConfig.update({
-    where: { id: cfg.id },
-    data: { bufferMinutes: value },
-  });
-}
-```
-
-#### 18.5.2 Slot-Berechnungs-Erweiterung
-
-In `lib/availability.ts.computeAvailableSlots()`:
-
-1. Lade alle aktiven Buchungen für `date` (PENDING/CONFIRMED/COUNTER_PROPOSED).
-2. Lade `bufferMinutes` aus `BufferConfig`.
-3. Pro generiertem Block prüfen:
-   ```
-   blockOverlapsBookingOrBuffer(block, bookings) {
-     for each booking b:
-       if block ∩ [b.start, b.end) → blocked
-       if b.status === 'CONFIRMED'
-          AND block ∩ [b.end, b.end + bufferMinutes) → blocked
-     return false
-   }
-   ```
-
-**Wichtig — Buffer NUR nach CONFIRMED:**
-- PENDING-Buchung blockiert nur ihren eigenen Slot, nicht den Buffer.
-  Begründung: Tom hat noch nicht zugesagt — andere Kunden sollen
-  parallel anfragen können.
-- COUNTER_PROPOSED gleich.
-- CONFIRMED triggert den Buffer (Fahrtzeit-Reservierung).
-
-#### 18.5.3 Admin-UI
-
-Neuer Abschnitt in `app/admin/availability/page.tsx`:
-- Section-Header: „Buffer-Zeit nach Buchungen".
-- Erklärungs-Text: „Reservierte Zeit nach jeder bestätigten Buchung
-  (für Fahrt + Pause). Wirkt sich nur auf bestätigte Buchungen aus."
-- `<select>` mit 5 Optionen (0/15/30/45/60 Min).
-- Speichern-Button → `PUT /api/admin/buffer-config`.
-- Bestätigung „Einstellung gespeichert" via Toast.
-
-In der Admin-Kalenderansicht (`components/admin/CalendarView.tsx`):
-- Buffer-Block visuell als graue Kachel direkt nach der Buchung
-  (z.B. `bg-baerenstark-stone/30` mit „Buffer"-Label).
-
-#### 18.5.4 Frontend-Sichtbarkeit
-
-Kunden sehen den Buffer **nicht** explizit — die betroffenen Slots
-werden einfach als „nicht verfügbar" angezeigt. Hinweis-Text auf der
-Buchungsseite unverändert.
-
-#### 18.5.5 Race-Condition-Schutz für variable Dauer (v1.5.1 Fix BUG-IT5-001) — verbindlich
-
-**Problem (Critical):** Mit US-33 wählen Kunden frei eine Dauer. Der
-seit IT3 bestehende Partial Unique Index
-`uniq_active_booking_per_timeslot` schützt nur **exakte Tupel**
-`(date, start_time, end_time)`. Überlappende Tupel passieren ihn
-ungehindert:
-
-| Booking A             | Booking B             | Konflikt? | Index fängt? |
-| --------------------- | --------------------- | --------- | ------------ |
-| 09:00–11:00 (120 min) | 09:00–11:00 (120 min) | ja        | **ja** (exakt-Match) |
-| 09:00–11:00 (120 min) | 10:00–12:00 (120 min) | ja        | **NEIN** (Index sieht andere Tupel) |
-| 09:00–11:00 (120 min) | 10:00–11:00 (60 min)  | ja        | **NEIN** |
-| 09:00–13:00 (-1, Ganztag) | 10:00–11:00 (60 min) | ja        | **NEIN** |
-
-Ohne zusätzliche Vorkehrung können zwei parallele POST-Requests beide
-ein Insert durchführen → Doppelbuchung.
-
-**Verbindliche Strategie:** Der `POST /api/bookings`-Handler für den
-IT3/IT5-Modus (mit `date`/`startTime`/`durationMinutes`) führt
-**Overlap-Check, Buffer-Check und Insert in einer einzigen
-SQLite-Transaktion mit `BEGIN IMMEDIATE`** aus. SQLite serialisiert
-schreibende Transaktionen — zwei parallele Requests werden
-sequentiell abgearbeitet, der zweite sieht das `INSERT` des ersten,
-sein Overlap-Check schlägt aus, er antwortet mit 409 `CONFLICT`.
-
-**Pseudo-Code (Backend, in `lib/booking-create.ts`):**
-
-```ts
-import { prisma } from '@/lib/prisma';
-
-async function createBookingWithOverlapCheck(input: CreateBookingInput) {
-  // Resolve duration → endTime (Authority = durationMinutes).
-  const startMin = timeToMinutes(input.startTime);
-  const endMin =
-    input.durationMinutes === BOOKING_DURATION_ALL_DAY
-      ? templateEndMin                     // Ganztag → Template-Fenster
-      : startMin + input.durationMinutes;
-  const endTime = minutesToTime(endMin);
-
-  // SQLite-Transaktion mit BEGIN IMMEDIATE (Prisma: $transaction
-  // mit isolationLevel "Serializable" auf SQLite ≈ BEGIN IMMEDIATE).
-  return await prisma.$transaction(async (tx) => {
-    // 1. Overlap-Check gegen aktive Buchungen am gleichen Tag.
-    //    SQL-equivalent:
-    //    SELECT id FROM bookings
-    //     WHERE date = ?
-    //       AND status IN ('PENDING','CONFIRMED','COUNTER_PROPOSED')
-    //       AND start_time < ?   -- requestedEnd
-    //       AND end_time   > ?   -- requestedStart
-    //     LIMIT 1;
-    const overlapping = await tx.booking.findFirst({
-      where: {
-        date: input.date,
-        status: { in: ['PENDING', 'CONFIRMED', 'COUNTER_PROPOSED'] },
-        AND: [
-          { startTime: { lt: endTime } },
-          { endTime:   { gt: input.startTime } },
-        ],
-      },
-      select: { id: true },
-    });
-    if (overlapping) {
-      throw new ConflictError('Zeitraum bereits belegt.');
-    }
-
-    // 2. Buffer-Check: gibt es eine CONFIRMED-Buchung, deren
-    //    [endTime, endTime + bufferMinutes) mit
-    //    [requestedStart, requestedEnd) überlappt?
-    const { bufferMinutes } = await getBufferConfig();
-    if (bufferMinutes > 0) {
-      const buffered = await tx.booking.findFirst({
-        where: {
-          date: input.date,
-          status: 'CONFIRMED',
-          // App-Layer-Filter (SQLite kann Minuten-Arithmetik auf
-          // 'HH:MM' nicht direkt; wir prüfen in JS):
-        },
-        select: { startTime: true, endTime: true },
-      });
-      // Iterativ prüfen (kleine N, max ~5/Tag):
-      const candidates = await tx.booking.findMany({
-        where: { date: input.date, status: 'CONFIRMED' },
-        select: { startTime: true, endTime: true },
-      });
-      for (const c of candidates) {
-        if (!c.startTime || !c.endTime) continue;
-        const cEnd = timeToMinutes(c.endTime);
-        const bufferEnd = cEnd + bufferMinutes;
-        if (startMin < bufferEnd && endMin > cEnd) {
-          throw new ConflictError(
-            'Pufferzeit nach bestehender Buchung kollidiert.',
-            { code: 'CONFLICT', detail: 'BUFFER_BLOCKED' },
-          );
-        }
-      }
-    }
-
-    // 3. Insert. Falls trotz aller Vorkehrungen ein
-    //    P2002-Unique-Violation auftritt (Race auf
-    //    uniq_active_booking_per_timeslot), wandelt der Catch-Block
-    //    außerhalb in 409 um.
-    return await tx.booking.create({
-      data: {
-        ...input,
-        endTime,
-        status: 'PENDING',
-      },
-    });
-  }, {
-    // SQLite: Serializable = BEGIN IMMEDIATE intern.
-    isolationLevel: 'Serializable',
-    timeout: 5000,  // ms
-    maxWait: 2000,  // ms
-  });
-}
-```
-
-**Engineering-Notes:**
-
-1. Prisma's `$transaction` mit `isolationLevel: 'Serializable'`
-   triggert auf SQLite das Verhalten von `BEGIN IMMEDIATE` — der
-   Writer wird sofort exklusiv-serialisiert. Kein zweiter Writer kann
-   die Transaktion betreten, bis der erste committet/rollbackt.
-2. Auf Postgres (Backlog-Migration) ist `Serializable` ebenfalls
-   ausreichend, weil Postgres SSI nutzt — alternativ `SELECT ... FOR
-   UPDATE` auf einen Day-Lock-Datensatz. **MVP läuft auf SQLite —
-   diese Detail-Frage ist offen, sobald wir auf Turso/Postgres
-   migrieren.**
-3. **Der bestehende Partial Unique Index bleibt** als zweite
-   Verteidigungslinie. Bei Race auf Application-Layer (vor
-   Transaction-Start) fängt er den Fall ab (P2002 → 409).
-4. **Ganztag (`durationMinutes === -1`)** wird in der Transaktion
-   wie reguläre Buchung behandelt — `startTime`/`endTime` werden
-   vorher auf das Template-Fenster aufgelöst (siehe §18.4.5), der
-   Overlap-Check sieht dann ein 09:00–17:00-Tupel und erkennt jede
-   andere Buchung an dem Tag als Overlap.
-5. **Re-Booking-Modus (Slot-basiert, ohne `date`):** Bestand IT2-
-   Verhalten — Insert mit Slot-FK. Hier greift der Slot-Unique-Index
-   (Bestand). Kein zusätzlicher Overlap-Check nötig.
-6. **Performance:** Overlap-Query über Index `(date, status)`
-   (Bestand seit IT3) — O(1) lookup. Buffer-Query auf max ~5
-   CONFIRMED-Bookings/Tag — vernachlässigbar.
-7. **Tests (zusätzlich zu §18.11):** Concurrency-Test mit
-   `Promise.all([POST_A, POST_B])` für überlappende Dauern → genau 1
-   × 201, 1 × 409.
-
-**Begründung gegen Trigger-Variante:** Ein `BEFORE INSERT`-Trigger
-mit Range-Check wäre eleganter (DB-garantiert), aber:
-- SQLite-Trigger werden in Prisma nicht erstgenerative gemanagt
-  (manueller `prisma db execute`-Schritt nötig).
-- Der Trigger müsste die Buffer-Logik kennen — das verteilt die
-  Business-Logik auf zwei Schichten.
-- Forward-Migration auf Postgres würde den Trigger neu schreiben
-  müssen.
-
-Die Transaction-Variante hält die Business-Logik in einer Schicht
-(`lib/booking-create.ts`), ist DB-portabel und MVP-tauglich.
+**IT12 — Bug-Sweep & Marketing-Mails (2026-05-04):**
+Production-Bug-Sweep nach Stakeholder-Feedback: NEXTAUTH_URL musste auf
+`https://www.baerenstark-hausservice.app` (mit `www`!) korrigiert
+werden — OAuth-Callback funktionierte nicht. Service-Detail-Bilder
+(SSOT-Mapping in `service-images.ts`). Calendar-Performance-Optimierung
+(N+1 → ein Round-Trip, Cache-Tags). Scroll-Helper
+`scrollIntoViewIfNeeded` (5 Aufrufstellen in `BookingClient.tsx`).
+Customer-Session-Sync via `EventTarget`-Bus (`customer-sync.ts`) — Header
+zeigt nicht mehr "Anmelden" trotz Login. Konto-Anbieten nach Gast-
+Buchung als embedded Card auf Bestätigungsseite (`POST /api/customer/register-from-booking`).
+Admin-Navigation 3-Gruppen-Sidebar
+(Kalender & Zeitmanagement / Nutzerverwaltung / Auswertungen) —
+"Bewertungen" nur einmal in DOM. Idempotency-Key (`Idempotency-Key`-Header,
+`idempotency_keys`-Tabelle, 24 h TTL). **Marketing-Mail-Feature**
+(US-IT12-15) komplett: DSGVO Variante 3 (UWG §7 Abs. 3 Bestandskunden),
+stateless HMAC-Unsubscribe-Tokens (kein Token-Tabelle nötig), Plain-Text
+only, Hard-Cap 50 Empfänger pro Send (Vercel-Hobby-Timeout-konform),
+Test-Send an Admin-Mail, Audit-Trail in `MarketingEmail` +
+`MarketingEmailRecipient` mit Resend-Message-IDs.
 
 ---
 
-### 18.6 Datenmodell-Migration Iteration 5
+## 12. Risiken & Tech-Debt (offen)
 
-**Schema-Änderungen (eine Migration):**
-
-1. `customer_users`:
-   - `password_hash` → NULLABLE (ALTER COLUMN).
-   - Neue Spalten: `oauth_provider`, `oauth_id`, `avatar_url` (alle NULL).
-   - Neuer Index `idx_customer_users_oauth (oauth_provider, oauth_id)`.
-
-2. `bookings`:
-   - Neue Spalte `duration_minutes INTEGER NOT NULL DEFAULT 60`.
-     Default-Wert ist Backfill — Bestandsbuchungen erhalten 60 Min.
-     Engineers setzen optional pro Bestandsbuchung
-     `duration_minutes = endTimeMin - startTimeMin` per Skript:
-     ```sql
-     UPDATE bookings
-        SET duration_minutes = (
-          (CAST(substr(end_time,1,2) AS INTEGER) * 60 + CAST(substr(end_time,4,2) AS INTEGER))
-          - (CAST(substr(start_time,1,2) AS INTEGER) * 60 + CAST(substr(start_time,4,2) AS INTEGER))
-        )
-      WHERE start_time IS NOT NULL
-        AND end_time IS NOT NULL
-        AND duration_minutes = 60;
-     ```
-   - Neue Spalten: `address_street`, `address_zip`, `address_city`
-     (alle NULL — Bestand hat sie nicht).
-
-3. **NEUE Tabelle** `buffer_config` (Singleton, Default 30).
-
-**Reihenfolge der Migration:**
-1. ALTER TABLE customer_users + bookings.
-2. Optionale Backfill-Updates (duration_minutes für alte Buchungen).
-3. CREATE TABLE buffer_config + Initial-Insert (`{ bufferMinutes: 30 }`).
-4. Engineers-Hinweis: Initial-Insert kann auch on-the-fly im Helper
-   passieren (siehe 18.5.1).
-
-**Keine Daten-Verlust-Risiken** — alle neuen Felder sind nullable
-oder haben Default-Werte.
+| Bereich                       | Risiko / Schuld                                                                 | Mitigation / Backlog |
+|-------------------------------|--------------------------------------------------------------------------------|----------------------|
+| **Vercel Hobby Timeout**      | 10-s-Limit bei Marketing-Send → harter 50-Empfänger-Cap.                        | IT13: Pro-Plan oder Vercel-Cron + Resume-Endpoint. |
+| **Resend Free Quota**         | 100/Tag, 3000/Monat. Bei Marketing-Welle riskant.                              | UI-Quota-Anzeige + Warnung. Pro-Plan-Upgrade ab IT13. |
+| **Turso Migration-Workflow**  | `prisma migrate deploy` funktioniert nicht; manueller Turso-Shell-Schritt.     | Skript `scripts/migrate-turso.sh` als Wrapper (Backlog). |
+| **Stripe operativ ruhend**    | `Payment`-Modell + Endpoints existieren, aber kein API-Key gesetzt.            | Aktivierung erst auf Tom-Trigger. |
+| **OAuth-Cookie auf apex/www** | Cookie geht verloren wenn User von apex zu www redirected wird.                 | 301-Redirect am Edge sichergestellt; trotzdem Watch-Item. |
+| **Admin-Edge-Middleware**     | Kann `User.status` nicht prüfen (kein Prisma in Edge).                          | Status-Check im Page-Loader / Route-Handler. Akzeptierter Zustand. |
+| **Orphan Attachments**        | `BookingAttachment` mit `bookingId=null` werden nicht gelöscht.                | IT13 — Cleanup-Cron (DELETE older than 24h). |
+| **Lightbox für Anhänge**      | Admin-Anhang-Klick öffnet neuen Tab, nicht Lightbox.                            | UX-Backlog IT13. |
+| **Scroll-Jump Bookingform**   | Layout-Shift bei `setPickedService` kann Scroll-Jump auslösen.                  | `useDeferredValue` / Dedup-Ref via `scrollIntoViewIfNeeded`. |
+| **Self-Delete Customer**      | Kein Customer-Self-Delete-Endpoint; Delete läuft über Tom.                     | Backlog (DSGVO-Optimum, aber Adress-Leeren reicht für AC). |
+| **Pending-E-Mail-Wechsel**    | E-Mail-Änderung im Profil aktuell verboten (BUG-402).                          | IT13 — Pending-Email-Flow mit Re-Verify. |
+| **Vercel-Image-Optimization** | Free-Limit 1000 Transformations/Monat — bei viel Traffic eng.                  | Watch. |
+| **Mail-Domain-Verifizierung** | Resend-Domain `baerenstark-hausservice.app` verifiziert? Sonst Sandbox-Modus.  | Tom verifiziert SPF/DKIM. |
+| **Rate-Limit-Library**        | `src/lib/ratelimit.ts` ist In-Memory — auf Vercel-Function-Cold-Start verloren. | Upstash-Redis bei IT13. |
+| **`internalError()` Logging** | Kein `request_id`-Header für Vercel-Log-Korrelation.                            | IT13 — `request_id`-Wrapper. |
 
 ---
 
-### 18.7 Frontend-Architektur Iteration 5
-
-**Neue/geänderte Komponenten:**
-
-| Komponente                                      | Status     | Zweck                                                              |
-| ----------------------------------------------- | ---------- | ------------------------------------------------------------------ |
-| `components/booking/BookingForm.tsx`            | UMGEBAUT   | Adressfelder + Dauer-Picker integrieren.                            |
-| `components/booking/AddressFields.tsx`          | NEU IT5    | Drei Pflichtfelder Straße/PLZ/Ort, mobile-first Layout.             |
-| `components/booking/DurationPicker.tsx`         | NEU IT5    | 8 Kacheln (1h–6h, 8h, Ganztag) mit Preisschätzung + Disabled-State. |
-| `components/booking/TimeSlotPicker.tsx`         | UMGEBAUT   | Ruft `/api/slots/available?duration=` mit aktuell gewählter Dauer.  |
-| `app/konto/login/page.tsx`                      | UMGEBAUT   | Drei Buttons: Pw, Google, GitHub.                                    |
-| `app/konto/profil/page.tsx`                     | UMGEBAUT   | Pw-Feld nur für non-OAuth-Konten zeigen (siehe 18.2.6).              |
-| `components/customer/OAuthButtons.tsx`          | NEU IT5    | Wiederverwendbare Google/GitHub-Buttons (CSR, ruft `signIn`).       |
-| `app/admin/availability/page.tsx`               | UMGEBAUT   | Buffer-Section neu (Dropdown + Save).                                |
-| `components/admin/BufferConfigForm.tsx`         | NEU IT5    | Standalone-Form für Buffer-Einstellung.                              |
-| `app/admin/bookings/page.tsx` + `[id]/page.tsx` | UMGEBAUT   | Adresse + Dauer in Liste/Detail anzeigen.                            |
-| `components/admin/CalendarView.tsx`             | UMGEBAUT   | Buffer-Blöcke visualisieren (graue Kacheln).                          |
-| `app/admin/login/page.tsx`                      | UMGEBAUT   | „Passwort vergessen?"-Link prominent.                                |
-| `lib/customer-oauth.ts`                         | NEU IT5    | NextAuth-Customer-Config (Google + GitHub Provider).                  |
-| `lib/baseUrl.ts`                                | NEU IT5    | `adminBaseUrl()` Helper (US-30 Fix).                                  |
-
----
-
-### 18.8 UI-States Iteration 5
-
-| Page                                  | States                                                                                                   |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `/admin/login`                        | Idle / Loading / Error / „Passwort vergessen?"-Link sichtbar (statisch).                                  |
-| `/admin/passwort-vergessen`           | Idle / Submitting / Sent (neutrale Meldung, kein Existenz-Leak).                                          |
-| `/admin/passwort-reset?token=...`     | Idle / Submitting / Success (Redirect 3s) / Error (ungültig/abgelaufen → Link zu Forgot).                  |
-| `/konto/login`                        | Pw-Form (idle/loading/error) PLUS OAuth-Buttons (idle/loading) PLUS optional Fehler-Banner (`?error=...`). |
-| `/konto/profil`                       | OAuth-only: Pw-Feld nicht gerendert. Mixed: Pw-Feld + Hinweis. Pw-only: wie IT4.                          |
-| `/buchung` (Form)                     | Bestand + Adressfelder (idle/error) + Dauer-Picker (idle/disabled-tile/selected) + Slot-Picker (loading/disabled-tile). |
-| `/admin/availability`                 | Bestand + Buffer-Section (idle/saving/saved-toast/error).                                                  |
-| Admin-Kalender                        | Buchungen farbig + Buffer als graue Schraffur direkt anschließend.                                         |
-
----
-
-### 18.9 Sicherheit Iteration 5
-
-#### 18.9.1 OAuth-Flow
-
-- **State-Parameter:** NextAuth handhabt state automatisch (CSRF-Schutz).
-- **PKCE:** wird von NextAuth für Google + GitHub aktiviert.
-- **Open-Redirect:** `redirect`-Callback in `customer-oauth.ts` muss
-  `safeCustomerCallback()` (siehe `lib/customer-auth.ts`)
-  wiederverwenden — Engineers dürfen externe `callbackUrl`-Werte
-  NICHT durchreichen.
-- **E-Mail-Verifikation:** Engineers SOLLEN nur Provider-Profile mit
-  `email_verified === true` (Google) bzw. einer `verified primary
-  email` (GitHub) akzeptieren. Sonst: Redirect zu
-  `/konto/login?error=oauth_unverified`.
-
-#### 18.9.2 Account-Verknüpfung (v1.5.1 nachgeschärft, Fix BUG-IT5-004)
-
-- E-Mail-Match wird **case-insensitive** durchgeführt
-  (Schema persistiert lowercase). Schutz vor „account hijacking via
-  case-mismatch".
-- Auf einem bestehenden E-Mail/Pw-Konto **bleibt** `passwordHash`
-  erhalten, wenn ein OAuth-Provider verknüpft wird. Der Pw-Inhaber
-  kann sich weiterhin per Pw einloggen — Verknüpfung ist additiv,
-  nicht zerstörend.
-
-**Account-Linking-Sicherheits-Differenzierung (verbindlich):**
-
-Bei E-Mail-Match zwischen einem OAuth-Login und einem bestehenden
-lokalen Konto **muss** `handleCustomerOAuthSignIn()` zwischen
-verifiziertem und unverifiziertem lokalem Konto unterscheiden:
-
-| Lokales Konto Status                                        | OAuth-Aktion                                                 | Begründung                                                                                                                       |
-| ----------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `emailVerified: true`                                       | **Verknüpfung OK** — `oauthProvider/oauthId/avatarUrl` setzen, `passwordHash` unangetastet. | Der lokale User hatte verifizierten Zugriff auf die Inbox; Provider hat E-Mail ebenfalls verifiziert → beide vertrauen der Identität. |
-| `emailVerified: false` (unbestätigte E-Mail-Registrierung) | **Verknüpfung VERBOTEN.** Return `{ ok: false, error: 'oauth_unverified_conflict' }`. NextAuth-Callback redirectet zu `/konto/login?error=oauth_unverified_conflict`. | Hijacking-Vektor: Angreifer registriert lokal `victim@example.com` ohne Verify, wartet, das echte Opfer meldet sich später per OAuth an. Würde sonst den Angreifer-Account übernehmen. |
-
-**Pseudo-Code-Erweiterung in `handleCustomerOAuthSignIn()`:**
-
-```ts
-// 2. E-Mail-Match (existierender Account → Verknüpfung).
-if (!user) {
-  const existing = await prisma.customerUser.findUnique({
-    where: { email: profile.email.toLowerCase() },
-  });
-
-  if (existing) {
-    // SICHERHEIT: Unverifizierte lokale Konten dürfen NICHT
-    // automatisch verknüpft werden (Hijacking-Schutz, BUG-IT5-004).
-    if (!existing.emailVerified) {
-      return {
-        ok: false,
-        error: 'oauth_unverified_conflict',
-      };
-    }
-
-    // Verifiziertes Konto → sichere Verknüpfung.
-    user = await prisma.customerUser.update({
-      where: { id: existing.id },
-      data: {
-        oauthProvider: provider,
-        oauthId: profile.oauthId,
-        avatarUrl: profile.avatarUrl ?? existing.avatarUrl,
-        // emailVerified bleibt true; nicht überschreiben.
-      },
-    });
-  }
-}
-```
-
-**UX-Flow im Konflikt-Fall:**
-
-1. User klickt „Mit Google anmelden" → Google-OAuth erfolgreich.
-2. `signIn`-Callback erkennt unverifiziertes lokales Konto mit
-   gleicher E-Mail.
-3. Callback gibt Redirect-String zurück:
-   `/konto/login?error=oauth_unverified_conflict`.
-4. Frontend (`app/konto/login/page.tsx`) zeigt deutsche Meldung:
-   > „Es existiert bereits ein Konto mit dieser E-Mail-Adresse, das
-   > noch nicht bestätigt wurde. Bitte bestätigen Sie zuerst Ihre
-   > E-Mail über den Link in der Registrierungs-Mail oder nutzen
-   > Sie ‚Passwort vergessen?', um Zugriff wiederherzustellen.
-   > Anschließend können Sie sich mit Google anmelden."
-5. Zwei Auflösungs-Pfade für den User:
-   - E-Mail-Verify-Mail erneut anfordern (`/konto/verify-resend`),
-     Mail bestätigen → emailVerified: true → OAuth-Login klappt.
-   - Passwort-Reset-Flow (`/konto/passwort-vergessen`) → setzt
-     emailVerified implizit auf true (Mail-Zugriff bewiesen).
-
-**Neuer Fehlercode:** `OAUTH_UNVERIFIED_CONFLICT` (HTTP 422). Wird
-NICHT von einem API-Endpoint zurückgeliefert (OAuth-Flow läuft als
-Redirect), sondern als Query-Param `?error=oauth_unverified_conflict`
-auf der Login-Page geschickt. Im Frontend-Mapping (`lib/oauth-
-errors.ts`) wird der Code zu obigem deutschen Text aufgelöst.
-
-**Test-Anker (zusätzlich zu §18.11):**
-- Lokales Konto unverifiziert → OAuth mit gleicher E-Mail → kein
-  Update am Konto, Redirect mit `error=oauth_unverified_conflict`.
-- Lokales Konto verifiziert (e.g. nach Pw-Reset) → OAuth mit gleicher
-  E-Mail → Verknüpfung wie bisher (passwordHash erhalten).
-
-#### 18.9.3 Adress-Daten DSGVO
-
-- Adresse ist personenbezogenes Datum (Auftragsort).
-- Aufbewahrung: gleich wie Bestandsfelder (2 Jahre, siehe §11).
-- Frontend zeigt Adresse nur dem eingeloggten Kunden + Tom.
-- Admin-Kunden-Listen-Anzeige (PLZ+Ort) ist akzeptabel — kein voller
-  Straßenname in Übersichten ohne Klick.
-
-#### 18.9.4 Buffer-Config
-
-- Endpunkte sind Admin-only (Middleware schützt `/api/admin/*`).
-- Kein Rate-Limit nötig (Bestands-Schutz via Auth ausreichend).
-
----
-
-### 18.10 ENV-Variablen Iteration 5
-
-| Variable                | Pflicht                  | Wert / Beispiel                | Zweck                                                    |
-| ----------------------- | ------------------------ | ------------------------------ | -------------------------------------------------------- |
-| `GOOGLE_CLIENT_ID`      | Wenn Google-Login aktiv  | `<Google OAuth Client-ID>`     | NextAuth Google-Provider (US-31).                         |
-| `GOOGLE_CLIENT_SECRET`  | Wenn Google-Login aktiv  | `<Google OAuth Secret>`        | NextAuth Google-Provider (US-31).                         |
-| `GITHUB_CLIENT_ID`      | Wenn GitHub-Login aktiv  | `<GitHub OAuth App ID>`        | NextAuth GitHub-Provider (US-31).                         |
-| `GITHUB_CLIENT_SECRET`  | Wenn GitHub-Login aktiv  | `<GitHub OAuth App Secret>`    | NextAuth GitHub-Provider (US-31).                         |
-| `NEXTAUTH_URL`          | ja (bereits)             | `https://www.baerenstark-hausservice.app` (Prod, v1.5.1) bzw. `http://localhost:3000` (Dev) | Reset-Mail-Links + OAuth-Callback-Basis (US-30 + US-31).  |
-
-`.env.example` wird mit Hinweis-Kommentaren ergänzt:
-```
-# IT5 / US-31 — OAuth2-Customer-Login (optional, falls aktiv)
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-```
-
-Engineers erweitern beim Implementieren die `.env.example`.
-
----
-
-### 18.11 Test-Plan Iteration 5
-
-| Bereich                | Test                                                                                          |
-| ---------------------- | --------------------------------------------------------------------------------------------- |
-| **US-30 BASE_URL**     | `NEXTAUTH_URL=https://www.baerenstark-hausservice.app` → Reset-Mail-Link enthält genau diese URL. Lokal: `http://localhost:3000/admin/passwort-reset?token=...`. |
-| **US-30 Pw-Min**       | Reset mit 7 Zeichen → 400. Mit 8 Zeichen → 200.                                                |
-| **US-30 Middleware**   | Anonym `GET /admin/passwort-vergessen` → 200 (kein Redirect).                                  |
-| **US-30 Login-Link**   | Visual: „Passwort vergessen?" sichtbar in 360px Viewport, klickbar mit Tastatur-Tab.            |
-| **US-31 Google First-Login** | Klick „Mit Google anmelden", Provider-Flow durchlaufen → CustomerUser angelegt, Cookie gesetzt, Redirect zu `/konto`. |
-| **US-31 GitHub First-Login** | Idem für GitHub.                                                                          |
-| **US-31 Account-Verknüpfung** | Existierender E-Mail/Pw-Account `maria@example.com` (mit Pw). Per Google einloggen mit derselben E-Mail → bestehendes Konto wird ergänzt um `oauthProvider: 'google'`, `passwordHash` bleibt. |
-| **US-31 OAuth-only Login mit Pw** | OAuth-only-Konto (passwordHash = null). `POST /api/customer/login` → 422 `OAUTH_ONLY_ACCOUNT`. |
-| **US-31 Pw-only weiterhin** | Pw-Login mit Bestandskonto (kein OAuth) → unverändert OK.                                  |
-| **US-31 Provider-Abbruch** | OAuth-Flow im Provider abbrechen → Redirect `/konto/login?error=oauth_error` mit deutscher Meldung. |
-| **US-31 Profil OAuth-only** | `/konto/profil` zeigt KEIN Pw-Feld bei OAuth-only-Konto.                                    |
-| **US-31 Open-Redirect** | OAuth-Redirect mit `callbackUrl: 'https://evil.example/'` → Fallback `/konto`.                 |
-| **US-32 Pflichtfelder**| `POST /api/bookings` ohne `addressStreet` → 400 `VALIDATION_ERROR` mit `field: 'addressStreet'`. |
-| **US-32 PLZ-Format**   | `addressZip: '1234'` → 400. `'12345'` → 200.                                                   |
-| **US-32 Anzeige Admin**| Buchung mit Adresse → in Liste „64283 Darmstadt", in Detail „Musterstraße 12 / 64283 Darmstadt". |
-| **US-32 Bestand**      | Buchung aus IT4 (ohne Adresse) → Detail-Page rendert Hinweis „Adresse nicht erfasst" (kein Crash). |
-| **US-33 Dauer-Wahl**   | Form ohne `durationMinutes` absenden → Inline-Fehler „Bitte wählen Sie eine Auftragsdauer.".    |
-| **US-33 endTime-Override** | POST mit `startTime: '09:00'`, `endTime: '12:00'`, `durationMinutes: 240` → DB-Eintrag hat `endTime: '13:00'` (Authority = duration). |
-| **US-33 Ganztag**      | POST mit `durationMinutes: -1` an einem aktiven Tag → DB-Eintrag deckt Template-Fenster ab; Tag belegt für andere. |
-| **US-33 Slot-API mit Dauer** | `GET /api/slots/available?date=...&duration=240` → Liefert nur Blöcke, in die 4h passen.    |
-| **US-34 Admin-Read**   | `GET /api/admin/buffer-config` ohne Datensatz → seedet 30, liefert `{ bufferMinutes: 30 }`.    |
-| **US-34 Admin-Write**  | `PUT /api/admin/buffer-config { bufferMinutes: 45 }` → 200, nächster GET liefert 45.            |
-| **US-34 Whitelist**    | `PUT { bufferMinutes: 17 }` → 400 `VALIDATION_ERROR`.                                          |
-| **US-34 Buffer-Wirkung**| CONFIRMED-Buchung 13:00–14:00, buffer=30. Slot 14:00–15:00 → unavailable. Slot 14:30–15:30 → available. |
-| **US-34 PENDING kein Buffer** | PENDING-Buchung 13:00–14:00, buffer=30. Slot 14:00–15:00 → available (PENDING blockiert nur eigenen Slot). |
-| **US-34 buffer=0**     | `PUT { bufferMinutes: 0 }`. CONFIRMED 13:00–14:00. Slot 14:00–15:00 → available.                |
-
----
-
-### 18.12 Offene Punkte / Annahmen Iteration 5
-
-- **Annahme (US-30):** `NEXTAUTH_URL` ist in der Production-Env gepflegt
-  und zeigt auf die korrekte Vercel-Domain. Engineers verifizieren das
-  vor dem ersten Reset-Mail-Test.
-- **Annahme (US-31):** Tom liefert die OAuth-Client-IDs/Secrets. Bis
-  dahin können Engineers die OAuth-Buttons mit einem Feature-Flag
-  (`FEATURE_OAUTH_LOGIN=false`) ausblenden — Pw-Login funktioniert
-  weiterhin.
-- **Annahme (US-31):** Für GitHub mit Privacy-Setting („private email")
-  fragt der Server zusätzlich `https://api.github.com/user/emails` ab
-  und nimmt die `primary && verified` Adresse. Falls keine vorhanden:
-  Redirect zu `/konto/login?error=oauth_no_email`.
-- **Annahme (US-32):** Adressen werden nicht gegen eine PLZ-Datenbank
-  validiert (Backlog). 5-stellige PLZ-Form-Validierung reicht für MVP.
-- **Annahme (US-33):** Preisschätzung verwendet Faktor 2 als Range-
-  Obergrenze (z.B. 35€/h × 3h × 2 = 210€). Engineers können das anpassen,
-  wenn Tom andere Wünsche hat (alternativ: nur Min anzeigen, „ca. 105 €").
-- **Annahme (US-33 Ganztag):** „Ganztag" reserviert das volle
-  Verfügbarkeitsfenster des Tages. Wenn Tom keine 6+ Stunden am Stück
-  arbeiten will, soll er das Verfügbarkeitsfenster im Template
-  einschränken.
-- **Annahme (US-34):** Buffer-Wert ist global. Service-spezifische
-  Buffer (z.B. 60min nach Entrümpelung, 15min nach Mülltonnenservice)
-  sind Backlog.
-- **Annahme (US-34):** Buffer wird nur **nach** der Buchung
-  reserviert, **nicht davor**. Pre-Buffer (Anfahrt VOR dem Termin)
-  ist Backlog.
-- [NEEDS INPUT] **Tom:** OAuth-Provider-Credentials (Google + GitHub
-  Client-IDs/Secrets). Ohne diese Werte können Engineers den OAuth-Flow
-  nicht testen — Feature-Flag-Workaround siehe oben.
-- [NEEDS INPUT] **Tom:** Buffer-Default-Wert. Aktuell 30 Min — soll
-  Tom einen anderen Anfangswert? (Kann Tom aber selbst über die
-  Admin-UI ändern — kein Blocker.)
-
----
-
-### 18.13 Akzeptanzkriterien-Mapping IT5
-
-| Story | Erfüllt durch                                                                                                                        |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| US-30 | `adminBaseUrl()` Helper härtet URL-Auflösung. Pw-Min auf 8 Zeichen. Login-Page-Link prominent unter Pw-Feld. Middleware-Whitelist verifiziert. Reset-Mail-Template (Bestand) wiederverwendet. |
-| US-31 | Neuer NextAuth-Customer-Handler unter `/api/auth/customer/[...nextauth]` mit Google + GitHub. Account-Verknüpfung per E-Mail. Custom-JWT-Cookie weiterhin Authority. `CustomerUser.passwordHash` nullable + neue OAuth-Felder. Login-Page mit OAuth-Buttons. Profil-Page versteckt Pw-Feld bei OAuth-only. Fehlercode `OAUTH_ONLY_ACCOUNT`. |
-| US-32 | Drei neue Adressfelder im Booking-Modell + Schema. `BookingForm` mit Pflicht-Inputs + 5-stellige PLZ-Validierung. Admin-Liste/Detail + Kunden-Detail zeigen Adresse. |
-| US-33 | `Booking.durationMinutes` neu. `<DurationPicker>` mit 8 Kacheln + Preisschätzung. Slot-API erweitert um `?duration=`. Backend berechnet `endTime` (Authority). Ganztag-Sonderwert reserviert volles Fenster. Admin-Liste/Detail zeigt Dauer. |
-| US-34 | `BufferConfig`-Singleton, Default 30. `GET/PUT /api/admin/buffer-config`. Slot-Berechnung berücksichtigt Buffer nur nach CONFIRMED. Admin-UI mit Dropdown. Buffer-Visualisierung im Admin-Kalender. Whitelist [0,15,30,45,60]. |
-
----
-
-## 19. Iteration 6 — Technisches Design (US-IT6-01 bis US-IT6-09)
-
-**Version:** 1.6.0 (Iteration 6 — Admin-Reife, Auth-Bereinigung, SEO,
-Wachstums-Features). **Stand:** 2026-05-03.
-
-> Die vollständige Spec für Iteration 6 lebt in einem **separaten
-> Dokument**: [`ARCHITECTURE_IT6.md`](./ARCHITECTURE_IT6.md).
-> Begründung: das vorliegende ARCHITECTURE.md ist mit ~4.000 Zeilen
-> bereits sehr groß; ein dediziertes IT6-Doc bleibt navigierbar und
-> erlaubt Engineers, beim Build zwischen IT1–IT5-Bestand und IT6-
-> Neuem klar zu trennen.
-
-### 19.1 Inhalts-Überblick `ARCHITECTURE_IT6.md`
-
-| Kap. | Story        | Inhalt                                                                              |
-| ---- | ------------ | ----------------------------------------------------------------------------------- |
-| §1   | —            | Architektur-Entscheidungen, Stack-Beibehaltung, neue Libs.                          |
-| §2   | —            | Datenmodell-Migration: 5 Migrationen + Backfill-Logik.                              |
-| §3   | US-IT6-01    | Multi-Admin: `User.status`/`createdById`/`lastLoginAt`, Lock-out-Schutz, 4 Routes.  |
-| §4   | US-IT6-02    | Kalender-UX mit `@fullcalendar/react`; Aggregator-Endpoint; Kunden-Monatsansicht.  |
-| §5   | US-IT6-03    | Reviews mit COMPLETED-Trigger + Reject-Spur (`rejectedAt`/`moderatedById`).        |
-| §6   | US-IT6-04    | SEO: `sitemap.ts`, `robots.ts`, JSON-LD-Wrapper, Service-Detail-Pages, ISR.         |
-| §7   | US-IT6-05    | Auth-Bereinigung: GitHub raus, Facebook rein, Google-Bad-Request-Diagnose-Liste.    |
-| §8   | US-IT6-06    | User-Wipe-Skript `scripts/reset-users.ts` mit ENV-Gate.                             |
-| §9   | US-IT6-07    | Admin-Userverwaltung mit DTO-Trennung (`CustomerUserAdminSchema`).                  |
-| §10  | US-IT6-08    | `Booking.finalPriceEur` (Decimal) + `finalPriceNote`, customer-API filtert es aus.  |
-| §11  | US-IT6-09    | Analytics-Page mit `lib/analytics.ts`, recharts in Client-Inseln.                   |
-| §12  | Querschnitt  | `requireAdmin()`-Helper in `src/lib/auth-server.ts` (verbindlich).                  |
-| §13  | —            | Migrations-Reihenfolge & Roll-out-Phasen.                                           |
-| §14  | —            | Test-Plan IT6 inkl. DTO-Leak-Tests und Pressure-Tests.                              |
-| §15  | —            | Annahmen, NEEDS INPUT, Risiken (R1 DTO-Leak, R2 Auth-Reihenfolge, R3 Lock-out).     |
-| §16  | —            | Akzeptanzkriterien-Mapping IT6.                                                     |
-
-### 19.2 Begleitende Updates der Contracts
-
-- `contracts/schema.prisma` (v1.6) — `User.status`/`createdById`/`lastLoginAt`, `CustomerUser.adminNote`/`adminRating`, `Booking.finalPriceEur`/`finalPriceNote`, `Review.rejectedAt`/`moderatedById`/`moderatedAt`, neuer Enum `UserStatus`, neue Indexe.
-- `contracts/api-routes.md` (v1.6) — neuer Abschnitt §22 mit allen IT6-Endpoints (siehe §22.1 Multi-Admin, §22.2 Kalender, §22.3 Reviews, §22.4 Userverwaltung, §22.5 Final-Preis, §22.6 Analytics, §22.7 Story-Matrix, §22.8 Aufrufer-Mapping, §22.9 ENV-Variablen, §22.10 Rate-Limits).
-- `contracts/zod-schemas.ts` (v1.6) — neue Schemas am Dateiende; bestehende IT5-Konstanten unverändert; Engineering-Hinweis zur GitHub→Facebook-Umstellung.
-
-### 19.3 Akzeptanzkriterien-Mapping IT6 (Kurzfassung)
-
-Vollständiges Mapping siehe `ARCHITECTURE_IT6.md` §16.
-
-| Story        | Erfüllt durch                                                                                                                                |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| US-IT6-01    | `User.status` + 4 Admin-Routes + Lock-out-Schutz + Login-Status-Gate.                                                                       |
-| US-IT6-02    | FullCalendar-Integration; `/api/admin/calendar/events`-Aggregator; `/api/availability/calendar` für Kunden-Monatsansicht; Drag-to-create.   |
-| US-IT6-03    | `Review.rejectedAt`+Audit-Spalten; `POST /api/customer/reviews` prüft `COMPLETED`; `GET /api/reviews` filtert hart auf `approved AND !rejectedAt`. |
-| US-IT6-04    | `app/sitemap.ts`, `app/robots.ts`, `generateMetadata` pro Page, `<JsonLd>`-Wrapper, `next/image`+ISR, neue Service-Detail-Pages.            |
-| US-IT6-05    | NextAuth-Customer auf Google+Facebook reduziert; alle Email/Pw-Routes/Pages gelöscht (404). Diagnose-Checkliste für Google-Bad-Request.     |
-| US-IT6-06    | `scripts/reset-users.ts` mit `ALLOW_USER_WIPE`-ENV-Gate, Cascade-Reihenfolge Reviews → Bookings (anonymize/cancel) → CustomerUsers → Users. |
-| US-IT6-07    | `CustomerUser.adminNote`/`adminRating` neu; DTO-Trennung `CustomerUserPublicSchema` vs. `CustomerUserAdminSchema`; `/admin/users`-Page.     |
-| US-IT6-08    | `Booking.finalPriceEur` Decimal; `PATCH /api/admin/bookings/:id` erweitert; UI-Eingabe + Liste-Spalte; Customer-API filtert das Feld aus.   |
-| US-IT6-09    | Page `/admin/analytics` Server-Component; Prisma-Aggregationen + Raw-SQL-Monatsumsätze; recharts Client-Inseln; Empty-State.                |
+*Ende — ARCHITECTURE.md (Konsolidierung, Stand IT12, 2026-05-04).*

@@ -133,9 +133,41 @@ export function LoginForm() {
     }
   });
 
-  const handleOAuthClick = (provider: Provider) => {
+  const handleOAuthClick = async (provider: Provider) => {
     setPendingProvider(provider);
-    window.location.href = `${CUSTOMER_AUTH_BASE_PATH}/${provider}`;
+    try {
+      const csrfRes = await fetch(`${CUSTOMER_AUTH_BASE_PATH}/csrf`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (!csrfRes.ok) throw new Error('csrf_fetch_failed');
+      const { csrfToken } = (await csrfRes.json()) as { csrfToken?: string };
+      if (!csrfToken) throw new Error('csrf_token_missing');
+
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = `${CUSTOMER_AUTH_BASE_PATH}/signin/${provider}`;
+      form.style.display = 'none';
+
+      const csrfInput = document.createElement('input');
+      csrfInput.type = 'hidden';
+      csrfInput.name = 'csrfToken';
+      csrfInput.value = csrfToken;
+      form.appendChild(csrfInput);
+
+      const callbackInput = document.createElement('input');
+      callbackInput.type = 'hidden';
+      callbackInput.name = 'callbackUrl';
+      callbackInput.value = `${window.location.origin}/konto/oauth-erfolg`;
+      form.appendChild(callbackInput);
+
+      document.body.appendChild(form);
+      form.submit();
+    } catch {
+      setPendingProvider(null);
+      setServerError('Anmeldung konnte nicht gestartet werden. Bitte erneut versuchen.');
+    }
   };
 
   return (

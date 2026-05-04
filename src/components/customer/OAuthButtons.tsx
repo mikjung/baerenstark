@@ -1,21 +1,11 @@
 'use client';
 
 /**
- * OAuthButtons — Iteration 5 (US-31).
+ * OAuthButtons — Customer Google/GitHub-Login.
  *
- * Wiederverwendbare Google/GitHub-Anmeldebuttons unter `/konto/login` und
- * `/konto/registrieren`.
- *
- * Strategie (siehe ARCHITECTURE.md §18.2.4):
- *   Wir leiten direkt zur OAuth-Provider-Route der Customer-NextAuth-Instanz
- *   weiter (`/api/auth/customer/<provider>`). Das vermeidet zwei
- *   `SessionProvider`-Instanzen (Admin + Customer) auf dem Client und ist
- *   für reines OAuth-Login (kein Session-Read) ausreichend.
- *
- * Feature-Flag:
- *   `NEXT_PUBLIC_FEATURE_OAUTH_LOGIN === 'true'` aktiviert die Buttons.
- *   Die Variable wird in `next.config.js` aus `GOOGLE_CLIENT_ID` abgeleitet,
- *   damit die UI nur erscheint, wenn ein Provider konfiguriert ist.
+ * NextAuth v5 (Auth.js) erwartet bei Provider-Sign-In ein POST an
+ * `signin/<provider>` mit CSRF-Token im Body. Ein direkter GET an
+ * `/api/auth/customer/<provider>` führt zu `UnknownAction`.
  */
 
 import { useState } from 'react';
@@ -23,38 +13,84 @@ import { useState } from 'react';
 type Provider = 'google' | 'github';
 
 interface OAuthButtonsProps {
-  /** Optional: Header-Text über den Buttons. Default: kein Header. */
   heading?: string;
 }
 
-/**
- * Custom NextAuth-Customer-Basispfad. Backend-Handler liegt auf
- * `/api/auth/customer/[...nextauth]/route.ts` (siehe §18.2.2).
- */
 const CUSTOMER_AUTH_BASE_PATH = '/api/auth/customer';
 
 function isOAuthEnabled(): boolean {
   return process.env.NEXT_PUBLIC_FEATURE_OAUTH_LOGIN === 'true';
 }
 
+async function fetchCustomerCsrfToken(): Promise<string> {
+  const res = await fetch(`${CUSTOMER_AUTH_BASE_PATH}/csrf`, {
+    method: 'GET',
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    throw new Error(`csrf_fetch_failed_${res.status}`);
+  }
+  const data = (await res.json()) as { csrfToken?: string };
+  if (!data.csrfToken) {
+    throw new Error('csrf_token_missing');
+  }
+  return data.csrfToken;
+}
+
+function submitProviderSignInForm(provider: Provider, csrfToken: string) {
+  const callbackUrl = `${window.location.origin}/konto/oauth-erfolg`;
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = `${CUSTOMER_AUTH_BASE_PATH}/signin/${provider}`;
+  form.style.display = 'none';
+
+  const csrfInput = document.createElement('input');
+  csrfInput.type = 'hidden';
+  csrfInput.name = 'csrfToken';
+  csrfInput.value = csrfToken;
+  form.appendChild(csrfInput);
+
+  const callbackInput = document.createElement('input');
+  callbackInput.type = 'hidden';
+  callbackInput.name = 'callbackUrl';
+  callbackInput.value = callbackUrl;
+  form.appendChild(callbackInput);
+
+  document.body.appendChild(form);
+  form.submit();
+}
+
 export function OAuthButtons({ heading }: OAuthButtonsProps) {
   const [pending, setPending] = useState<Provider | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   if (!isOAuthEnabled()) {
     return null;
   }
 
-  const handleClick = (provider: Provider) => {
+  const handleClick = async (provider: Provider) => {
     setPending(provider);
-    // Direkter Browser-Navigations-Trigger an den Customer-NextAuth-Handler.
-    // NextAuth übernimmt von dort den OAuth-Flow (PKCE, state, callback).
-    window.location.href = `${CUSTOMER_AUTH_BASE_PATH}/${provider}`;
+    setError(null);
+    try {
+      const csrfToken = await fetchCustomerCsrfToken();
+      submitProviderSignInForm(provider, csrfToken);
+    } catch {
+      setPending(null);
+      setError('Anmeldung konnte nicht gestartet werden. Bitte erneut versuchen.');
+    }
   };
 
   return (
     <div className="space-y-3">
       {heading && (
         <p className="text-sm font-medium text-baerenstark-bark/80">{heading}</p>
+      )}
+
+      {error && (
+        <p role="alert" className="text-sm text-red-600">
+          {error}
+        </p>
       )}
 
       <button
