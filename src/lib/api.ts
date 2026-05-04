@@ -253,9 +253,20 @@ export function internalError(
     err,
   );
 
+  // TEMP IT13 diagnostic: echo error class + message + Prisma code via
+  // header so the operator can pinpoint the throw without Vercel-Log access.
+  // Header is safe (no stack, no PII), gated by env flag for opt-out.
+  const diagHeaders: Record<string, string> = { 'X-Request-Id': requestId };
+  if (process.env.IT13_ECHO_ERROR !== '0') {
+    const code = (err as { code?: string } | null)?.code;
+    const safeName = String(name).slice(0, 64);
+    const safeMessage = String(message).slice(0, 240).replace(/[\r\n\t]+/g, ' ');
+    diagHeaders['X-Diag-Error'] = `${safeName}${code ? `:${code}` : ''} | ${safeMessage}`;
+  }
+
   return apiError({
     code: 'INTERNAL_ERROR',
     message: 'Interner Serverfehler. Bitte später erneut versuchen.',
-    headers: { 'X-Request-Id': requestId },
+    headers: diagHeaders,
   });
 }
