@@ -244,6 +244,16 @@ model Booking {
   /// (App-Layer). NIEMALS customer-facing.
   finalPriceNote String?
 
+  // IT11 / US-IT11-06 — Audit-Trail für Stornierungen.
+  /// Zeitpunkt der Stornierung (UTC). NULL solange nicht storniert.
+  cancelledAt        DateTime?
+  /// Initiator: 'CUSTOMER' (eingeloggt oder via Gast-Token), 'ADMIN' (Tom),
+  /// 'SYSTEM' (zukünftig: Auto-Cleanup). App-Layer-Validation via Zod.
+  cancelledBy        String?
+  /// Optionaler Freitext (max 500 chars, App-Layer). Customer kann optional
+  /// einen Grund eintragen.
+  cancellationReason String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

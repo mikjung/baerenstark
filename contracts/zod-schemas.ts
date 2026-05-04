@@ -973,6 +973,14 @@ export type CalendarQueryInput = z.infer<typeof CalendarQuerySchema>;
 // Iteration 3 — Datei-Upload (unverändert)
 // ---------------------------------------------------------------------------
 
+/**
+ * @deprecated IT11 / US-IT11-04: ersetzt durch Split-by-MIME-Limits
+ *   `UPLOAD_MAX_IMAGE_BYTES` (10 MB) / `UPLOAD_MAX_VIDEO_BYTES` (50 MB) /
+ *   `UPLOAD_MAX_DOCUMENT_BYTES` (10 MB). Helper-Funktion
+ *   `getUploadLimitForType(contentType)` liefert das richtige Limit pro
+ *   MIME-Type. Diese Konstante bleibt für Bestand-Code-Pfade (FileUpload.tsx
+ *   Bestand-Branch) referenzierbar — entfernen in IT12.
+ */
 export const UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const UPLOAD_MAX_FILES_PER_BOOKING = 5;
 export const UPLOAD_ACCEPTED_CONTENT_TYPES = [
@@ -985,6 +993,64 @@ export const UPLOAD_ACCEPTED_CONTENT_TYPES = [
   'application/pdf',
 ] as const;
 export type UploadContentType = (typeof UPLOAD_ACCEPTED_CONTENT_TYPES)[number];
+
+/** IT11 / US-IT11-04: 10 MB für Bilder (image/*). */
+export const UPLOAD_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+/** IT11 / US-IT11-04: 50 MB für Videos (video/*). */
+export const UPLOAD_MAX_VIDEO_BYTES = 50 * 1024 * 1024;
+/** IT11 / US-IT11-04: 10 MB für PDFs (application/pdf). */
+export const UPLOAD_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+
+/**
+ * IT11 / US-IT11-04 v3 — Maximale Anzahl gleichzeitig laufender Uploads
+ * (Client-Side-Semaphore in `FileUpload`). Architektur-Spec
+ * `ARCHITECTURE_IT11.md` §4.3.1.
+ */
+export const UPLOAD_MAX_PARALLEL = 3;
+
+/**
+ * Liefert das passende Upload-Limit (Bytes) für einen MIME-Type.
+ * Nicht-akzeptierte Types liefern `null`.
+ *
+ *   image/*           → UPLOAD_MAX_IMAGE_BYTES   (10 MB)
+ *   video/*           → UPLOAD_MAX_VIDEO_BYTES   (50 MB)
+ *   application/pdf   → UPLOAD_MAX_DOCUMENT_BYTES (10 MB)
+ *   sonstige          → null
+ */
+export function getUploadLimitForType(contentType: string): number | null {
+  if (!contentType) return null;
+  const ct = contentType.toLowerCase();
+  if (ct.startsWith('image/')) return UPLOAD_MAX_IMAGE_BYTES;
+  if (ct.startsWith('video/')) return UPLOAD_MAX_VIDEO_BYTES;
+  if (ct === 'application/pdf') return UPLOAD_MAX_DOCUMENT_BYTES;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// IT11 / US-IT11-06 — Storno-Audit
+// ---------------------------------------------------------------------------
+
+/**
+ * Quelle der Stornierung. Engineering-Convention:
+ *   'CUSTOMER' = Kunde via Login-Cookie ODER Gast-Token (siehe ARCH §6.4 v3).
+ *   'ADMIN'    = Tom über Admin-PATCH.
+ *   'SYSTEM'   = Auto-Cleanup (zukünftig).
+ */
+export const CancelledBySchema = z.enum(['CUSTOMER', 'ADMIN', 'SYSTEM']);
+export type CancelledBy = z.infer<typeof CancelledBySchema>;
+
+/** Body für `POST /api/bookings/[id]/cancel`. */
+export const CancelBookingBodySchema = z
+  .object({
+    reason: z
+      .string()
+      .trim()
+      .max(500, 'Maximal 500 Zeichen.')
+      .optional()
+      .transform((v) => (v && v.length > 0 ? v : undefined)),
+  })
+  .strict();
+export type CancelBookingBody = z.infer<typeof CancelBookingBodySchema>;
 
 export const UploadResponseSchema = z.object({
   attachmentId: z.string(),

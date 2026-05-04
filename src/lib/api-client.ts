@@ -228,6 +228,24 @@ export interface CreateBookingResponse {
   id: string;
   status: BookingStatus;
   createdAt: string;
+  /**
+   * IT11 / US-IT11-03 (v3) — signierter JWT für die reload-feste Bestätigungs-
+   * Seite (`/buchung/bestaetigung/[id]?token=...`). Gültigkeit 30 Tage. Optional,
+   * weil ältere Backend-Versionen ohne IT11-Token noch antworten.
+   */
+  confirmationToken?: string;
+  /**
+   * IT11 / US-IT11-06 (v3) — signierter JWT für die Gast-Storno-Seite
+   * (`/buchung/[id]/stornieren?token=...`). Gültigkeit 30 Tage.
+   */
+  cancellationToken?: string;
+  /**
+   * IT11 / BUG-MAJOR-03 — `true` wenn der POST in das 60-Sekunden-Doppel-
+   * Submit-Window gelaufen ist und der Server die existierende Buchung
+   * idempotent zurückgegeben hat. Frontend kann das ignorieren und ganz
+   * normal redirecten.
+   */
+  deduplicated?: boolean;
 }
 
 /**
@@ -789,6 +807,122 @@ export async function cancelCustomerBooking(
   const res = await request<DataEnvelope<CancelCustomerBookingResponse>>(
     `/api/customer/bookings/${encodeURIComponent(bookingId)}/cancel`,
     { method: 'POST' },
+  );
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Iteration 11 — Public Booking Summary + Cancel-Endpoints (US-IT11-03 + 06)
+// ---------------------------------------------------------------------------
+
+/**
+ * IT11 / US-IT11-03 — minimal-DTO für die reload-feste Bestätigungsseite und
+ * die Storno-Page-Preview. Keine PII außer dem vom Kunden selbst eingegebenen
+ * Display-Namen. Quelle: ARCHITECTURE_IT11.md §3.5.
+ */
+export interface BookingPublicSummary {
+  id: string;
+  service: string;
+  /** YYYY-MM-DD oder null (z.B. bei Bestand-Buchungen ohne Date-Mode-Felder). */
+  date: string | null;
+  /** HH:MM oder null. */
+  startTime: string | null;
+  status: BookingStatus;
+  createdAt: string;
+  customerName: string;
+}
+
+/**
+ * IT11 / US-IT11-03 + 06 — reload-feste Bestätigung und Cancel-Preview.
+ * Akzeptiert sowohl `booking-confirmation`- als auch `booking-cancellation`-
+ * Tokens (v3 Scope-Polymorphismus, ARCHITECTURE_IT11 §3.5).
+ *
+ * Aufgerufen primär aus den Server-Components `/buchung/bestaetigung/[id]` und
+ * `/buchung/[id]/stornieren`. Auch aus Client-Components (z.B. nach Token-
+ * Refresh) verwendbar.
+ *
+ * @param id        Buchungs-ID (CUID).
+ * @param token     Optional bei eingeloggten Kunden (Auth-Cookie reicht).
+ *                  Pflicht bei Gast-Kontext.
+ */
+export async function getBookingPublicSummary(
+  id: string,
+  token?: string,
+): Promise<BookingPublicSummary> {
+  const path = `/api/bookings/${encodeURIComponent(id)}/public-summary${
+    token ? `?token=${encodeURIComponent(token)}` : ''
+  }`;
+  const res = await request<DataEnvelope<BookingPublicSummary>>(path, {
+    method: 'GET',
+  });
+  return res.data;
+}
+
+/**
+ * IT11 / US-IT11-06 — Cancel-Response. Schema gleich für eingeloggten Cancel
+ * (über `/api/bookings/[id]/cancel` mit Cookie) und Gast-Cancel (mit Token).
+ * Quelle: contracts/bookings-cancel.openapi.yaml §200.
+ */
+export interface CancelBookingResponse {
+  id: string;
+  status: 'CANCELLED';
+  cancelledAt: string;
+  /**
+   * `true` wenn ein zweiter Aufruf eine bereits stornierte Buchung getroffen
+   * hat — keine zweite Tom-Mail, kein zweiter Status-Update.
+   */
+  alreadyCancelled: boolean;
+}
+
+/**
+ * IT11 / US-IT11-06 — eingeloggter Customer-Cancel über den **kanonischen**
+ * Endpoint `/api/bookings/[id]/cancel` (Auth-Polymorphismus mit Cookie ODER
+ * Token). Wird aus dem `/konto`-Dashboard aufgerufen.
+ *
+ * Antwort 200 mit `alreadyCancelled: true` bei Idempotenz; 409 bei Frist
+ * abgelaufen oder Status nicht stornierbar; 401 bei Session-Ablauf.
+ */
+export async function cancelBookingAsCustomer(
+  bookingId: string,
+  reason?: string,
+): Promise<CancelBookingResponse> {
+  const body =
+    reason && reason.trim().length > 0 ? { reason: reason.trim() } : undefined;
+  const res = await request<DataEnvelope<CancelBookingResponse>>(
+    `/api/bookings/${encodeURIComponent(bookingId)}/cancel`,
+    {
+      method: 'POST',
+      body,
+    },
+  );
+  return res.data;
+}
+
+/**
+ * IT11 / US-IT11-06 — Gast-Cancel über den kanonischen Endpoint mit signiertem
+ * Token in der Query. **Niemals als GET aufrufen** (Mail-Scanner-Race-Schutz,
+ * ARCH §6.3) — der Storno wird ausschließlich nach explizitem User-Klick als
+ * POST abgesendet.
+ *
+ * @param bookingId  Buchungs-ID aus dem Path.
+ * @param token      Signierter JWT mit Scope `booking-cancellation`.
+ * @param reason     Optionaler Storno-Grund (max. 500 Zeichen).
+ */
+export async function cancelBookingAsGuest(
+  bookingId: string,
+  token: string,
+  reason?: string,
+): Promise<CancelBookingResponse> {
+  const body =
+    reason && reason.trim().length > 0 ? { reason: reason.trim() } : undefined;
+  const res = await request<DataEnvelope<CancelBookingResponse>>(
+    `/api/bookings/${encodeURIComponent(bookingId)}/cancel?token=${encodeURIComponent(
+      token,
+    )}`,
+    {
+      method: 'POST',
+      body,
+    },
   );
   return res.data;
 }

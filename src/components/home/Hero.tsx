@@ -1,8 +1,22 @@
+'use client';
+
+/**
+ * Hero — Startseite-Header.
+ *
+ * IT11 / US-IT11-02:
+ *   - Primärer CTA „Jetzt Termin buchen" öffnet jetzt das globale Booking-
+ *     Modal über `useBookingDialog().open()` statt zu `/buchung` zu
+ *     navigieren.
+ *   - Sekundärer Tel-CTA bleibt unverändert.
+ */
+
 import Image from 'next/image';
-import Link from 'next/link';
+import { useBookingDialog } from '@/components/booking/use-booking-dialog';
 import { CONTACT } from '@/lib/contact';
 
 export function Hero() {
+  const { open } = useBookingDialog();
+
   return (
     <section
       aria-labelledby="hero-title"
@@ -24,18 +38,21 @@ export function Hero() {
             zuverlässig, fair und transparent von {CONTACT.ownerName}.
           </p>
           <div className="flex flex-col gap-3 sm:flex-row">
-            <Link
-              href="/buchung"
+            <button
+              type="button"
+              onClick={() => open()}
+              aria-haspopup="dialog"
               className="inline-flex items-center justify-center rounded-lg bg-baerenstark-wood px-6 py-3 text-base font-medium text-baerenstark-cream shadow-soft transition-colors hover:bg-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
             >
               Jetzt Termin buchen
-            </Link>
+            </button>
             <a
               href={`tel:${CONTACT.phoneTel}`}
               className="inline-flex items-center justify-center rounded-lg border-2 border-baerenstark-wood px-6 py-3 text-base font-medium text-baerenstark-bark transition-colors hover:bg-baerenstark-sand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
               aria-label={`Anrufen unter ${CONTACT.phoneDisplay}`}
             >
-              📞 {CONTACT.phoneDisplay}
+              <span aria-hidden="true">📞 </span>
+              {CONTACT.phoneDisplay}
             </a>
           </div>
         </div>

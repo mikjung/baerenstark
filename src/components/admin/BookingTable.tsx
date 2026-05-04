@@ -16,6 +16,7 @@ import {
   formatBerlinDateShort,
   formatDateTime,
   formatSlotRangeCompact,
+  humanSize,
 } from '@/lib/format';
 import type { BookingAdmin, BookingStatus } from '@/lib/schemas';
 import { getServiceLabel } from '@/lib/services';
@@ -351,40 +352,78 @@ export function BookingTable() {
                         {b.description}
                       </dd>
                     </div>
-                    {b.attachments && b.attachments.length > 0 && (
-                      <div className="sm:col-span-2">
-                        <dt className="font-medium text-baerenstark-bark/70">
-                          Anhänge ({b.attachments.length})
-                        </dt>
+                    {/* IT11 / US-IT11-04 — Anhang-Anzeige mit Thumbnail,
+                        Dateigröße und Empty-State. Lightbox out-of-scope (IT12). */}
+                    <div className="sm:col-span-2">
+                      <dt className="font-medium text-baerenstark-bark/70">
+                        Anhänge
+                        {b.attachments.length > 0
+                          ? ` (${b.attachments.length})`
+                          : ''}
+                      </dt>
+                      {b.attachments.length === 0 ? (
+                        <dd className="text-baerenstark-bark/60">
+                          Keine Dateien hochgeladen
+                        </dd>
+                      ) : (
                         <dd>
-                          <ul role="list" className="mt-1 flex flex-wrap gap-2">
-                            {b.attachments.map((att) => (
-                              <li key={att.id}>
-                                <a
-                                  href={att.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1.5 rounded-md border border-baerenstark-sand bg-white/80 px-2 py-1 text-xs text-baerenstark-bark hover:border-baerenstark-wood hover:bg-baerenstark-sand/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
-                                >
-                                  <span aria-hidden="true">
-                                    {att.contentType.startsWith('image/')
-                                      ? '🖼️'
-                                      : att.contentType === 'application/pdf'
-                                        ? '📄'
-                                        : att.contentType.startsWith('video/')
-                                          ? '🎬'
-                                          : '📎'}
-                                  </span>
-                                  <span className="max-w-[16ch] truncate">
-                                    {att.filename}
-                                  </span>
-                                </a>
-                              </li>
-                            ))}
+                          <ul
+                            role="list"
+                            className="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-2"
+                          >
+                            {b.attachments.map((att) => {
+                              const isImage = att.contentType.startsWith('image/');
+                              const isVideo = att.contentType.startsWith('video/');
+                              const icon = isImage
+                                ? '🖼️'
+                                : att.contentType === 'application/pdf'
+                                  ? '📄'
+                                  : isVideo
+                                    ? '🎬'
+                                    : '📎';
+                              return (
+                                <li key={att.id}>
+                                  <a
+                                    href={att.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flex items-center gap-3 rounded-md border border-baerenstark-sand bg-white/80 p-2 text-xs text-baerenstark-bark hover:border-baerenstark-wood hover:bg-baerenstark-sand/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
+                                  >
+                                    {isImage ? (
+                                      // eslint-disable-next-line @next/next/no-img-element
+                                      <img
+                                        src={att.url}
+                                        alt=""
+                                        loading="lazy"
+                                        className="h-15 w-15 flex-none rounded-md object-cover"
+                                        style={{ height: 60, width: 60 }}
+                                      />
+                                    ) : (
+                                      <span
+                                        aria-hidden="true"
+                                        className="flex flex-none items-center justify-center rounded-md bg-baerenstark-sand/60 text-2xl"
+                                        style={{ height: 60, width: 60 }}
+                                      >
+                                        {icon}
+                                      </span>
+                                    )}
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate font-medium">
+                                        {att.filename}
+                                      </span>
+                                      <span className="block text-baerenstark-bark/60">
+                                        {humanSize(att.sizeBytes)} ·{' '}
+                                        {att.contentType}
+                                      </span>
+                                    </span>
+                                  </a>
+                                </li>
+                              );
+                            })}
                           </ul>
                         </dd>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </dl>
 
                   {isCounterProposed && b.counterProposalSlot && (

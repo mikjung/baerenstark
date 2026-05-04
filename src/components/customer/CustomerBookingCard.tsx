@@ -22,9 +22,9 @@ import { useState } from 'react';
 import { Badge } from '@/components/ui/Badge';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { CancelConfirmationDialog } from '@/components/booking/CancelConfirmationDialog';
 import { BookingStatusBadge } from '@/components/customer/BookingStatusBadge';
-import { ApiClientError, cancelCustomerBooking } from '@/lib/api-client';
+import { ApiClientError, cancelBookingAsCustomer } from '@/lib/api-client';
 import {
   formatBerlinDateLong,
   formatCentsAsEuro,
@@ -32,6 +32,8 @@ import {
 } from '@/lib/customer-portal';
 import type { CustomerBooking } from '@/lib/schemas';
 import { getServiceLabel } from '@/lib/services';
+import { toast } from '@/lib/toast';
+import { CONTACT } from '@/lib/contact';
 import { ReviewForm } from '@/components/portal/ReviewForm';
 
 interface CustomerBookingCardProps {
@@ -52,11 +54,14 @@ export function CustomerBookingCard({
 
   const isPast = variant === 'past';
 
-  const onCancelConfirm = async () => {
+  const onCancelConfirm = async (reason?: string) => {
     setCancelling(true);
     setCancelError(null);
     try {
-      const res = await cancelCustomerBooking(booking.id);
+      // IT11 / US-IT11-06 — kanonischer Endpoint mit optionalem Reason.
+      const res = await cancelBookingAsCustomer(booking.id, reason);
+      // Optimistic UI-Update: Status sofort auf CANCELLED, Stornieren-Button
+      // verschwindet, Erfolgs-Toast.
       onChange({
         ...booking,
         status: res.status,
@@ -65,15 +70,23 @@ export function CustomerBookingCard({
         updatedAt: res.cancelledAt,
       });
       setConfirmOpen(false);
+      if (res.alreadyCancelled) {
+        toast.info('Diese Anfrage war bereits storniert.');
+      } else {
+        toast.success('Auftrag storniert.');
+      }
     } catch (err) {
       if (err instanceof ApiClientError) {
         if (err.status === 409) {
           setCancelError(
             err.message ||
-              'Stornierung nicht mehr möglich. Bitte rufe uns an: 0157-74787512.',
+              `Stornierung nicht mehr möglich. Bitte rufen Sie uns an: ${CONTACT.phoneDisplay}.`,
+          );
+          toast.error(
+            `Stornierung nicht mehr möglich. Bitte rufen Sie ${CONTACT.phoneDisplay} an.`,
           );
         } else if (err.status === 401) {
-          setCancelError('Bitte logge dich erneut ein.');
+          setCancelError('Bitte loggen Sie sich erneut ein.');
         } else {
           setCancelError(err.message);
         }
@@ -194,13 +207,13 @@ export function CustomerBookingCard({
           Details ansehen →
         </Link>
 
-        {/* Stornieren-Button (US-27) — nur wenn isCancellable */}
+        {/* Stornieren-Button (US-27 / US-IT11-06) — nur wenn isCancellable */}
         {booking.isCancellable && (
           <Button
             variant="ghost"
             size="sm"
             onClick={() => setConfirmOpen(true)}
-            aria-label="Termin stornieren"
+            aria-label={`Anfrage ${serviceLabel} am ${dateLabel} stornieren`}
           >
             Stornieren
           </Button>
@@ -212,7 +225,7 @@ export function CustomerBookingCard({
           variant === 'upcoming' && (
             <p className="text-xs text-baerenstark-bark/60">
               Stornierung nur bis 24 Stunden vor dem Termin möglich. Bitte
-              rufe uns an: 0157-74787512.
+              rufen Sie uns an: {CONTACT.phoneDisplay}.
             </p>
           )}
 
@@ -263,23 +276,22 @@ export function CustomerBookingCard({
         </div>
       )}
 
-      <ConfirmDialog
-        open={confirmOpen}
-        title="Termin stornieren?"
-        description={`Möchtest du deinen Termin am ${dateLabel}${
-          timeLabel ? ` (${timeLabel})` : ''
-        } wirklich stornieren?`}
-        confirmLabel="Ja, stornieren"
-        cancelLabel="Abbrechen"
-        variant="danger"
-        isLoading={cancelling}
-        onConfirm={onCancelConfirm}
-        onCancel={() => {
+      <CancelConfirmationDialog
+        isOpen={confirmOpen}
+        onClose={() => {
           if (!cancelling) {
             setConfirmOpen(false);
             setCancelError(null);
           }
         }}
+        onConfirm={onCancelConfirm}
+        booking={{
+          service: booking.service,
+          date: booking.date,
+          startTime: booking.startTime,
+        }}
+        isSubmitting={cancelling}
+        errorMessage={cancelError}
       />
     </article>
   );

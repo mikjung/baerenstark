@@ -1,31 +1,38 @@
 'use client';
 
 /**
- * QuickBookingModal — Iteration 10 / US-IT10-04.
+ * QuickBookingModal — IT10 (US-IT10-04) + IT11 (US-IT11-02 + 03 + 04 + 05).
  *
- * Spec:
- *   `project/design/ux/component-library-iteration-10.md` §1.
- *   `project/design/ux/ux-spec-iteration-10.md` §5.
- *   `ARCHITECTURE_IT10.md` §2.1 + §9.2.
+ * Modes:
+ *   - `'embedded'` (Default, IT10): Slot kommt vom Parent (`/buchung`-Page),
+ *     Modal zeigt nur das Form. Verhalten unverändert.
+ *   - `'standalone'` (IT11): Modal rendert intern Service-Picker + Kalender +
+ *     Slot-Picker + Form (Steps A–D in einer scrollbaren Liste). Wird vom
+ *     `<BookingDialogProvider>` aus Header-/Hero-CTAs geöffnet.
  *
- * Verhalten (verbindlich):
- *   - Slot-Klick im Kalender öffnet das Modal IMMER, unabhängig davon, ob
- *     vorher ein Service ausgewählt wurde (Service ist Pflicht-Feld im Body,
- *     nicht mehr im Header).
- *   - Service ist Pflicht-Feld; Submit ist disabled, solange leer (zusätzlich
- *     zu allen anderen Pflichtfeld-Validierungen).
- *   - Bei `defaultService` wird der Service vorausgewählt.
- *   - Mobile: Bottom-Sheet. Desktop: zentriertes Modal.
- *   - Form-State persistiert über Open/Close (siehe Spec §5.7).
- *   - 409 + `subcode === 'BOOKING_SLOT_TAKEN'` (Fallback: code === 'CONFLICT'
- *     + field === 'date') → Slot-Belegt-Banner mit „Anderen Slot wählen"-CTA.
- *   - 5xx → freundliche Microcopy mit Telefon-CTA, NIE „Interner Serverfehler".
- *   - Erfolg → Modal schließt, Toast „Anfrage gesendet …".
+ * IT11-Verhalten:
+ *   - **FileUpload** zwischen „Beschreibung" und „Datenschutz" — in beiden Modes.
+ *   - **Submit-Block:** während Submit (`state.kind === 'submitting'`) ignoriert
+ *     das Modal Escape und Backdrop-Click (Prop `closeOnEscape={false}` /
+ *     `closeOnBackdrop={false}` am `<Modal>`).
+ *   - **Erfolgs-Redirect:** nach `201 Created` ruft das Modal
+ *     `useBookingDialog().reset()` auf (Form-Remount) UND macht
+ *     `router.push('/buchung/bestaetigung/<id>?token=<jwt>')`.
+ *   - **Fallback ohne Token:** wenn das Backend (noch) keinen
+ *     `confirmationToken` zurückgibt, redirected das Modal trotzdem auf die
+ *     Confirmation-Seite ohne Token-Param — die Server-Component fällt dann
+ *     auf den Auth-Cookie-Pfad zurück (eingeloggte Kunden) ODER zeigt die
+ *     `<TokenExpiredPage>`-UI mit Telefonnummer (Gäste).
+ *   - **Erfolgs-Toast:** „Anfrage gesendet — Tom meldet sich innerhalb von
+ *     24h" + Action-Button „Anrufen" mit `tel:`-Link.
+ *   - **Profil-Banner:** wenn `showProfileAddressHint`, zeigt das Modal
+ *     einen Hinweis-Banner mit Link zu `/konto/profil`.
  */
 
 import { zodResolver } from '@hookform/resolvers/zod';
 import Link from 'next/link';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
@@ -41,9 +48,15 @@ import {
 } from '@/lib/schemas';
 import { SERVICE_LIST, type Service } from '@/lib/services';
 import { toast } from '@/lib/toast';
-import type { SelectedTimeSlot } from './TimeSlotPicker';
+import { CONTACT } from '@/lib/contact';
+import { BookingCalendar } from './BookingCalendar';
+import { DurationPicker } from './DurationPicker';
+import { TimeSlotPicker, type SelectedTimeSlot } from './TimeSlotPicker';
+import { FileUpload } from './FileUpload';
+import { BookingDialogContext } from './booking-dialog-context';
 
 const SERVICE_OPTIONS = SERVICE_LIST.map((s) => ({ value: s.slug, label: s.label }));
+const DEFAULT_DURATION_MINUTES = 120;
 
 export interface QuickBookingPrefill {
   customerName?: string | null;
@@ -54,19 +67,35 @@ export interface QuickBookingPrefill {
   addressCity?: string | null;
 }
 
+type ModalMode = 'embedded' | 'standalone';
+
 interface QuickBookingModalProps {
   isOpen: boolean;
   onClose: () => void;
-  /** Slot-Auswahl aus dem Kalender. Wird im Header angezeigt. */
+  /**
+   * `'embedded'` (Default, IT10): Slot kommt vom Parent (`selectedTimeSlot`-
+   * Prop ist Pflicht).
+   * `'standalone'` (IT11): Modal verwaltet Datum / Dauer / Slot intern.
+   */
+  mode?: ModalMode;
+  /** Pflicht im embedded-Mode. Im standalone-Mode wird er nicht durchgereicht. */
   selectedTimeSlot: SelectedTimeSlot | null;
   /** Wenn vom Trigger gesetzt, wird der Service vorausgewählt. */
   defaultService?: Service | null;
-  /** Vorausfüllung aus eingeloggter Customer-Session (US-IT10-05 Teil B). */
+  /** Vorausfüllung aus eingeloggter Customer-Session. */
   defaultValues?: QuickBookingPrefill;
-  /** Wird beim Klick auf „Anderen Slot wählen" aufgerufen (auch in slot-taken). */
+  /** Wird beim Klick auf „Anderen Slot wählen" aufgerufen (embedded-Mode). */
   onSlotChange?: () => void;
-  /** Wird nach erfolgreichem Submit aufgerufen — Parent kann Slot-Liste neuladen. */
+  /**
+   * Wird nach erfolgreichem Submit aufgerufen — Parent kann Slot-Liste neu
+   * laden oder weitere Side-Effects triggern. Im standalone-Mode rein optional.
+   */
   onSubmitSuccess: (bookingId: string) => void;
+  /**
+   * IT11 / US-IT11-05 — Hinweis-Banner „Adresse im Profil hinterlegen"
+   * anzeigen (Link zu `/konto/profil`).
+   */
+  showProfileAddressHint?: boolean;
 }
 
 type ModalState =
@@ -98,13 +127,31 @@ function formatSlotHeader(slot: SelectedTimeSlot | null): string {
 export function QuickBookingModal({
   isOpen,
   onClose,
-  selectedTimeSlot,
+  mode = 'embedded',
+  selectedTimeSlot: externalTimeSlot,
   defaultService = null,
   defaultValues = {},
   onSlotChange,
   onSubmitSuccess,
+  showProfileAddressHint = false,
 }: QuickBookingModalProps) {
+  const router = useRouter();
+  // Direkt den Context lesen — wenn das Modal außerhalb des Providers
+  // gerendert wird (Bestand-Pfad in `BookingClient.tsx`), ist `dialog === null`
+  // und das `dialog?.reset()` ist ein No-Op.
+  const dialog = useContext(BookingDialogContext);
   const [state, setState] = useState<ModalState>({ kind: 'idle' });
+  const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+
+  // Standalone-Mode: interner Slot-/Datum-/Dauer-State.
+  const [internalDate, setInternalDate] = useState<string | null>(null);
+  const [internalDuration, setInternalDuration] = useState<number | null>(null);
+  const [internalTimeSlot, setInternalTimeSlot] = useState<SelectedTimeSlot | null>(
+    null,
+  );
+
+  const isStandalone = mode === 'standalone';
+  const selectedTimeSlot = isStandalone ? internalTimeSlot : externalTimeSlot;
 
   const initialValues = useMemo<Partial<BookingFormInput>>(() => {
     return {
@@ -134,32 +181,50 @@ export function QuickBookingModal({
     defaultValues: initialValues,
   });
 
-  // Wenn das Modal geschlossen UND submit erfolgreich war, sollen wir den Form-State
-  // resetten — aber nicht beim "Cancel" (Spec §5.7: Persistenz). Deshalb tun wir das
-  // explizit nur in `handleSuccess` mit `reset(...)`. Beim Wechsel des Slots:
-  // dauer-Update reicht — RHF behält die anderen Felder.
-  useEffect(() => {
-    if (selectedTimeSlot?.durationMinutes) {
-      // durationMinutes ist im Form, aber nur intern — RHF braucht keinen `setValue`,
-      // der Submit-Handler liest direkt aus `selectedTimeSlot`.
-    }
-  }, [selectedTimeSlot]);
-
+  // Im Standalone-Mode: wenn ein Default-Service aus dem Trigger kommt, im
+  // Service-Picker initial nutzen (DurationPicker-Preisschätzung).
   const watchedService = watch('service');
   const isCustomService = watchedService === 'sonstiges';
+  const pickedServiceForPricing: Service | null = isService(watchedService)
+    ? watchedService
+    : isService(defaultService)
+      ? defaultService
+      : null;
+
+  // Effektive Dauer im Standalone-Mode — sobald ein Tag gewählt, default 120.
+  useEffect(() => {
+    if (isStandalone && internalDate && internalDuration === null) {
+      setInternalDuration(DEFAULT_DURATION_MINUTES);
+    }
+  }, [isStandalone, internalDate, internalDuration]);
+
+  // Reset internen Slot-State, wenn Datum oder Dauer wechseln.
+  useEffect(() => {
+    setInternalTimeSlot(null);
+  }, [internalDate, internalDuration]);
 
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const isBusy = state.kind === 'submitting';
 
   function handleClose() {
-    // Spec §5.2: Schließen bei dirty-State darf den Form-State NICHT clearen
-    // (Persistenz). RHF behält die Eingaben automatisch, solange wir nicht
-    // `reset()` aufrufen — wir ändern hier also nur den `state`.
+    // Submit-Block: niemals während Submit schließen — `closeOnEscape` und
+    // `closeOnBackdrop` am `<Modal>` sind ohnehin auf `false` gesetzt; der
+    // Header-X-Button und der „Abbrechen"-Footer-Button sind disabled.
+    if (isBusy) return;
     setState({ kind: 'idle' });
+    setInternalDate(null);
+    setInternalDuration(null);
+    setInternalTimeSlot(null);
+    setAttachmentIds([]);
     onClose();
   }
 
   function handleSlotChange() {
     setState({ kind: 'idle' });
+    if (isStandalone) {
+      setInternalTimeSlot(null);
+      return;
+    }
     onSlotChange?.();
     onClose();
   }
@@ -190,16 +255,46 @@ export function QuickBookingModal({
       startTime: selectedTimeSlot.startTime,
       endTime: selectedTimeSlot.endTime,
       durationMinutes: selectedTimeSlot.durationMinutes,
+      attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
     };
 
     try {
       const res = await createBooking(payload);
-      // Erfolg — Form leeren, Modal schließen, Toast.
+
+      // IT11 / US-IT11-03 — Erfolgs-Toast mit Telefon-Action.
+      toast.success(
+        `Anfrage gesendet — Tom meldet sich innerhalb von 24h. Telefonisch erreichbar: ${CONTACT.phoneDisplay}`,
+        {
+          action: {
+            label: 'Anrufen',
+            onClick: () => {
+              window.location.href = `tel:${CONTACT.phoneTel}`;
+            },
+          },
+        },
+      );
+
+      // Form-State leeren BEVOR der Push passiert (sonst zeigt das Modal beim
+      // nächsten Open noch alte Werte).
       reset();
+      setAttachmentIds([]);
       setState({ kind: 'idle' });
-      toast.success('Anfrage gesendet. Wir melden uns innerhalb von 24 Stunden.');
+
+      // Provider-Reset (frisches Modal beim nächsten Open) — siehe
+      // ARCHITECTURE_IT11 §2.8.
+      dialog?.reset();
+
       onSubmitSuccess(res.id);
       onClose();
+
+      // Push auf die kanonische Bestätigungsseite (v3). Wenn das Backend
+      // (noch) keinen Token zurückgibt, redirecten wir trotzdem — die Server-
+      // Component fällt auf den Auth-Cookie-Pfad zurück oder rendert die
+      // Token-Expired-UI für Gäste.
+      const tokenQuery = res.confirmationToken
+        ? `?token=${encodeURIComponent(res.confirmationToken)}&new=true`
+        : '?new=true';
+      router.push(`/buchung/bestaetigung/${encodeURIComponent(res.id)}${tokenQuery}`);
     } catch (err) {
       handleApiError(err);
     }
@@ -209,13 +304,11 @@ export function QuickBookingModal({
     if (!(err instanceof ApiClientError)) {
       setState({
         kind: 'server-error',
-        message:
-          'Wir konnten Ihre Anfrage gerade nicht speichern. Bitte versuchen Sie es erneut oder rufen Sie uns an: 0157-74787512.',
+        message: `Wir konnten Ihre Anfrage gerade nicht speichern. Bitte versuchen Sie es erneut oder rufen Sie uns an: ${CONTACT.phoneDisplay}.`,
       });
       return;
     }
 
-    // IT10 / ARCHITECTURE_IT10 §9.1 — Slot-Belegt erkennen.
     const isSlotTaken =
       (err.status === 409 && err.subcode === 'BOOKING_SLOT_TAKEN') ||
       (err.status === 409 &&
@@ -226,7 +319,6 @@ export function QuickBookingModal({
       return;
     }
 
-    // Validation-Fehler mit `field`-Pfad → Inline am Feld.
     if ((err.status === 400 || err.status === 422) && err.code === 'VALIDATION_ERROR' && err.field) {
       const formField = err.field as keyof BookingFormInput;
       const allowed: ReadonlyArray<keyof BookingFormInput> = [
@@ -265,22 +357,22 @@ export function QuickBookingModal({
       return;
     }
 
-    // 5xx oder unerwarteter Fehler — generische, freundliche Meldung mit Tel.
     setState({
       kind: 'server-error',
-      message:
-        'Wir konnten Ihre Anfrage gerade nicht speichern. Bitte versuchen Sie es erneut oder rufen Sie uns an: 0157-74787512.',
+      message: `Wir konnten Ihre Anfrage gerade nicht speichern. Bitte versuchen Sie es erneut oder rufen Sie uns an: ${CONTACT.phoneDisplay}.`,
     });
   }
 
   const slotLabel = formatSlotHeader(selectedTimeSlot);
-  const isBusy = state.kind === 'submitting';
-  const submitDisabled = isBusy || !watchedService;
+  const submitDisabled = isBusy || !watchedService || !selectedTimeSlot;
 
   return (
     <Modal
       isOpen={isOpen}
+      // Submit-Block: Escape und Backdrop-Click ignorieren während Submit.
       onClose={handleClose}
+      closeOnEscape={!isBusy}
+      closeOnBackdrop={!isBusy}
       labelledBy="quick-booking-title"
       describedBy="quick-booking-slot-info"
     >
@@ -297,15 +389,19 @@ export function QuickBookingModal({
             id="quick-booking-slot-info"
             className="mt-1 text-sm text-baerenstark-bark/80"
           >
-            {slotLabel ||
-              'Bitte wählen Sie einen Slot im Kalender, bevor Sie die Anfrage absenden.'}
+            {selectedTimeSlot
+              ? slotLabel
+              : isStandalone
+                ? 'Wählen Sie unten Service, Tag und Zeitfenster.'
+                : 'Bitte wählen Sie einen Slot im Kalender, bevor Sie die Anfrage absenden.'}
           </p>
           {selectedTimeSlot && (
             <button
               type="button"
               onClick={handleSlotChange}
-              aria-label="Anderen Slot wählen — Modal schließen"
-              className="mt-2 text-sm text-baerenstark-wood underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
+              disabled={isBusy}
+              aria-label="Anderen Slot wählen"
+              className="mt-2 text-sm text-baerenstark-wood underline-offset-2 hover:underline disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
             >
               Anderen Slot wählen
             </button>
@@ -315,9 +411,10 @@ export function QuickBookingModal({
           ref={closeBtnRef}
           type="button"
           onClick={handleClose}
+          disabled={isBusy}
           aria-label="Modal schließen"
           data-modal-close
-          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-baerenstark-bark hover:bg-baerenstark-sand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
+          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-baerenstark-bark hover:bg-baerenstark-sand/40 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent"
         >
           <XIcon size={20} />
         </button>
@@ -385,6 +482,68 @@ export function QuickBookingModal({
             </p>
           )}
         </fieldset>
+
+        {/* IT11 / US-IT11-02 — Standalone-Mode: Steps B (Kalender) + C
+            (Dauer + TimeSlotPicker). */}
+        {isStandalone && (
+          <>
+            <fieldset className="mb-5">
+              <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
+                Wann?
+              </legend>
+              <BookingCalendar
+                selectedDate={internalDate}
+                onSelectDay={(d) => setInternalDate(d)}
+              />
+            </fieldset>
+
+            {internalDate && (
+              <fieldset className="mb-5">
+                <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
+                  Wie lange?
+                </legend>
+                <DurationPicker
+                  value={internalDuration}
+                  onSelect={(m) => setInternalDuration(m)}
+                  service={pickedServiceForPricing}
+                />
+              </fieldset>
+            )}
+
+            {internalDate && internalDuration !== null && (
+              <fieldset className="mb-5">
+                <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
+                  Welches Zeitfenster?
+                </legend>
+                <TimeSlotPicker
+                  date={internalDate}
+                  duration={internalDuration}
+                  selectedSlot={internalTimeSlot}
+                  onSelect={(slot) => setInternalTimeSlot(slot)}
+                />
+              </fieldset>
+            )}
+          </>
+        )}
+
+        {/* Profil-Adress-Hinweis (US-IT11-05). Vor dem Adressblock anzeigen. */}
+        {showProfileAddressHint && (
+          <div className="mb-5">
+            <Banner tone="info" title="Tipp: Adresse im Profil hinterlegen">
+              <p className="text-sm">
+                Wenn Sie Ihre Adresse einmal in Ihrem{' '}
+                <Link
+                  href="/konto/profil"
+                  className="font-medium text-baerenstark-wood underline-offset-2 hover:underline"
+                >
+                  Profil
+                </Link>{' '}
+                hinterlegen, ist sie bei jeder Buchung automatisch
+                vorausgefüllt.
+              </p>
+            </Banner>
+          </div>
+        )}
 
         {/* Kontaktdaten */}
         <fieldset className="mb-5 space-y-3">
@@ -484,6 +643,11 @@ export function QuickBookingModal({
           />
         </fieldset>
 
+        {/* IT11 / US-IT11-04 — FileUpload zwischen Beschreibung und Datenschutz. */}
+        <div className="mb-5">
+          <FileUpload onAttachmentsChange={setAttachmentIds} />
+        </div>
+
         {/* Datenschutz */}
         <div className="mb-2 rounded-lg border border-baerenstark-sand bg-baerenstark-cream/60 p-3">
           <label className="flex items-start gap-3 text-sm text-baerenstark-bark">
@@ -515,14 +679,19 @@ export function QuickBookingModal({
           )}
         </div>
 
-        {/* Live-Region für isDirty-Hinweis (subtil) */}
+        {/* Live-Region für isDirty-Hinweis (subtil) + Submit-Status. */}
         <div role="status" aria-live="polite" className="sr-only">
-          {isDirty && state.kind === 'idle' ? 'Eingaben werden gespeichert.' : ''}
+          {isBusy
+            ? 'Anfrage wird gesendet …'
+            : isDirty && state.kind === 'idle'
+              ? 'Eingaben werden gespeichert.'
+              : ''}
         </div>
       </form>
 
       {/* Sticky Footer */}
-      <footer className="sticky bottom-0 z-10 flex flex-col-reverse gap-2 rounded-b-modal border-t border-baerenstark-sand bg-baerenstark-cream p-4 sm:flex-row sm:justify-end sm:p-6"
+      <footer
+        className="sticky bottom-0 z-10 flex flex-col-reverse gap-2 rounded-b-modal border-t border-baerenstark-sand bg-baerenstark-cream p-4 sm:flex-row sm:justify-end sm:p-6"
         style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 1rem)' }}
       >
         <Button type="button" variant="ghost" onClick={handleClose} disabled={isBusy}>
@@ -538,10 +707,11 @@ export function QuickBookingModal({
             disabled={submitDisabled}
             aria-disabled={submitDisabled || undefined}
           >
-            {isBusy ? 'Wird gesendet…' : 'Anfrage absenden'}
+            {isBusy ? 'Anfrage wird gesendet …' : 'Anfrage absenden'}
           </Button>
         )}
       </footer>
     </Modal>
   );
 }
+

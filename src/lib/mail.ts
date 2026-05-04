@@ -128,8 +128,31 @@ export function actionUrl(
   return `${base}/api/bookings/respond?token=${t}&action=${action}`;
 }
 
+/**
+ * Liefert die Absender-Adresse aus `MAIL_FROM`. Wenn die Variable fehlt
+ * oder leer ist, fällt der Mailer auf den Resend-Sandbox-Absender
+ * `onboarding@resend.dev` zurück und loggt eine einmalige Warnung.
+ *
+ * IT10 / US-IT10-01 + IT11 / US-IT11-01:
+ *   `MAIL_FROM` ist die Single-Source-Of-Truth. In Prod muss der Wert auf
+ *   eine im Resend-Dashboard verifizierte Domain zeigen — sonst stellt
+ *   Resend die Mail nicht an Drittempfänger zu. Der Fallback ist defensiv:
+ *   solange die Domain noch nicht verifiziert ist, kann zumindest an die
+ *   Resend-Test-Empfänger-Liste gemailt werden.
+ */
+let mailFromFallbackWarned = false;
 function fromAddress(): string {
-  return process.env.MAIL_FROM || 'onboarding@resend.dev';
+  const v = process.env.MAIL_FROM?.trim();
+  if (v && v.length > 0) return v;
+  if (!mailFromFallbackWarned && process.env.NODE_ENV !== 'test') {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[mail] MAIL_FROM not configured — falling back to onboarding@resend.dev. ' +
+        'In production set MAIL_FROM to a verified Resend domain.',
+    );
+    mailFromFallbackWarned = true;
+  }
+  return 'onboarding@resend.dev';
 }
 
 function adminToAddress(): string {
@@ -223,7 +246,21 @@ export interface BookingMailPayload {
   customerEmail: string | null;
   service: Service;
   description: string;
+  /** Bestand IT2 — Counter-Proposal-Cancel-Token (eigener Pfad). */
   cancelToken?: string | null;
+  /**
+   * IT11 / US-IT11-03 — signierter Booking-Confirmation-Token (JWT, HS256,
+   * Scope `booking-confirmation`, 30 Tage gültig). Wird bei Vorhandensein
+   * in der Receipt-Mail als „Buchung anzeigen"-Link eingebettet.
+   */
+  confirmationToken?: string | null;
+  /**
+   * IT11 / US-IT11-06 — signierter Booking-Cancellation-Token (JWT, HS256,
+   * Scope `booking-cancellation`, 30 Tage gültig). Bei Vorhandensein wird
+   * der Storno-Link in der Receipt-Mail darüber gerendert; sonst Fallback
+   * auf den Bestand-`cancelToken`.
+   */
+  cancellationToken?: string | null;
   /** Bestand IT1/IT2: Slot mit Date-Objekten. */
   slot?: {
     startsAt: Date;
@@ -348,11 +385,45 @@ export async function sendBookingNotification(
 // Iteration 2 Template — Eingangsbestätigung an Kunden
 // ---------------------------------------------------------------------------
 
+/**
+ * IT11 / US-IT11-03 + 06 — neue Token-basierte Aktions-Links
+ * (Bestätigungsseite + Storno-Page).
+ *
+ * Format:
+ *   confirmationUrl = ${base}/buchung/bestaetigung/<id>?token=<jwt>
+ *   cancellationUrl = ${base}/buchung/<id>/stornieren?token=<jwt>
+ */
+export function buildBookingConfirmationUrl(
+  bookingId: string,
+  confirmationToken: string,
+): string {
+  const base = publicBaseUrl();
+  return `${base}/buchung/bestaetigung/${encodeURIComponent(bookingId)}?token=${encodeURIComponent(confirmationToken)}`;
+}
+
+export function buildBookingCancellationUrl(
+  bookingId: string,
+  cancellationToken: string,
+): string {
+  const base = publicBaseUrl();
+  return `${base}/buchung/${encodeURIComponent(bookingId)}/stornieren?token=${encodeURIComponent(cancellationToken)}`;
+}
+
 function buildReceiptText(p: BookingMailPayload): string {
   const slotLine = bookingSlotLine(p);
-  const cancelLink = p.cancelToken
-    ? `\nAnfrage stornieren: ${actionUrl(p.cancelToken, 'cancel')}\n`
+
+  // IT11: Token-Links bevorzugt (signiert, scope-getrennt). Fallback auf
+  // den klassischen `cancelToken`-Link (Bestand IT2) bleibt erhalten,
+  // damit alte Mails / Counter-Proposal-Flows nicht brechen.
+  const confirmationLink = p.confirmationToken
+    ? `\nBuchung anzeigen:    ${buildBookingConfirmationUrl(p.bookingId, p.confirmationToken)}`
     : '';
+  const cancelLinkLine = p.cancellationToken
+    ? `\nAnfrage stornieren:  ${buildBookingCancellationUrl(p.bookingId, p.cancellationToken)}\n`
+    : p.cancelToken
+      ? `\nAnfrage stornieren:  ${actionUrl(p.cancelToken, 'cancel')}\n`
+      : '';
+
   return [
     `Hallo ${p.customerName},`,
     '',
@@ -364,7 +435,7 @@ function buildReceiptText(p: BookingMailPayload): string {
     '',
     'Beschreibung:',
     p.description,
-    cancelLink,
+    confirmationLink + cancelLinkLine,
     'Bei Fragen erreichen Sie uns telefonisch unter 0157-74787512.',
     '',
     '— Ihr Haus in bärenstarken Händen!',
@@ -374,9 +445,15 @@ function buildReceiptText(p: BookingMailPayload): string {
 function buildReceiptHtml(p: BookingMailPayload): string {
   const slotLine = bookingSlotLine(p);
   const safeDesc = escapeHtml(p.description).replace(/\n/g, '<br/>');
-  const cancelButton = p.cancelToken
-    ? `<a href="${actionUrl(p.cancelToken, 'cancel')}" style="display:inline-block; padding:10px 20px; background:#7B5E3C; color:#fff; text-decoration:none; border-radius:6px; margin-top:8px;">Anfrage stornieren</a>`
+
+  const confirmationButton = p.confirmationToken
+    ? `<a href="${buildBookingConfirmationUrl(p.bookingId, p.confirmationToken)}" style="display:inline-block; padding:10px 20px; background:#4A5D3A; color:#fff; text-decoration:none; border-radius:6px; margin:8px 8px 0 0;">Buchung anzeigen</a>`
     : '';
+  const cancelButton = p.cancellationToken
+    ? `<a href="${buildBookingCancellationUrl(p.bookingId, p.cancellationToken)}" style="display:inline-block; padding:10px 20px; background:#7B5E3C; color:#fff; text-decoration:none; border-radius:6px; margin-top:8px;">Anfrage stornieren</a>`
+    : p.cancelToken
+      ? `<a href="${actionUrl(p.cancelToken, 'cancel')}" style="display:inline-block; padding:10px 20px; background:#7B5E3C; color:#fff; text-decoration:none; border-radius:6px; margin-top:8px;">Anfrage stornieren</a>`
+      : '';
 
   return `<!doctype html>
 <html lang="de">
@@ -391,6 +468,7 @@ function buildReceiptHtml(p: BookingMailPayload): string {
     </table>
     <h2 style="font-size:14px; color:#7B5E3C; margin:16px 0 4px;">Beschreibung</h2>
     <p style="margin:0 0 16px; line-height:1.5;">${safeDesc}</p>
+    ${confirmationButton}
     ${cancelButton}
     <p style="margin:24px 0 0; color:#7B5E3C; font-size:12px;">Bei Fragen: 0157-74787512 — Ihr Haus in bärenstarken Händen!</p>
   </div>

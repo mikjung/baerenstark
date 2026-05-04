@@ -4,6 +4,7 @@ import './globals.css';
 import { Header } from '@/components/layout/Header';
 import { Footer } from '@/components/layout/Footer';
 import { Toaster } from '@/components/ui/Toast';
+import { BookingDialogProvider } from '@/components/booking/BookingDialogProvider';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -53,11 +54,13 @@ export default function RootLayout({
         >
           Zum Hauptinhalt springen
         </a>
-        <Header />
-        <main id="main" className="flex-1">
-          {children}
-        </main>
-        <Footer />
+        <BookingDialogProvider>
+          <Header />
+          <main id="main" className="flex-1">
+            {children}
+          </main>
+          <Footer />
+        </BookingDialogProvider>
         <Toaster />
       </body>
     </html>

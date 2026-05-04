@@ -87,6 +87,24 @@ export function formatBerlinDateShort(date: string): string {
 }
 
 /**
+ * IT11 / US-IT11-04 — formatiert Dateigröße in lesbarer Form.
+ *
+ *   1023 → "1023 B"
+ *   1024 → "1 KB"
+ *   2304 → "2 KB"
+ *   1.5 MB → "1.5 MB"
+ *
+ * Genaue Logik mit binären Vielfachen (1 KB = 1024 B). Entspricht dem
+ * Verhalten der Bestand-`humanSize()`-Hilfsfunktion in `FileUpload.tsx`.
+ */
+export function humanSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '–';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
  * Lokale Datetime-Werte aus einem `<input type="datetime-local">` (ohne
  * Zeitzone) interpretieren als Europe/Berlin und in ISO 8601 mit Offset
  * konvertieren — entspricht dem, was das Backend laut api-routes.md akzeptiert.

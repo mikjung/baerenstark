@@ -3043,4 +3043,435 @@ die Kunden-Session ausgelesen und die Profildaten als Default-Values übergeben 
 Formular-Absenden geändert (keine ungewollten Überschreibungen).
 
 **Klassifikation:** Neues Feature
+**Priorität:** Must Have | **Story Points:** 8
+
+---
+
+## Iteration 11 — Produktions-Stabilisierung & UX-Konsolidierung
+
+### Kontext
+
+Nach dem Deployment von Iteration 10 hat Tom fünf Punkte aus dem Live-Betrieb gemeldet.
+Das QA-Review zu IT10 hatte bereits festgehalten, dass alle fünf IT10-Stories
+code-seitig korrekt implementiert wurden — die anhaltenden Fehler in Produktion sind
+teils auf fehlende operative Schritte zurückzuführen (ENV-Variablen in Vercel,
+`prisma migrate deploy` gegen die Produktions-Datenbank), teils auf neu aufgetauchte
+oder bisher nicht adressierte Defekte (Datei-Upload-Anzeige im Admin, Profil-
+Vorausfüllung in Produktion).
+
+Darüber hinaus hat Tom explizit kritisiert, dass es zu viele Stellen gibt, an denen
+ein Kunde einen Termin auswählen kann (Startseite, `/buchen`-Seite,
+Quick-Booking-Modal, Kalender). Iteration 11 vereinfacht: ein klarer Buchungsweg
+bleibt erhalten, alle redundanten Einstiegspunkte werden entfernt oder auf diesen
+einen Weg umgeleitet.
+
+Iteration 11 enthält ausschließlich Bug-Fixes und UX-Konsolidierungen — keine neuen
+Features.
+
+---
+
+#### US-IT11-01: Buchung end-to-end zum Laufen bringen (Bug-Fix / Produktions-Diagnose)
+
+> **Kritischer Bug — Buchung schlägt in Produktion fehl.** Tom berichtet, dass
+> Buchungen an keiner Stelle funktionieren. Das QA-Review zu IT10 hat festgestellt,
+> dass der Code korrekt ist, aber drei operative Schritte nicht abgeschlossen wurden:
+> (1) `MAIL_FROM` und weitere ENV-Variablen in Vercel fehlen, (2) `prisma migrate
+> deploy` gegen die Produktions-Datenbank (Turso/libSQL) wurde nicht ausgeführt —
+> ohne diese Migration fehlen die Spalten `streetAndNumber`, `postalCode`, `city`,
+> `durationMinutes` im Prod-Schema, was zu `P2022 Column does not exist` und damit
+> zum 500-Fehler bei jedem Booking-POST führt, (3) Resend-Domain nicht verifiziert.
+>
+> **Aktuelles Verhalten:** Buchungsformular wird abgesendet → interner Fehler,
+> keine Buchung in der DB, keine E-Mail.
+> **Erwartetes Verhalten:** Buchung wird in der DB gespeichert, Tom erhält
+> Benachrichtigungs-E-Mail, Kunde erhält Bestätigung.
+
+**Als** Kunde
+**möchte ich** eine Buchungsanfrage erfolgreich absenden können,
+**damit** Tom meine Anfrage erhält und ich eine Bestätigung bekomme.
+
+**Akzeptanzkriterien:**
+
+- **Given** der Solution Architect die Vercel-Logs zum Zeitpunkt eines fehlgeschlagenen
+  Booking-POST analysiert,
+  **When** der Fehlertyp identifiziert ist (Prisma `P2022`, ENV-Fehler, Resend-Fehler),
+  **Then** ist die genaue Ursache im PR-Kommentar dokumentiert und die operative
+  Gegenmassnahme (ENV setzen, `migrate deploy`, Domain-Verifikation) ist ausgeführt
+  und bestätigt.
+
+- **Given** `prisma migrate deploy` gegen die Produktions-Datenbank ausgeführt wurde
+  und alle Pflicht-ENV (`RESEND_API_KEY`, `MAIL_FROM`, `MAIL_TO_ADMIN`,
+  `NEXTAUTH_URL`, `NEXT_PUBLIC_BASE_URL`) in Vercel gesetzt sind,
+  **When** ein Kunde das Buchungsformular vollständig ausfüllt und absendet,
+  **Then** wird die Buchungsanfrage mit Status `PENDING` in der Datenbank gespeichert
+  — kein 500-Fehler.
+
+- **Given** eine Buchungsanfrage erfolgreich gespeichert wurde,
+  **When** der E-Mail-Versand ausgeführt wird,
+  **Then** erhält Tom eine Benachrichtigungs-E-Mail an `hausservice-baerenstark@outlook.com`
+  mit Kundenname, Service, Datum und Kontaktdaten.
+
+- **Given** eine Buchungsanfrage erfolgreich gespeichert wurde,
+  **When** Tom das Admin-Portal öffnet,
+  **Then** erscheint die neue Anfrage mit Status „Offen" in der Buchungsübersicht.
+
+- **Given** der Live-Smoke-Test nach dem Fix durchgeführt wird,
+  **When** eine Testbuchung als Gast und als eingeloggter Kunde abgesendet wird,
+  **Then** erscheinen beide Buchungen im Admin-Portal und beide
+  Benachrichtigungs-E-Mails kommen bei Tom an — kein interner Fehler.
+
+**Hinweis für den Architect:** Diagnose-Reihenfolge: (1) Vercel-Logs auf
+`[prisma_error] P2022` prüfen — das wäre der Beweis für fehlende Migration.
+(2) Vercel-Dashboard → Environment Variables: `RESEND_API_KEY`, `MAIL_FROM`
+(nicht `RESEND_FROM_EMAIL`!), `MAIL_TO_ADMIN`, `NEXTAUTH_URL`, `NEXT_PUBLIC_BASE_URL`,
+`DATABASE_URL`. (3) `prisma migrate deploy` lokal gegen Prod-Connection-String
+ausführen (oder über Vercel Build Hook). (4) Resend-Dashboard auf Domain-
+Verifizierungsstatus prüfen. (5) Nach operativen Fixes: Live-Smoke-Test.
+
+**Klassifikation:** Bug-Fix (Produktions-Konfiguration + ausstehende operative Schritte IT10)
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT11-02: Buchungsweg konsolidieren — ein klarer Einstiegspunkt (UX-Vereinfachung)
+
+> **UX-Problem.** Tom hat kritisiert, dass es zu viele Stellen für die Terminauswahl
+> gibt: Startseite, `/buchen`-Seite, Quick-Booking-Modal (US-IT10-04), Kalender.
+> Das verwirrt Kunden und führt zu inkonsistenter Nutzererfahrung.
+>
+> **Empfohlener Ansatz:** Das Quick-Booking-Modal (US-IT10-04) auf der Startseite
+> bleibt als primärer Einstiegspunkt erhalten — es bietet den schnellsten
+> Buchungsweg ohne Seitenwechsel. Der „Termin buchen"-CTA auf der Startseite und
+> im Header öffnet dieses Modal. Die `/buchen`-Seite wird als eigenständige
+> Alternative für Nutzer beibehalten, die direkt zur URL navigieren (z. B. über
+> Bookmark oder mobilen Browser ohne JavaScript). Alle anderen isolierten
+> Datums-/Slot-Picker, die ausserhalb des Modals oder der `/buchen`-Seite
+> eingebettet sind, werden entfernt.
+
+**Als** Kunde
+**möchte ich** einen einzigen, offensichtlichen Weg finden, um eine Buchungsanfrage
+zu stellen,
+**damit** ich nicht verwirrt werde und den Prozess problemlos abschließen kann.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich öffne die Startseite (`/`),
+  **When** ich auf den primären „Termin buchen"-Button im Hero oder im Header klicke,
+  **Then** öffnet sich das Quick-Booking-Modal direkt — keine Weiterleitung auf
+  eine andere Seite.
+
+- **Given** ich öffne die Startseite,
+  **When** ich die Seite von oben bis unten durchscrolle,
+  **Then** gibt es genau einen CTA für Buchungen (im Hero und/oder Header) —
+  kein weiterer eingebetteter Datums- oder Slot-Picker ist auf der Startseite
+  sichtbar.
+
+- **Given** ich rufe `/buchen` direkt auf (z. B. über Bookmark),
+  **When** die Seite lädt,
+  **Then** sehe ich das vollständige Buchungsformular mit Kalender — diese Seite
+  funktioniert als eigenständiger Fallback-Weg und ist verlinkbar.
+
+- **Given** ich suche auf der Website nach weiteren Buchungs-Einstiegspunkten
+  (z. B. separate Slot-Picker-Widgets auf anderen Seiten oder in Sektionen),
+  **When** ich die Startseite und alle verlinkten Seiten durchsuche,
+  **Then** finde ich ausschließlich den Hero/Header-CTA (→ Modal) und den
+  direkten URL-Aufruf `/buchen` als Buchungswege — keine dritten, vierten oder
+  fünften Einstiegspunkte.
+
+- **Given** Tom die Startseite aus Kundenperspektive betrachtet,
+  **When** er den Buchungsweg evaluiert,
+  **Then** ist ein einziger prominenter CTA sofort erkennbar — ein Klick reicht,
+  um zum Buchungsformular zu gelangen.
+
+**Hinweis für den Architect:** Konkret: (1) Alle direkt auf der Startseite
+eingebetteten Kalender- oder Slot-Picker-Komponenten (ausserhalb des Modals)
+entfernen. (2) Alle „Termin buchen"-Links/Buttons im Header und Hero auf
+`openModal()` umstellen statt auf `href="/buchen"`. (3) `/buchen` bleibt bestehen
+als Fallback-Seite (für direkte URL-Aufrufe und SEO). (4) Das Quick-Booking-Modal
+(US-IT10-04) ist der primäre Flow — nicht neu bauen, nur konsolidieren.
+
+**Klassifikation:** UX-Vereinfachung
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT11-03: Klare Rückmeldung nach Buchungsabsenden — Toast + Bestätigungsseite (Bug-Fix / UX)
+
+> **UX-Problem.** Nach dem Absenden einer Buchungsanfrage erhält der Kunde keine
+> erkennbare Rückmeldung — weder eine Erfolgsmeldung noch eine Fehleranzeige.
+> US-IT10-03 hat den Backend-Fehler behoben und die Microcopy im Code hinterlegt,
+> aber in Produktion kommt beim Kunden nichts an (entweder weil die Buchung selbst
+> noch fehlschlägt — abhängig von US-IT11-01 — oder weil der Toast/Redirect im
+> Frontend in der Produktionsumgebung nicht korrekt ausgelöst wird).
+>
+> Diese Story stellt sicher, dass nach einer erfolgreichen Buchung ein Toast und
+> ein Redirect zur Bestätigungsseite stattfinden, und dass bei einem Fehler eine
+> verständliche Fehlermeldung erscheint. US-IT11-01 ist Vorbedingung.
+
+**Als** Kunde
+**möchte ich** nach dem Absenden meiner Buchungsanfrage sofort wissen, ob sie
+erfolgreich war oder warum sie fehlgeschlagen ist,
+**damit** ich Sicherheit habe und nicht unsicher bin, ob meine Anfrage angekommen ist.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich habe das Buchungsformular vollständig ausgefüllt und abgesendet,
+  **When** der Server die Anfrage erfolgreich verarbeitet (`201 Created`),
+  **Then** erscheint ein grüner Toast mit der Meldung „Anfrage erfolgreich gesendet!
+  Tom meldet sich in Kürze bei Ihnen." UND ich werde innerhalb von 2 Sekunden auf
+  eine Bestätigungsseite weitergeleitet (z. B. `/buchung/bestaetigt`), die mindestens
+  Buchungsnummer, Service und Datum anzeigt.
+
+- **Given** ich habe das Buchungsformular über das Quick-Booking-Modal abgesendet,
+  **When** der Server die Anfrage erfolgreich verarbeitet,
+  **Then** schließt sich das Modal, ein grüner Toast erscheint und ich bleibe auf
+  der aktuellen Seite — oder ich werde zur Bestätigungsseite weitergeleitet
+  (konsistent mit dem Verhalten auf `/buchen`).
+
+- **Given** ich habe das Buchungsformular abgesendet und der Server antwortet mit
+  einem Fehler (4xx oder 5xx),
+  **When** die Fehlerantwort im Frontend verarbeitet wird,
+  **Then** erscheint eine deutschsprachige Fehlermeldung direkt im Formular oder
+  als roter Toast — niemals eine leere Seite oder ein technischer Stack-Trace —
+  und ich kann die Anfrage korrigieren oder erneut versuchen.
+
+- **Given** der Erfolgs-Toast erscheint,
+  **When** ich ihn lese,
+  **Then** enthält er Toms Telefonnummer als Kontaktmöglichkeit, falls ich
+  dringende Rückfragen habe.
+
+- **Given** ich bin eingeloggt und die Buchung ist erfolgreich gespeichert,
+  **When** ich anschließend mein Kunden-Dashboard unter `/konto` aufrufe,
+  **Then** erscheint die soeben erstellte Anfrage mit Status „Offen" in meiner
+  Anfragen-Liste.
+
+**Hinweis für den Architect:** US-IT11-01 muss zuerst abgeschlossen sein. Dann
+prüfen: (1) Löst `BookingForm.tsx` nach `201 Created` tatsächlich den Toast und
+den Redirect aus? (2) Öffnet `QuickBookingModal.tsx` nach Erfolg den Toast korrekt
+(globaler `<Toaster />` in `layout.tsx` — prüfen ob er in Prod aktiv ist)?
+(3) Bestätigungsseite (`/buchung/bestaetigt`) prüfen: existiert sie, rendert sie
+korrekte Daten aus dem Booking-Response?
+(4) Die Bestätigungsseite muss auch nach einem Browser-Reload erreichbar sein —
+Implementierung per signiertem Link aus der Bestätigungs-E-Mail (z. B. JWT oder
+HMAC-Hash mit Buchungs-ID). Empfohlene Token-Gültigkeit: 30 Tage. Ohne gültigen
+Token: freundlicher Hinweis mit Buchungsnummer und Toms Telefonnummer anzeigen.
+
+**Klassifikation:** Bug-Fix (Feedback-Anzeige) + UX-Verbesserung
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT11-04: Datei-Upload im Admin — hochgeladene Bilder/Videos anzeigen (Bug-Fix)
+
+> **Bug.** Tom kann im Admin-Bereich die von Kunden hochgeladenen Bilder und Videos
+> nicht sehen. Er benötigt diese Dateien, um zu entscheiden, ob er einen Auftrag
+> annimmt. Entweder werden die Dateien nicht korrekt gespeichert (Upload-Endpoint
+> fehlerhaft oder Storage nicht konfiguriert), oder sie werden gespeichert aber in
+> der Admin-Auftragsdetailansicht nicht angezeigt. Dieser Defekt ist ein direkter
+> Blocker für Toms Entscheidungsprozess.
+
+**Als** Admin (Tom)
+**möchte ich** in der Auftragsdetailansicht alle vom Kunden hochgeladenen Bilder
+und Videos sehen und herunterladen können,
+**damit** ich den Auftrag beurteilen und entscheiden kann, ob ich ihn annehme.
+
+**Akzeptanzkriterien:**
+
+- **Given** der Entwickler den Upload-Flow analysiert (Upload-Endpoint,
+  Storage-Konfiguration, DB-Verknüpfung),
+  **When** die Ursache für die fehlende Anzeige identifiziert ist,
+  **Then** ist sie im PR dokumentiert: fehlgeschlagener Upload (Endpoint-Fehler,
+  fehlende ENV-Variable für Storage-Provider), fehlende DB-Relation zwischen
+  `Booking` und `Attachment`, oder fehlende Anzeige-Komponente in der Admin-
+  Detailansicht.
+
+- **Given** ein Kunde beim Buchen mindestens eine Bilddatei (JPG/PNG, max. 10 MB)
+  hochlädt,
+  **When** die Buchungsanfrage erfolgreich abgesendet wird,
+  **Then** ist die Datei persistent gespeichert (Vercel Blob, S3 oder äquivalent —
+  kein lokales Filesystem in Produktion) und über einen stabilen URL aufrufbar.
+
+- **Given** Tom die Detailansicht einer Buchungsanfrage im Admin-Portal öffnet,
+  **When** der Kunde mindestens eine Datei hochgeladen hat,
+  **Then** sieht Tom eine Liste der Anhänge mit: Vorschaubild (bei Bildern),
+  Dateiname, Dateigröße und einem Download-Link/Button — keine leere Sektion,
+  kein Fehler.
+
+- **Given** Tom die Detailansicht einer Buchungsanfrage öffnet, bei der kein
+  Upload vorhanden ist,
+  **When** die Seite lädt,
+  **Then** erscheint der Hinweis „Keine Dateien hochgeladen" — kein leerer Bereich
+  ohne Erklärung.
+
+- **Given** ein Kunde eine Videodatei (MP4, max. 50 MB) hochlädt,
+  **When** Tom die Detailansicht öffnet,
+  **Then** wird die Videodatei mit einem direkten Download-Link angezeigt —
+  eine Inline-Vorschau ist optional (Nice-to-Have), aber kein Pflichtkriterium.
+
+**Upload-Limits (von Tom bestätigt):** Bilder (`image/*`) max. 10 MB, Videos
+(`video/*`) max. 50 MB. Die Validierung erfolgt zweistufig: clientseitig mit
+sofortigem Feedback im Formular (bevor der Upload startet) und serverseitig
+mit HTTP 413 und einer deutschsprachigen Fehlermeldung, falls die Grenze
+dennoch überschritten wird.
+
+**Hinweis für den Architect:** Zuerst klären: Wurde der Datei-Upload in einer
+früheren Iteration tatsächlich implementiert? Falls ja, welcher Storage-Provider
+wird genutzt? Bei Vercel sind lokale Dateisystemschreibzugriffe nicht persistent
+(nach Cold Start weg) — falls der Upload auf `/tmp` schreibt, ist das der Defekt.
+Wahrscheinlichste Ursachen: (1) Storage-Provider nicht konfiguriert / ENV-Variable
+fehlt, (2) Upload-Endpoint existiert nicht oder schlägt fehl (Vercel-Logs prüfen),
+(3) Anzeige-Komponente in der Admin-Detailansicht fehlt oder hat einen Rendering-Fehler.
+
+**Klassifikation:** Bug-Fix
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+#### US-IT11-05: Profildaten-Vorausfüllung im Buchungsformular — produktionsfähig machen (Bug-Fix)
+
+> **Bug.** Eingeloggte Kunden müssen ihre Daten (Name, E-Mail, Telefon, Adresse)
+> beim Buchen erneut eingeben, obwohl US-IT10-05 Teil B diese Funktion implementiert
+> hat. Das QA-Review zu IT10 hat festgehalten, dass der Code korrekt ist und der
+> `useCustomer()`-Hook die Profildaten lädt — das Problem liegt vermutlich in der
+> Produktionsumgebung: die Datenbankmigrierung fehlt (identisch mit US-IT11-01),
+> der Session-Aufruf schlägt fehl, oder `GET /api/customer/me` gibt in Prod keine
+> Daten zurück.
+
+**Als** eingeloggter Kunde
+**möchte ich** beim Öffnen des Buchungsformulars meine hinterlegten Profildaten
+automatisch vorausgefüllt sehen,
+**damit** ich keine bereits bekannten Informationen erneut eingeben muss.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt (NextAuth-Session aktiv) und öffne das
+  Buchungsformular (auf `/buchen` oder über das Quick-Booking-Modal),
+  **When** das Formular geladen ist,
+  **Then** sind die Felder Vorname/Name, E-Mail, Telefon sowie — falls im Profil
+  hinterlegt — Straße & Hausnummer, PLZ und Ort mit meinen gespeicherten
+  Profildaten vorausgefüllt.
+
+- **Given** der Solution Architect den Fehler-Pfad analysiert,
+  **When** er `GET /api/customer/me` in der Produktionsumgebung mit einer aktiven
+  Kunden-Session aufruft,
+  **Then** gibt der Endpoint HTTP 200 mit den Profildaten zurück — kein 401,
+  kein 500, keine leere Antwort. Falls die Antwort fehlerhaft ist, ist die Ursache
+  (fehlende ENV, fehlende Migration, Session-Konfigurationsfehler) im PR dokumentiert.
+
+- **Given** mein Konto hat keine Adresse hinterlegt,
+  **When** das Buchungsformular lädt,
+  **Then** sind Name, E-Mail und Telefon vorausgefüllt, die Adressfelder bleiben
+  leer und der Hinweis „Adresse in Ihrem Profil hinterlegen" mit Link zu `/konto`
+  ist sichtbar.
+
+- **Given** ich ein vorausgefülltes Feld im Buchungsformular ändere und absende,
+  **When** die Buchung gespeichert wird,
+  **Then** wird der geänderte Formularwert für diese Buchung verwendet — meine
+  Profildaten im Konto werden nicht überschrieben.
+
+- **Given** ich nicht eingeloggt bin und das Buchungsformular öffne,
+  **When** das Formular geladen ist,
+  **Then** sind alle Felder leer — kein Vorausfüllen, kein Fehler.
+
+**Hinweis für den Architect:** US-IT11-01 muss zuerst abgeschlossen sein (dieselbe
+Datenbankmigrierung ist Vorbedingung). Dann prüfen: (1) Gibt `GET /api/customer/me`
+in Prod HTTP 200 zurück — Network-Tab in DevTools nach Login prüfen. (2) Liefert
+`useCustomer()` in `BookingClient.tsx` tatsächlich Daten oder `undefined`/`null`?
+(3) Werden die `defaultValues` in `BookingForm.tsx` korrekt an React Hook Form
+übergeben — Hydration-Reihenfolge prüfen. (4) Ist `NEXTAUTH_URL` in Vercel korrekt
+gesetzt — NextAuth-Sessions funktionieren in Prod nur mit korrektem `NEXTAUTH_URL`.
+
+**Klassifikation:** Bug-Fix (US-IT10-05 Teil B in Produktion nicht funktionsfähig)
+**Priorität:** Must Have | **Story Points:** 3
+
+---
+
+#### US-IT11-06: Auftrag stornieren (Kundenseite) — Neues Feature
+
+> **Neues Feature.** Kunden müssen Tom aktuell anrufen, wenn sie eine Buchungsanfrage
+> zurückziehen möchten. Eine selbstständige Stornierungsmöglichkeit im Kunden-Dashboard
+> reduziert den manuellen Aufwand auf beiden Seiten. Für Gast-Buchungen (ohne Login)
+> erfolgt die Stornierung per signiertem Link aus der Bestätigungs-E-Mail.
+
+**Als** eingeloggter Kunde
+**möchte ich** meine eigene Buchungsanfrage stornieren können,
+**damit** ich Tom nicht anrufen muss, wenn sich meine Pläne ändern.
+
+**Akzeptanzkriterien:**
+
+- **Given** ich bin eingeloggt und rufe mein Kunden-Dashboard unter `/konto` auf,
+  **When** ich eine Buchungsanfrage mit Status „Offen" oder „Bestätigt" sehe,
+  **Then** ist ein „Stornieren"-Button bei dieser Anfrage sichtbar — bei Status
+  „Abgelehnt" oder „Storniert" ist kein Stornieren-Button vorhanden.
+
+- **Given** ich auf den „Stornieren"-Button klicke,
+  **When** der Button gedrückt wird,
+  **Then** erscheint ein Bestätigungsdialog mit dem Text „Möchten Sie diese Anfrage
+  wirklich stornieren?" und den Optionen „Ja, stornieren" und „Abbrechen" — die
+  Stornierung wird erst nach Bestätigung ausgeführt.
+
+- **Given** ich die Stornierung im Dialog bestätige,
+  **When** die Stornierung serverseitig verarbeitet wird,
+  **Then** wechselt der Status der Buchung auf „Storniert" und die Änderung ist
+  sofort im Kunden-Dashboard sowie im Admin-Dashboard sichtbar — kein Seitenreload
+  erforderlich.
+
+- **Given** eine Buchung storniert wurde,
+  **When** der Status auf „Storniert" wechselt,
+  **Then** erhält Tom eine E-Mail-Benachrichtigung an `hausservice-baerenstark@outlook.com`
+  mit Kundenname, Service, Datum und dem Hinweis „Storniert durch Kunden".
+
+- **Given** eine Buchung mit einem zugewiesenen TimeSlot storniert wurde,
+  **When** der Status auf „Storniert" wechselt,
+  **Then** wird der zugehörige TimeSlot wieder als verfügbar markiert (Status
+  `AVAILABLE`) und steht für neue Buchungen offen.
+
+- **Given** ich bin nicht eingeloggt und habe eine Gast-Buchung getätigt,
+  **When** ich die Bestätigungs-E-Mail öffne und auf den Stornieren-Link klicke,
+  **Then** öffnet sich eine Bestätigungsseite mit dem Bestätigungsdialog — die
+  Stornierung erfolgt über einen signierten Token in der URL.
+
+- **Given** der signierte Stornierungstoken aus der Gast-E-Mail ist abgelaufen,
+  **When** ich den Link aufrufe,
+  **Then** erscheint eine freundliche Meldung: „Dieser Stornierungslink ist
+  abgelaufen. Bitte rufen Sie uns an: 0157-74787512" — kein technischer Fehler,
+  kein Stack-Trace.
+
+- **Given** eine Buchung bereits den Status „Storniert" hat,
+  **When** ein erneuter Stornierungsversuch (per API oder per Link) eingeht,
+  **Then** gibt der Server HTTP 409 zurück und es werden keine weiteren
+  Statusänderungen vorgenommen (Idempotenz).
+
+**Hinweis für den Architect:** Storno-Endpoint: `PATCH /api/bookings/[id]/cancel`
+oder `POST /api/bookings/[id]/cancel` — nach Konvention entscheiden. Gast-Storno-Token:
+signierter JWT oder HMAC-Hash mit Buchungs-ID und Ablaufzeit; 30 Tage Gültigkeit
+empfohlen (konsistent mit Bestätigungsseiten-Token aus US-IT11-03). Stornierung
+durch den Kunden ist von einer Admin-seitigen Stornierung zu unterscheiden — diese
+Story deckt ausschließlich die Kundenseite ab. Hängt von US-IT11-01 ab.
+
+**Klassifikation:** Neues Feature
+**Priorität:** Must Have | **Story Points:** 5
+
+---
+
+### Abhängigkeiten Iteration 11
+
+- US-IT11-02 kann parallel zu US-IT11-01 entwickelt werden (reines Frontend).
+- US-IT11-03 **hängt von US-IT11-01 ab** — ohne funktionierende Buchung in Prod
+  kann das Erfolgs-Feedback nicht end-to-end getestet werden.
+- US-IT11-05 **hängt von US-IT11-01 ab** — dieselbe Datenbankmigrierung und
+  ENV-Konfiguration ist Vorbedingung.
+- US-IT11-04 ist in der Diagnose unabhängig von US-IT11-01, für den End-to-End-Test
+  (Upload nach erfolgreicher Buchung) ist US-IT11-01 aber Vorbedingung.
+- US-IT11-06 **hängt von US-IT11-01 ab** — Buchungen müssen in Prod gespeichert
+  werden, bevor eine Stornierung möglich ist.
+
+### Empfohlene Bearbeitungsreihenfolge
+
+1. **US-IT11-01** — Produktionskonfiguration reparieren (alle anderen Stories bauen
+   darauf auf).
+2. **US-IT11-02** — parallel zu US-IT11-01 (kein Backend-Eingriff nötig).
+3. **US-IT11-03 + US-IT11-05** — nach US-IT11-01, können parallel laufen.
+4. **US-IT11-04** — Diagnose sofort starten, End-to-End-Test nach US-IT11-01.
+5. **US-IT11-06** — nach US-IT11-01; kann parallel zu US-IT11-03/05 entwickelt werden.
 **Priorität:** Should Have | **Story Points:** 5

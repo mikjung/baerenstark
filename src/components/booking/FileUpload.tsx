@@ -1,16 +1,23 @@
 'use client';
 
 /**
- * US-18 — Datei-Upload mit Drag-and-Drop, Vorschau, Pro-Datei-Status.
+ * FileUpload — US-18 + IT11 / US-IT11-04.
  *
- * Verhalten:
- *   - Bis zu 5 Dateien parallel verwaltbar (UPLOAD_MAX_FILES_PER_BOOKING).
- *   - Jede Datei wird einzeln via POST /api/upload hochgeladen.
+ * Verhalten (IT11-Update gegenüber Bestand):
+ *   - **MIME-spezifische Limits** statt einheitliches 20 MB:
+ *     Bilder bis 10 MB, Videos bis 50 MB, PDFs bis 10 MB. Helper:
+ *     `getUploadLimitForType()` aus `@/lib/schemas`.
+ *   - **Min-Size-Check (1 Byte):** 0-Byte-Dateien werden inline abgelehnt.
+ *   - **Parallel-Upload-Limit (max 3):** Semaphore puffert weitere Uploads
+ *     in einer FIFO-Queue (Status `pending` → `uploading` → `success`/`error`).
+ *   - **Inline-Retry-Button** auf jedem Error-Entry.
+ *   - Drop-Zone-Hinweis: „Bilder bis 10 MB · Videos bis 50 MB · max. 5 Dateien".
+ *
+ * Bestand:
+ *   - Bis zu 5 Dateien parallel verwaltbar (`UPLOAD_MAX_FILES_PER_BOOKING`).
  *   - Status pro Datei: pending | uploading | success | error.
- *   - Bei BLOB_NOT_CONFIGURED-Antwort des Servers blendet die Komponente
- *     die Upload-Sektion aus und zeigt nur einen Hinweistext (keine Sperre
- *     der Buchung — Anhänge sind optional).
- *   - Bei 413 / 415 Inline-Fehler pro Datei.
+ *   - Bei `BLOB_NOT_CONFIGURED` blendet die Komponente die Upload-Sektion aus
+ *     und zeigt einen Hinweistext (kein Buchungs-Block).
  *   - Drag-and-Drop und Datei-Picker.
  *   - `attachmentIds` der erfolgreich hochgeladenen Dateien werden via
  *     `onAttachmentsChange` an den Form-Container kommuniziert.
@@ -22,8 +29,11 @@ import { Button } from '@/components/ui/Button';
 import { ApiClientError, uploadFile } from '@/lib/api-client';
 import {
   UPLOAD_ACCEPTED_CONTENT_TYPES,
-  UPLOAD_MAX_FILE_BYTES,
   UPLOAD_MAX_FILES_PER_BOOKING,
+  UPLOAD_MAX_PARALLEL,
+  UPLOAD_MAX_IMAGE_BYTES,
+  UPLOAD_MAX_VIDEO_BYTES,
+  getUploadLimitForType,
 } from '@/lib/schemas';
 
 type UploadStatus = 'pending' | 'uploading' | 'success' | 'error';
@@ -47,8 +57,8 @@ interface FileUploadProps {
 }
 
 const ACCEPT_ATTR = UPLOAD_ACCEPTED_CONTENT_TYPES.join(',');
-const MAX_BYTES = UPLOAD_MAX_FILE_BYTES;
 const MAX_FILES = UPLOAD_MAX_FILES_PER_BOOKING;
+const HINT_LINE = `Bilder bis ${humanSize(UPLOAD_MAX_IMAGE_BYTES)} · Videos bis ${humanSize(UPLOAD_MAX_VIDEO_BYTES)} · max. ${MAX_FILES} Dateien`;
 
 function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -69,15 +79,30 @@ function localIdFor(file: File): string {
   return `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * IT11 — clientseitige Validierung pro File. Liefert eine deutsche Fehlermeldung
+ * oder `null` (akzeptiert).
+ *
+ *   - Empty (size === 0)              → „Diese Datei ist leer."
+ *   - Type nicht in Whitelist         → „Dateityp 'x/y' wird nicht unterstützt."
+ *   - Größe > MIME-Limit              → „Datei ist zu groß (Bilder: 10 MB, Videos: 50 MB)."
+ */
 function clientSideValidate(file: File): string | null {
-  if (file.size > MAX_BYTES) {
-    return `Datei ist zu groß (max. ${humanSize(MAX_BYTES)}).`;
+  if (file.size === 0) {
+    return 'Diese Datei ist leer.';
   }
-  if (
-    file.type &&
-    !UPLOAD_ACCEPTED_CONTENT_TYPES.includes(file.type as (typeof UPLOAD_ACCEPTED_CONTENT_TYPES)[number])
-  ) {
+  const accepted = UPLOAD_ACCEPTED_CONTENT_TYPES as ReadonlyArray<string>;
+  if (file.type && !accepted.includes(file.type)) {
     return `Dateityp "${file.type || 'unbekannt'}" wird nicht unterstützt.`;
+  }
+  const limit = getUploadLimitForType(file.type);
+  if (limit === null) {
+    return `Dateityp "${file.type || 'unbekannt'}" wird nicht unterstützt.`;
+  }
+  if (file.size > limit) {
+    return `Datei ist zu groß. Maximum: ${humanSize(limit)} (Ihre Datei: ${humanSize(
+      file.size,
+    )}).`;
   }
   return null;
 }
@@ -94,6 +119,12 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
   const inputId = useId();
   const onAttachmentsChangeRef = useRef(onAttachmentsChange);
 
+  // IT11 v3 — Parallel-Upload-Semaphore. Anzahl der aktuell laufenden
+  // `startUpload()`-Promises (max `UPLOAD_MAX_PARALLEL`). Pending-Files in
+  // FIFO-Reihenfolge starten, sobald ein Slot frei wird.
+  const activeUploadsRef = useRef(0);
+  const pendingQueueRef = useRef<Array<{ localId: string; file: File }>>([]);
+
   useEffect(() => {
     onAttachmentsChangeRef.current = onAttachmentsChange;
   }, [onAttachmentsChange]);
@@ -105,6 +136,34 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
       .map((e) => e.attachmentId as string);
     onAttachmentsChangeRef.current(ids);
   }, [entries]);
+
+  /**
+   * Schedule-Helper — startet so viele Uploads aus der Queue, wie das
+   * Parallel-Limit erlaubt. Wird nach `enqueueForUpload()` und nach jedem
+   * `finally` eines abgeschlossenen Uploads aufgerufen.
+   */
+  const drainQueue = useCallback(() => {
+    while (
+      activeUploadsRef.current < UPLOAD_MAX_PARALLEL &&
+      pendingQueueRef.current.length > 0
+    ) {
+      const next = pendingQueueRef.current.shift();
+      if (!next) break;
+      activeUploadsRef.current += 1;
+      void runUpload(next.localId, next.file).finally(() => {
+        activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
+        drainQueue();
+      });
+    }
+  }, []);
+
+  const enqueueForUpload = useCallback(
+    (localId: string, file: File) => {
+      pendingQueueRef.current.push({ localId, file });
+      drainQueue();
+    },
+    [drainQueue],
+  );
 
   const handleFiles = useCallback(
     (files: FileList | File[]) => {
@@ -123,12 +182,16 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
         }
 
         const accepted: UploadEntry[] = [];
-        const rejected: { file: File; reason: string }[] = [];
 
         for (const file of arr.slice(0, remaining)) {
           const validationError = clientSideValidate(file);
           if (validationError) {
-            rejected.push({ file, reason: validationError });
+            accepted.push({
+              localId: localIdFor(file),
+              file,
+              status: 'error',
+              error: validationError,
+            });
             continue;
           }
           accepted.push({
@@ -141,27 +204,18 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
         if (arr.length > remaining) {
           setGlobalNotice({
             tone: 'warning',
-            text: `Es können maximal ${MAX_FILES} Dateien hochgeladen werden — ${arr.length - remaining} Datei(en) wurden ignoriert.`,
+            text: `Es können maximal ${MAX_FILES} Dateien hochgeladen werden — ${
+              arr.length - remaining
+            } Datei(en) wurden ignoriert.`,
           });
-        }
-        if (rejected.length > 0) {
-          // Rejected werden als error-Einträge gezeigt, damit der User sieht, warum.
-          for (const r of rejected) {
-            accepted.push({
-              localId: localIdFor(r.file),
-              file: r.file,
-              status: 'error',
-              error: r.reason,
-            });
-          }
         }
 
         // Trigger Upload für alle akzeptierten Pending-Einträge nach State-Update.
-        // Wir starten in einem Microtask, um den State-Update sicher abzuwarten.
+        // Wir setzen sie via Semaphore in die Queue.
         queueMicrotask(() => {
           for (const entry of accepted) {
             if (entry.status === 'pending') {
-              void startUpload(entry.localId, entry.file);
+              enqueueForUpload(entry.localId, entry.file);
             }
           }
         });
@@ -169,10 +223,15 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
         return [...prev, ...accepted];
       });
     },
-    [blobUnavailable],
+    [blobUnavailable, enqueueForUpload],
   );
 
-  async function startUpload(localId: string, file: File) {
+  /**
+   * Setzt den State für einen Eintrag auf `uploading`, ruft den API-Client und
+   * persistiert das Ergebnis in den State. Wird intern von `drainQueue()`
+   * aufgerufen — nicht direkt vom UI.
+   */
+  async function runUpload(localId: string, file: File) {
     setEntries((prev) =>
       prev.map((e) => (e.localId === localId ? { ...e, status: 'uploading' } : e)),
     );
@@ -196,7 +255,12 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
       if (err instanceof ApiClientError) {
         code = err.code;
         if (err.code === 'PAYLOAD_TOO_LARGE') {
-          message = `Datei ist zu groß (max. ${humanSize(MAX_BYTES)}).`;
+          // Server-Antwort kann ein Limit-Hint im message-Feld haben.
+          message =
+            err.message ||
+            `Datei ist zu groß. Bilder bis ${humanSize(UPLOAD_MAX_IMAGE_BYTES)}, Videos bis ${humanSize(
+              UPLOAD_MAX_VIDEO_BYTES,
+            )}.`;
         } else if (err.code === 'UNSUPPORTED_MEDIA_TYPE') {
           message = 'Dieser Dateityp wird nicht unterstützt.';
         } else if (err.code === 'RATE_LIMITED') {
@@ -209,6 +273,9 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
           // Alle erfolgreichen Anhänge werden verworfen, da sie nicht persistiert werden können.
           setEntries([]);
           return;
+        } else if (err.code === 'VALIDATION_ERROR') {
+          // Server-side Magic-Bytes-Check (FILE_TYPE_MISMATCH / FILE_EMPTY) etc.
+          message = err.message || 'Datei wurde abgelehnt.';
         } else {
           message = err.message || message;
         }
@@ -225,6 +292,24 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
 
   function removeEntry(localId: string) {
     setEntries((prev) => prev.filter((e) => e.localId !== localId));
+  }
+
+  /**
+   * IT11 — Inline-Retry für gescheiterte Uploads. Nimmt einen Error-Entry und
+   * setzt ihn zurück auf `pending`, dann zurück in die Upload-Queue.
+   */
+  function retryEntry(localId: string) {
+    setEntries((prev) =>
+      prev.map((e) =>
+        e.localId === localId
+          ? { ...e, status: 'pending', error: undefined }
+          : e,
+      ),
+    );
+    const target = entries.find((e) => e.localId === localId);
+    if (target) {
+      enqueueForUpload(localId, target.file);
+    }
   }
 
   function onDrop(e: React.DragEvent<HTMLDivElement>) {
@@ -343,9 +428,7 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
             ? `Maximum von ${MAX_FILES} Dateien erreicht`
             : 'Datei auswählen oder hierher ziehen'}
         </span>
-        <span className="text-xs text-baerenstark-bark/60">
-          Erlaubte Formate: JPG, PNG, PDF, MP4 · Max. {MAX_FILES} Dateien, je {humanSize(MAX_BYTES)}
-        </span>
+        <span className="text-xs text-baerenstark-bark/60">{HINT_LINE}</span>
       </div>
 
       <input
@@ -382,10 +465,14 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
                   {humanSize(entry.file.size)}
                   {entry.status === 'uploading' && ' · wird hochgeladen…'}
                   {entry.status === 'success' && ' · hochgeladen'}
-                  {entry.status === 'pending' && ' · in Warteschlange'}
+                  {entry.status === 'pending' && ' · wartet…'}
                 </p>
                 {entry.status === 'error' && entry.error && (
-                  <p role="alert" className="mt-1 text-xs font-medium text-red-700">
+                  <p
+                    role="alert"
+                    aria-live="polite"
+                    className="mt-1 text-xs font-medium text-red-700"
+                  >
                     {entry.error}
                   </p>
                 )}
@@ -403,15 +490,28 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
                   </div>
                 )}
               </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => removeEntry(entry.localId)}
-                aria-label={`Datei "${entry.file.name}" entfernen`}
-              >
-                Entfernen
-              </Button>
+              <div className="flex shrink-0 items-center gap-1">
+                {entry.status === 'error' && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => retryEntry(entry.localId)}
+                    aria-label={`Datei "${entry.file.name}" erneut hochladen`}
+                  >
+                    Erneut versuchen
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => removeEntry(entry.localId)}
+                  aria-label={`Datei "${entry.file.name}" entfernen`}
+                >
+                  Entfernen
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

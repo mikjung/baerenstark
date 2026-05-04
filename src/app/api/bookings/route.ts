@@ -46,6 +46,10 @@ import {
   BookingConflictError,
 } from '@/lib/booking-create';
 import { addMinutesToTime, timeToMinutes } from '@/lib/time-utils';
+import {
+  signBookingConfirmationToken,
+  signBookingCancellationToken,
+} from '@/lib/booking-tokens';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -253,6 +257,69 @@ export async function POST(req: NextRequest): Promise<Response> {
               'Bitte vervollständige zuerst deine Adresse in deinem Profil.',
             field: 'address_required',
           });
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // IT11 / US-IT11-03 — Doppel-Submit-Schutz (BUG-MAJOR-03)
+    //
+    // Optimistic Server-Side-Dedup: wenn in den letzten 60s bereits eine
+    // identische Buchungsanfrage angekommen ist (gleicher customerId ODER
+    // customerEmail, gleicher slotId/date+startTime, status PENDING/CONFIRMED),
+    // antworten wir idempotent mit der bestehenden Booking-ID + frisch
+    // signierten Tokens. KEINE neue Mail an Tom.
+    // ---------------------------------------------------------------------
+    {
+      const dedupCustomerKey = customerSession?.customerId
+        ? { customerId: customerSession.customerId }
+        : data.customerEmail
+          ? { customerEmail: data.customerEmail }
+          : null;
+
+      if (dedupCustomerKey) {
+        const slotMatch = isSlotMode
+          ? { slotId: data.slotId! }
+          : isDateMode
+            ? { date: data.date!, startTime: data.startTime! }
+            : null;
+
+        if (slotMatch) {
+          const recent = await prisma.booking.findFirst({
+            where: {
+              ...dedupCustomerKey,
+              ...slotMatch,
+              service: data.service,
+              status: { in: ['PENDING', 'CONFIRMED'] },
+              createdAt: { gt: new Date(Date.now() - 60_000) },
+            },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true, status: true, createdAt: true, customerId: true },
+          });
+
+          if (recent) {
+            const [confirmationToken, cancellationToken] = await Promise.all([
+              signBookingConfirmationToken({
+                bookingId: recent.id,
+                customerId: recent.customerId,
+              }),
+              signBookingCancellationToken({
+                bookingId: recent.id,
+                customerId: recent.customerId,
+              }),
+            ]);
+            return apiSuccess(
+              {
+                id: recent.id,
+                status: recent.status,
+                createdAt: recent.createdAt.toISOString(),
+                confirmationToken,
+                cancellationToken,
+                deduplicated: true,
+              },
+              200,
+            );
+          }
         }
       }
     }
@@ -508,6 +575,26 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     // ---------------------------------------------------------------------
+    // IT11 / US-IT11-03 + 06 — Tokens signieren (Confirmation + Cancellation).
+    // Beide Tokens werden in der Bestätigungs-E-Mail eingebettet UND in der
+    // POST-Response mitgegeben (Frontend baut den Redirect auf
+    // /buchung/bestaetigung/<id>?token=…).
+    // ---------------------------------------------------------------------
+    let confirmationToken: string | null = null;
+    let cancellationToken: string | null = null;
+    try {
+      [confirmationToken, cancellationToken] = await Promise.all([
+        signBookingConfirmationToken({ bookingId, customerId }),
+        signBookingCancellationToken({ bookingId, customerId }),
+      ]);
+    } catch (err) {
+      // Hard-fail-Hinweis: BOOKING_TOKEN_SECRET ist Pflicht ab IT11.
+      // Wir nehmen den Booking trotzdem an (DB-Insert ist schon durch),
+      // loggen aber explizit, damit der Operator den Defekt sieht.
+      console.error('[bookings] token signing failed:', err);
+    }
+
+    // ---------------------------------------------------------------------
     // Fire-and-forget Mail-Dispatch
     // ---------------------------------------------------------------------
     const mailPayload: BookingMailPayload = {
@@ -518,6 +605,8 @@ export async function POST(req: NextRequest): Promise<Response> {
       service: data.service,
       description: data.description,
       cancelToken: bookingCancelToken,
+      confirmationToken,
+      cancellationToken,
       slot: slotForMail,
       date: isDateMode ? resolvedDate : null,
       startTime: isDateMode ? resolvedStartTime : null,
@@ -539,6 +628,8 @@ export async function POST(req: NextRequest): Promise<Response> {
         id: bookingId,
         status: bookingStatus,
         createdAt: bookingCreatedAt.toISOString(),
+        confirmationToken,
+        cancellationToken,
       },
       201,
     );

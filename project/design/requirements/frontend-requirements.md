@@ -1,597 +1,633 @@
-# Frontend Requirements — Iteration 7 (Auth-Stabilisierung & Email-Auth-Reversion)
+# Frontend Requirements — Iteration 11 (Produktions-Stabilisierung & UX-Konsolidierung)
 
-> **Hinweis:** Diese Datei ist die IT7-spezifische Anforderungsspez. Für IT1–IT6
-> ist der Bestand verbindlich (siehe `ARCHITECTURE.md`, `ARCHITECTURE_IT6.md`).
-> Quelle der Wahrheit für IT7: `ARCHITECTURE_IT7.md`. Schemas:
-> `contracts/zod-schemas.ts`. Endpoints: `contracts/api-routes.md` §23.
+> **Hinweis:** Diese Datei ist die IT11-spezifische Anforderungsspez. Für IT1–IT10
+> bleibt der Bestand verbindlich (siehe `ARCHITECTURE.md`, `ARCHITECTURE_IT10.md`).
+> Quelle der Wahrheit für IT11: `ARCHITECTURE_IT11.md`. Schemas: `contracts/zod-schemas.ts`.
+> Endpoints: `contracts/api-routes.md` (zwei neue Endpoints in IT11, siehe §API Consumption).
+>
+> **Revision v2 (2026-05-03):** Tom hat drei Detailentscheidungen bestätigt
+> (Upload-Limits 10/50 MB, signierter Bestätigungs-Token, Routing `/buchung`),
+> und es gibt eine neue Story **US-IT11-06 (Auftrag stornieren)**. Diese Datei
+> wurde entsprechend ergänzt — siehe Sektionen „Pages / Storno" und „Upload-Validierung".
+>
+> **Revision v3 (2026-05-04, nach QA-Review IT11):**
+> - Bestätigungsseite: kanonische neue Route `/buchung/bestaetigung/[bookingId]?token=…` mit neuer Komponente `BookingConfirmation`. Bestehende `BestaetigtClient.tsx` bleibt **unangetastet** für Counter-Proposal-Flow.
+> - Storno-Page: kanonische Route `/buchung/[id]/stornieren?token=…` (Path-Param-ID).
+> - `cancelledBy`-Enum vereinheitlicht: `'CUSTOMER' | 'ADMIN' | 'SYSTEM'`. Gast-Storno via Token = `'CUSTOMER'`. Keine Differenzierung im Admin-UI.
+> - Lightbox im Admin: out-of-scope für IT11, IT12-Backlog. Klick öffnet weiterhin neuer Tab.
 
 ## Overview
 
-IT7 stellt Customer-Email/Password-Auth wieder her (Reversion von US-IT6-05
-D3-Fix), repariert Google- und Facebook-OAuth durch Diagnose und Härtung,
-gibt Tom ein CLI-Skript zur Admin-Wiederherstellung und implementiert den
-Passwort-Reset-Flow E2E.
+IT11 ist eine **Konsolidierungs- und Bug-Fix-Iteration**. Es entstehen keine neuen
+Pages, Routen oder Datenmodelle. Stattdessen wird der bestehende Buchungsweg auf
+**einen primären Einstiegspunkt** (Quick-Booking-Modal) verdichtet, das vorhandene
+Toast-System für Erfolgs-/Fehler-Feedback aktiviert, der existierende Datei-Upload-
+Pfad im Modal ergänzt und im Admin-View ausgebaut, sowie die Pre-Fill-Logik durch
+eine korrekte Prod-Konfiguration produktionsfähig gemacht.
 
-Frontend-seitig sind 4 Pages neu zu bauen (`/konto/registrieren`,
-`/konto/passwort-vergessen`, `/konto/passwort-zuruecksetzen`,
-`/konto/verifizieren(/erfolg)`), `/konto/login` ist um Credentials-Form +
-verbesserte Fehlermeldungen zu erweitern, und ein Info-Banner für
-nicht-verifizierte Konten kommt ins `/konto/layout.tsx`.
+Frontend-seitig betrifft IT11 sechs Komponenten-Bereiche:
+
+1. **Modal-Provider + Header/Hero-Trigger** (US-IT11-02): neuer App-weiter Modal-Provider,
+   Header- und Hero-CTAs öffnen das Modal direkt.
+2. **Modal-Erweiterung** (US-IT11-02 + 04): das `QuickBookingModal` wird um Kalender,
+   Slot-Picker und FileUpload erweitert (Standalone-Mode). Modal blockiert Escape
+   während Submit (verhindert versehentlichen Datenverlust).
+3. **Toast + Bestätigungsseite mit Token** (US-IT11-03): existierende Toast-Lib wird
+   konsequent nach jedem Submit gerufen, Bestätigungsseite ist via signiertem JWT-Token
+   reload-fest und 30 Tage gültig.
+4. **Admin-Anhang-Anzeige + Upload-Validierung 10/50 MB** (US-IT11-04): `BookingTable.tsx`
+   erhält Thumbnail, Dateigröße und Empty-State für Anhänge. `FileUpload`-Komponente
+   validiert Bilder auf 10 MB und Videos auf 50 MB clientseitig (Server validiert ebenfalls).
+5. **Stornieren — Customer + Gast** (US-IT11-06): Stornieren-Button im Kunden-Dashboard,
+   Bestätigungs-Dialog vor Submit, Erfolgs-Toast, Gast-Stornierungsseite mit signiertem Token.
+6. **Routing-Konsolidierung:** `/buchung` ist die kanonische Buchungs-Route. Wenn
+   `/buchen` an einer Stelle existiert, wird er per `next.config.js`-Redirect auf
+   `/buchung` umgeleitet (Engineer prüft).
+
+Pre-Fill-Logik (US-IT11-05) und Buchung-end-to-end (US-IT11-01) sind **operative**
+Aufgaben — kein Frontend-Code-Change nötig, der Defekt liegt in der Prod-Konfiguration.
 
 ## Tech Stack
 
-Bestand (unverändert, identisch mit IT4–IT6):
+Bestand (unverändert, identisch mit IT10):
 
 - **Framework:** Next.js 14 (App Router) + TypeScript
-- **State:** React useState + Server-Components + schmaler `useCustomerSession()`-Hook
-- **Styling:** Tailwind CSS mit `baerenstark`-Farbtokens (Braun #6b3e2e, Beige #f4ebd9)
-- **Forms:** React Hook Form + Zod-Resolver (`src/lib/schemas.ts`)
+- **State:** React useState + Context (neu: `BookingDialogProvider`) + RHF + `useCustomer()`-Hook
+- **Styling:** Tailwind CSS mit `baerenstark`-Farbtokens
+- **Forms:** React Hook Form 7.53 + Zod-Resolver
+- **Toast-System:** eigenständige Lib `src/lib/toast.ts` (kein `sonner`, keine externe Dep)
+- **Modal-Wrapper:** `src/components/ui/Modal.tsx` (eigenständig, Focus-Trap, ARIA-konform)
 - **HTTP-Client:** `src/lib/api-client.ts`
-- **Build:** Next.js Pipeline auf Vercel
+- **Datei-Upload:** `@vercel/blob: 2.3.3` (bereits Dependency, neu: `BLOB_READ_WRITE_TOKEN` in Prod)
 
-Keine neuen Frontend-Dependencies in IT7.
+**Keine neuen Frontend-Dependencies in IT11.**
+
+---
 
 ## Pages / Screens
 
-### Page: Registrierung (route: `/konto/registrieren`)
+### Page: Startseite (route: `/`) — **edit**
 
-- **Linked story:** US-IT7-01.
-- **Purpose:** Email-/Passwort-Registrierung mit OAuth-Buttons als
-  Alternative.
-- **War in IT6 D3-Fix:** redirected zu `/konto/login`. Ab IT7: vollwertige
-  Form.
-- **Components:**
-  - `<RegisterForm />` (Client) — RHF + ZodResolver auf
-    `CustomerRegisterSchema` (firstName, lastName, email, password,
-    passwordConfirm, phone optional, privacyAccepted Checkbox).
-  - `<OAuthButtons />` (Client) — Google + Facebook + Hinweistext „oder".
-  - `<ServerErrorBanner />` — bei `EMAIL_ALREADY_REGISTERED`,
-    `RATE_LIMITED`, `VALIDATION_ERROR`.
-  - `<LegalNote />` — Datenschutz- und AGB-Verweis.
-- **Data needed:** `POST /api/customer/register`.
-- **User interactions:**
-  - Submit → `POST /register` → 201 → Redirect zu `/konto` mit
-    Success-Banner „Bitte bestätigen Sie Ihre E-Mail-Adresse" (Banner
-    persistiert via Layout-Banner-Komponente, siehe unten).
-  - 409 `EMAIL_ALREADY_REGISTERED` → Inline-Fehler am Email-Feld + Link
-    „Bereits registriert? Zum Login".
-  - 429 `RATE_LIMITED` → Banner „Zu viele Versuche. Bitte versuchen Sie
-    es in einer Stunde erneut."
-- **Validierung (client-side):** alle Pflichtfelder, Email-Format,
-  Passwort min. 8 Zeichen, `password === passwordConfirm`,
-  `privacyAccepted === true`.
+- **Linked stories:** US-IT11-02.
+- **Purpose:** Einstiegspunkt mit Hero-CTA der das Buchungs-Modal öffnet.
+- **Komponenten-Änderungen:**
+  - `<Hero />` (`src/components/home/Hero.tsx`): primärer CTA „Jetzt Termin buchen"
+    wird von `<Link href="/buchung">` zu `<button onClick={openBookingDialog}>`.
+  - Sekundärer Tel-Link (`tel:`-Anchor) bleibt unverändert.
+- **Data needed:** keine.
+- **A11y:** Button hat `aria-haspopup="dialog"`, fokussierbar, gleiche Tastatur-
+  Shortcuts wie ein Link.
 
-### Page: Login (route: `/konto/login`)
+### Page: Buchung (route: `/buchung`) — **read-only Fallback**
 
-- **Linked story:** US-IT7-01, US-IT7-02, US-IT7-03.
-- **Purpose:** Email/Password-Login + Google + Facebook nebeneinander.
-- **War in IT6:** nur OAuth-Buttons. Ab IT7: zusätzlich Credentials-Form.
-- **Components:**
-  - `<LoginForm />` (Client) — RHF + ZodResolver auf
-    `CustomerLoginSchema` (email, password, optional `redirectUrl`
-    aus Query-Param).
-  - `<OAuthButtons />` (Client) — Google + Facebook.
-  - `<ForgotPasswordLink />` — `<Link href="/konto/passwort-vergessen">`.
-  - `<ServerErrorBanner />` — siehe Mapping unten.
-  - `<RegisterPromptLink />` — „Noch kein Konto? Registrieren".
-- **Data needed:** `POST /api/customer/login`. OAuth-Flow geht über
-  NextAuth-Routes (`/api/auth/customer/[...]`).
-- **User interactions:**
-  - Submit Credentials → 200 → `redirectUrl` aus Response (oder `/konto`).
-  - 401 `INVALID_CREDENTIALS` → Banner „E-Mail oder Passwort ungültig"
-    (KEIN Hint, welches Feld falsch ist).
-  - 422 `OAUTH_ONLY_ACCOUNT` → Banner „Dieses Konto wurde mit Google/
-    Facebook erstellt. Bitte verwenden Sie die OAuth-Buttons unten."
-  - 429 `RATE_LIMITED` → Banner siehe oben.
-  - OAuth-Klick → `signIn('google', …)` bzw. `signIn('facebook', …)`.
-- **Error-Query-Params (von OAuth-Flow):**
-  - `?error=oauth_no_email` → Banner „Mit Ihrem Facebook-Konto ist keine
-    E-Mail-Adresse verknüpft. Bitte registrieren Sie sich per E-Mail."
-  - `?error=oauth_unverified_conflict` → Banner „Es existiert bereits
-    ein nicht-verifiziertes Konto mit dieser E-Mail-Adresse. Bitte
-    verifizieren Sie es zuerst."
-  - `?error=ACCOUNT_DISABLED` (Admin-Login an `/admin/login`, nicht hier
-    relevant — dokumentiert für Vollständigkeit).
-- **Validierung:** Email-Format, Passwort nicht leer.
+- **Linked stories:** US-IT11-02 (AC3, Fallback-Pfad).
+- **Purpose:** SEO-fähige Fallback-Seite, direkter URL-Aufruf, JS-Off-Browser.
+- **Komponenten:** unverändert (`BookingClient.tsx`, `BookingForm.tsx`, `Calendar`,
+  `TimeSlotPicker`, `DurationPicker`, `FileUpload`).
+- **Verhalten:** identisch zu IT10 — Slot-Klick öffnet das embedded Modal innerhalb
+  der Seite.
 
-### Page: Passwort vergessen (route: `/konto/passwort-vergessen`)
+### Page: Bestätigungsseite (route: `/buchung/bestaetigung/[bookingId]?token=<jwt>`) — **neu (v3)**
 
-- **Linked story:** US-IT7-05.
-- **Purpose:** Reset-Link anfordern.
-- **Components:**
-  - `<ForgotPasswordForm />` (Client) — RHF + ZodResolver auf
-    `CustomerForgotPasswordSchema` (email).
-  - `<ConfirmationCard />` — wird nach Submit IMMER angezeigt
-    (Email-Enumeration-Schutz).
-- **Data needed:** `POST /api/customer/forgot-password`.
-- **User interactions:**
-  - Submit → 200 → `<ConfirmationCard />` ersetzt Form mit Text:
-    „Falls diese Adresse registriert ist, erhalten Sie eine E-Mail mit
-    weiteren Anweisungen. Der Link ist 1 Stunde gültig."
-  - 429 → Banner.
-- **Validierung:** Email-Format.
+- **Linked stories:** US-IT11-03.
+- **Purpose:** zeigt nach erfolgreichem Submit die Buchungsnummer + Service + Datum.
+  **Neue Route + neue Komponente** (v3) — kanonische initiale-Bestätigung.
+  **Reload-fest** durch signierten JWT-Token in der URL.
+- **URL-Format:** `/buchung/bestaetigung/<bookingId>?token=<jwt>` — Token
+  HMAC-signiert mit `BOOKING_TOKEN_SECRET`, Scope `booking-confirmation`,
+  Ablauf 30 Tage. Eingebettet in der Bestätigungs-E-Mail.
+  Eingeloggte Kunden: ohne Token reicht ebenfalls (Auth-Cookie via Server-Component validiert).
+- **Komponenten:**
+  - **NEU:** Server-Component `src/app/buchung/bestaetigung/[bookingId]/page.tsx` —
+    liest Path-Param `bookingId` und Query `token`, ruft serverseitig
+    `GET /api/bookings/:id/public-summary?token=<jwt>` auf. Bei 401 → rendert
+    `<TokenExpiredPage flow="confirmation" />` direkt server-side.
+  - **NEU:** Client-Component `BookingConfirmation` unter
+    `src/app/buchung/bestaetigung/[bookingId]/BookingConfirmation.tsx` —
+    rendert Buchungsnummer (gekürzte ID, erste 8 Zeichen UPPERCASE), Service-Label,
+    Datum/Uhrzeit, Status-Badge, Telefonnummer als CTA, Links „Zur Startseite" und
+    „Eine weitere Anfrage stellen" (öffnet Booking-Modal via `useBookingDialog`).
+- **A11y:** `role="status"`, Heading-Level h1, Live-Region für Screen-Reader.
+- **No-Token Edge-Case:** wenn ohne Token UND kein Auth-Cookie → 401
+  vom Endpoint → Server-Component rendert `<TokenExpiredPage>` mit Login-Hinweis +
+  Telefonnummer-CTA.
 
-### Page: Passwort zurücksetzen (route: `/konto/passwort-zuruecksetzen?token=…`)
+### Page: Counter-Proposal-Bestätigung (route: `/buchung/bestaetigt`) — **read-only (v3)**
 
-- **Linked story:** US-IT7-05.
-- **Purpose:** Neues Passwort setzen via Token aus Reset-Mail.
-- **Components:**
-  - `<ResetPasswordForm />` (Client) — RHF + ZodResolver auf
-    `CustomerResetPasswordSchema` (password, passwordConfirm). `token`
-    kommt aus Query-Param und wird automatisch in den Body gesetzt
-    (hidden field).
-  - `<TokenInvalidCard />` — wird angezeigt, wenn der Server 410
-    `INVALID_OR_EXPIRED_TOKEN` antwortet. Enthält Link zu
-    `/konto/passwort-vergessen`.
-- **Data needed:** `POST /api/customer/reset-password`.
-- **User interactions:**
-  - Submit → 200 → Redirect zu `/konto/login?reset=success` mit Success-
-    Banner „Passwort erfolgreich geändert. Bitte melden Sie sich an."
-  - 410 → `<TokenInvalidCard />` ersetzt die Form.
-  - 400 → Inline-Fehler am Feld.
-- **Validierung:** Passwort min. 8 Zeichen, `password === passwordConfirm`.
-- **UX-Hinweis:** Wenn `?token=` fehlt oder leer ist → sofort
-  `<TokenInvalidCard />` zeigen (Frontend prüft das clientseitig, ohne
-  API-Call).
+- **Linked stories:** US-14 (Counter-Proposal-Flow, Bestand).
+- **Purpose:** Bestätigungsseite des Counter-Proposal-Antwort-Flows (Tom→Kunde).
+  Bleibt in IT11 **unangetastet**. URL-Params `?accepted=true` / `?status=gone` /
+  `?id=…&token=…` bleiben Bestand.
+- **Komponenten:** `<BestaetigtClient />` (Bestand) — KEIN Edit in IT11.
 
-### Page: Email verifizieren (route: `/konto/verifizieren?token=…`)
+### Page: Gast-Stornierung (route: `/buchung/[id]/stornieren?token=<jwt>`) — **neu (v3, Path-Param)**
 
-- **Linked story:** US-IT7-01.
-- **Purpose:** Klick auf Verify-Link aus Registrierungs-Mail.
-- **Components:**
-  - `<VerifyClient />` — Client-Component, ruft beim Mount
-    `GET /api/customer/verify?token=…` auf. Zeigt Spinner, dann Erfolg
-    oder Fehlerkarte.
-  - `<TokenInvalidCard />` (geteilt mit Reset-Page).
-- **Data needed:** `GET /api/customer/verify?token=…`.
-- **User interactions:** Bei 200 → Redirect zu
-  `/konto/verifizieren/erfolg`. Bei 410 → Fehlerkarte.
+- **Linked stories:** US-IT11-06.
+- **Purpose:** Gast-Storno-Flow per signiertem Token aus der Bestätigungs-E-Mail.
+  Eingeloggte Kunden brauchen diese Seite nicht — sie stornieren aus `/konto`.
+- **URL-Format (v3):** `/buchung/<bookingId>/stornieren?token=<jwt>` mit Scope
+  `booking-cancellation` (separater Token vom Confirmation-Token). Path-Param-ID,
+  RESTful, kanonisch.
+- **Komponenten:**
+  - Server-Component (`src/app/buchung/[id]/stornieren/page.tsx`): liest Path-Param
+    `id` und Query `token`. Ruft serverseitig `verifyBookingCancellationToken()`
+    aus `src/lib/booking-tokens.ts` auf. Bei Erfolg: lädt Buchungsdetails via interner
+    DB-Query oder `GET /api/bookings/:id/public-summary?token=<jwt>` (der Endpoint
+    akzeptiert v3 auch den `booking-cancellation`-Scope) und reicht sie an
+    `<GuestCancelClient />` weiter.
+  - Client-Component (`src/app/buchung/[id]/stornieren/GuestCancelClient.tsx`):
+    zeigt Buchungsdetails (Service, Datum, Zeit) + `<CancelConfirmationDialog />`
+    („Möchten Sie diese Anfrage wirklich stornieren?") mit „Ja, stornieren" und
+    „Abbrechen". Bei „Ja": **explizit POST nach User-Klick** auf
+    `POST /api/bookings/:id/cancel?token=<jwt>`. **Niemals GET** — schützt vor
+    Mail-Provider-Scanner-Race (siehe ARCHITECTURE_IT11 §6.3).
+  - Erfolg → Erfolgs-Page „Anfrage erfolgreich storniert. Tom wurde informiert."
+    (kein Redirect, in-place Update).
+  - Idempotenz-Path: wenn Server `alreadyCancelled: true` liefert, zeige
+    „Diese Anfrage wurde bereits storniert."
+- **Token-Expiry:** wenn Server-side Token-Verify fehlschlägt → Server-Component
+  rendert direkt `<TokenExpiredPage />` (kein Roundtrip zum Client).
+- **Mail-Scanner-Schutz:** Page rendert ausschließlich UI; kein Auto-Submit, kein
+  GET-Trigger, kein `<a href=…/cancel>`.
+- **A11y:** Modal mit `role="dialog"`, `aria-modal="true"`, Focus-Trap, Escape
+  schliesst Dialog (außer während Submit).
 
-### Page: Email-Verifizierung erfolgreich (route: `/konto/verifizieren/erfolg`)
+### Token-Expired-Fallback — **inline (v3)**
 
-- **Linked story:** US-IT7-01.
-- **Purpose:** Statische Erfolgsseite.
-- **Components:**
-  - `<SuccessCard />` mit Bärenstark-Logo, Text „Ihre E-Mail wurde
-    bestätigt. Sie können sich jetzt einloggen.", Button → `/konto/login`.
+- **Linked stories:** US-IT11-03 + US-IT11-06.
+- **Purpose:** Hinweis-UI, wenn der Confirmation- oder Cancel-Link abgelaufen ist.
+- **Implementierung:** `<TokenExpiredPage flow="confirmation" | "cancellation" />`
+  wird direkt von der jeweiligen Server-Component (Bestätigungs- oder Storno-Page)
+  inline gerendert, wenn der Server-side Token-Verify fehlschlägt. **Keine separate
+  Route mehr.** Vereinfacht das Routing und vermeidet Redirect-Roundtrips.
+- **Inhalt:** „Dieser Link ist abgelaufen. Bitte rufen Sie uns direkt an:
+  0157 74787512." mit `tel:`-CTA + Link „Zur Startseite" + (optional)
+  „Neue Anfrage stellen" (öffnet Booking-Modal).
 
-### Layout-Erweiterung: `/konto/layout.tsx`
+### Page: Kunden-Dashboard (route: `/konto`) — **edit**
 
-- **Linked story:** US-IT7-01.
-- **Purpose:** Info-Banner für Konten ohne `emailVerified`.
-- **Components:**
-  - `<UnverifiedEmailBanner />` (Client) — wird angezeigt, wenn
-    `useCustomerSession().emailVerified === false`. Text: „Bitte bestätigen
-    Sie Ihre E-Mail-Adresse." + Button „Erneut senden" →
-    `POST /api/customer/resend-verification`. Nach Klick: Banner-Text
-    wechselt auf „E-Mail wurde gesendet." (lokal, kein Page-Reload).
-- **Data needed:** Customer-Session aus `GET /api/customer/me`.
+- **Linked stories:** US-IT11-06.
+- **Purpose:** zeigt eingeloggten Kunden ihre Buchungen mit Stornieren-Button.
+- **Komponenten-Änderungen:**
+  - `<CustomerBookingsClient />` (oder Äquivalent in `src/app/konto/...`):
+    pro Buchung in der Liste: wenn `b.isCancellable === true` (Server-berechnetes
+    Flag aus `GET /api/customer/bookings`) und `b.status NOT IN ['CANCELLED', 'REJECTED', 'COMPLETED']`,
+    zeige Stornieren-Button.
+  - Klick auf Stornieren → öffnet `<CancelConfirmationDialog />` (siehe Shared
+    Components unten).
+  - Nach erfolgreichem Cancel: optimistic UI-Update (Status-Badge → „Storniert",
+    Stornieren-Button verschwindet) + Re-Fetch der Liste + `toast.success('Auftrag
+    storniert.')`.
+  - Bei Fehler 409 (Frist überschritten): Toast-Error mit Hinweis „Bitte rufen Sie
+    0157-74787512 an".
+- **A11y:** Stornieren-Button hat `aria-label="Anfrage <Service> am <Datum> stornieren"`
+  für Screen-Reader-Klarheit.
+
+### Page: Admin-Buchungsliste (route: `/admin/bookings`) — **edit**
+
+- **Linked stories:** US-IT11-04 (Admin-Anzeige).
+- **Purpose:** Tom sieht alle Buchungen mit Anhängen.
+- **Komponenten-Änderungen:**
+  - `<BookingTable />` (`src/components/admin/BookingTable.tsx`): Anhang-Sektion pro
+    Buchung wird ausgebaut.
+  - Neu: bei `image/*`-MIME ein Thumbnail (60×60 px, `object-cover`, lazy-loaded).
+  - Neu: Dateigröße in lesbarem Format (`humanSize()`-Helper, ggf. nach
+    `src/lib/format.ts` extrahieren).
+  - Neu: bei leerer Anhangs-Liste ein expliziter „Keine Dateien hochgeladen"-Hinweis.
+  - Klick auf Anhang öffnet weiterhin in neuem Tab (kein Lightbox in IT11 — Backlog).
+
+---
 
 ## Shared Components
 
-| Komponente                 | Props                                                                | Zweck                                                                                 |
-| -------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `<OAuthButtons />`         | `redirectUrl?: string`                                               | Google + Facebook Buttons. Nur sichtbar, wenn Provider aktiv (Feature-Flag-Check).   |
-| `<ServerErrorBanner />`    | `code: string \| null, message?: string`                            | Mappt Fehler-Codes auf deutsche Texte (siehe Mapping unten).                          |
-| `<TokenInvalidCard />`     | —                                                                    | Geteilte Card für Verify- und Reset-Token-Fehler. CTA → `/konto/passwort-vergessen`. |
-| `<UnverifiedEmailBanner/>` | —                                                                    | Layout-Banner mit Resend-Button.                                                      |
-| `<ConfirmationCard />`     | `title: string, body: string`                                        | Generische „Aktion ausgeführt"-Card.                                                  |
+### `<BookingDialogProvider>` — **neu**
 
-### Fehler-Code → deutsche Meldung (verbindlich)
+**Datei:** `src/components/booking/BookingDialogProvider.tsx`
 
-| Code                          | Meldung                                                                                              |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `INVALID_CREDENTIALS`         | „E-Mail oder Passwort ungültig."                                                                     |
-| `EMAIL_ALREADY_REGISTERED`    | „Diese E-Mail-Adresse ist bereits registriert."                                                      |
-| `OAUTH_ONLY_ACCOUNT`          | „Dieses Konto wurde mit Google/Facebook erstellt. Bitte verwenden Sie die OAuth-Buttons."             |
-| `INVALID_OR_EXPIRED_TOKEN`    | „Dieser Link ist nicht mehr gültig. Bitte fordern Sie einen neuen Link an."                          |
-| `ALREADY_VERIFIED`            | „Ihre E-Mail-Adresse ist bereits bestätigt."                                                         |
-| `RATE_LIMITED`                | „Zu viele Versuche. Bitte versuchen Sie es in einer Stunde erneut."                                  |
-| `oauth_no_email`              | „Mit Ihrem Konto ist keine E-Mail-Adresse verknüpft. Bitte registrieren Sie sich per E-Mail."        |
-| `oauth_unverified_conflict`   | „Es existiert bereits ein nicht-verifiziertes Konto mit dieser E-Mail. Bitte verifizieren Sie es zuerst." |
-| `oauth_error`                 | „Bei der Anmeldung ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut."                       |
-| `VALIDATION_ERROR`            | wird inline am Feld angezeigt (RHF + Zod).                                                            |
+```typescript
+'use client';
+
+interface BookingDialogContextValue {
+  isOpen: boolean;
+  defaultService: Service | null;
+  open: (options?: { service?: Service }) => void;
+  close: () => void;
+}
+
+interface BookingDialogProviderProps {
+  children: React.ReactNode;
+}
+
+export function BookingDialogProvider(props: BookingDialogProviderProps): JSX.Element;
+```
+
+Verantwortlichkeiten:
+- Hält App-weiten Modal-State (`isOpen`, `defaultService`).
+- Ruft `useCustomer()` einmal zentral und liefert den Customer als Context an die
+  internen Booking-Komponenten — vermeidet redundante `/api/customer/me`-Calls.
+- Rendert das `<QuickBookingModal mode="standalone" />` in einem Portal am Ende des
+  Body, sodass es über alle anderen Inhalte legt.
+
+### `<QuickBookingModal>` — **edit**
+
+**Datei:** `src/components/booking/QuickBookingModal.tsx`
+
+```typescript
+type ModalMode = 'embedded' | 'standalone';
+
+interface QuickBookingModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  /** 'embedded' (default, IT10): Slot kommt vom Parent, Modal zeigt nur Form.
+   *  'standalone' (IT11): Modal rendert Service-Picker + Kalender + Slot-Picker + Form. */
+  mode?: ModalMode;
+  /** Pflicht im 'embedded'-Mode, optional/intern verwaltet im 'standalone'-Mode. */
+  selectedTimeSlot: SelectedTimeSlot | null;
+  defaultService?: Service | null;
+  defaultValues?: QuickBookingPrefill;
+  onSlotChange?: () => void;
+  onSubmitSuccess: (bookingId: string) => void;
+}
+```
+
+Erweiterungen:
+- Im `standalone`-Mode interne Steps A-D (siehe ARCHITECTURE_IT11 §2.2).
+- `<FileUpload onAttachmentsChange={setAttachmentIds} />` zwischen Beschreibung und
+  Datenschutz einfügen (in beiden Modes).
+- Nach Erfolg: `useBookingDialog().reset()` aufrufen, dann `router.push('/buchung/bestaetigung/<bookingId>?token=<jwt>')`
+  (v3-Route) statt nur `onClose()`.
+
+### `<BookingForm>` — **edit (klein)**
+
+**Datei:** `src/components/booking/BookingForm.tsx`
+
+Änderungen:
+- Submit-Erfolg: redirect statt Inline-Banner. Der `setStatus({ kind: 'success' })`-
+  Branch wird zu einem kurzen Übergangs-State, anschliessend `router.push(...)`.
+- Toast wird parallel zum Push aufgerufen (4 s sichtbar, auf der Bestätigungsseite
+  immer noch lesbar).
+
+### `<BookingConfirmation>` — **neu (v3)**
+
+**Datei:** `src/app/buchung/bestaetigung/[bookingId]/BookingConfirmation.tsx`
+(separate Client-Component, nicht in `BestaetigtClient.tsx` integriert — siehe
+v3-Trennung).
+
+```typescript
+interface BookingConfirmationProps {
+  bookingId: string;       // CUID, gekürzt anzeigen (erste 8 Zeichen)
+  service: string;         // Service-Slug
+  date: string;            // YYYY-MM-DD
+  startTime: string;       // HH:MM
+  status?: string;         // optional: PENDING / CONFIRMED — für Status-Badge
+}
+
+export function BookingConfirmation(props: BookingConfirmationProps): JSX.Element;
+```
+
+UI:
+- Heading: „Anfrage erhalten — Tom meldet sich!"
+- Buchungsnummer: `#${bookingId.slice(0, 8).toUpperCase()}`
+- Service-Label aus `getServiceLabel(slug)`.
+- Datum + Uhrzeit aus `formatBerlinDateShort(date)` + `startTime`.
+- CTAs: „Zur Startseite", `tel:`-Link, „Eine weitere Anfrage stellen" (öffnet
+  das Modal via `useBookingDialog().open()`).
+
+### `<FileUpload>` — **edit (Limits)**
+
+**Datei:** `src/components/booking/FileUpload.tsx`
+
+Erweiterungen für IT11-04 (Tom-Bestätigung 2026-05-03):
+
+- **MIME-spezifische Limits** (statt heutiges einheitliches 20 MB):
+  - Bilder (`image/*`) → max. 10 MB
+  - Videos (`video/*`) → max. 50 MB
+  - PDFs (`application/pdf`) → max. 10 MB
+- **Client-Validation:** beim `change`-Event und Drag-Drop-Drop-Event:
+  `getUploadLimitForType(file.type)` aus `src/lib/schemas.ts` rufen, bei
+  Überschreitung Inline-Fehler pro File-Entry rendern (rote Banner-Card,
+  exakte Bytes-Differenz angezeigt). KEIN Upload-Request abschicken.
+- **Server-Error-Handling:** wenn der Server trotzdem 413 antwortet (defense-in-depth),
+  Fehlermeldung der Server-Response (`error.message`) anzeigen.
+- **Hint-Text** unter dem File-Input: „Bilder bis 10 MB · Videos bis 50 MB · max. 5 Dateien".
+- **A11y:** Fehler-Banner pro File-Entry mit `role="alert"` + `aria-live="polite"`.
+
+Wird zusätzlich im `QuickBookingModal` eingebunden (zweiter Verwendungs-Ort).
+
+### `<CancelConfirmationDialog>` — **neu**
+
+**Datei:** `src/components/booking/CancelConfirmationDialog.tsx`
+
+```typescript
+interface CancelConfirmationDialogProps {
+  isOpen: boolean;
+  onClose: () => void;
+  /** Wird mit optionalem Reason aufgerufen, sobald der User bestätigt. */
+  onConfirm: (reason?: string) => Promise<void>;
+  /** Buchungs-Display-Daten für den Dialog-Body. */
+  booking: {
+    service: string;
+    date: string;       // YYYY-MM-DD
+    startTime: string;  // HH:MM
+  };
+  /** Wenn true, blockiert der Dialog Escape und Backdrop-Click (während Submit). */
+  isSubmitting?: boolean;
+}
+
+export function CancelConfirmationDialog(props: CancelConfirmationDialogProps): JSX.Element;
+```
+
+Verantwortlichkeiten:
+- Standard-Confirm-Modal mit Titel „Anfrage stornieren?", Body mit Buchungsdaten
+  + Standard-Text „Möchten Sie diese Anfrage wirklich stornieren? Diese Aktion
+  kann nicht rückgängig gemacht werden.".
+- Optionaler `<textarea>` für „Grund (optional)" — max. 500 Zeichen
+  (Counter sichtbar). UX-Designer entscheidet, ob das Feld in V1 sichtbar ist
+  (siehe Open Question Q5).
+- Buttons: „Abbrechen" (sekundär, links) + „Ja, stornieren" (primär gefährlich,
+  rote Akzent-Variante, rechts).
+- **Escape-Block während Submit:** wenn `isSubmitting === true`, ignoriert das
+  Modal Escape-Taste und Backdrop-Click. Verhindert versehentlichen Datenverlust
+  während des laufenden API-Calls.
+- A11y: `role="dialog"`, `aria-modal="true"`, Focus auf „Abbrechen" beim Open
+  (sicherer Default, primärer Action ist destruktiv).
+
+Wird verwendet im Customer-Dashboard `/konto` und im Gast-Storno-Flow
+`/buchung/stornieren`.
+
+### `<GuestCancelClient>` — **neu**
+
+**Datei:** `src/app/buchung/stornieren/GuestCancelClient.tsx`
+
+Client-Component für die Gast-Storno-Page. Verantwortlichkeiten:
+- Zeigt Buchungs-Details aus den Server-Component-Props (Service, Datum, Zeit, Status).
+- Rendert den `<CancelConfirmationDialog />`.
+- Bei „Ja, stornieren": ruft `cancelBookingAsGuest(id, token, reason)` aus
+  `api-client.ts`.
+- Erfolg → ersetzt UI durch Erfolgs-Card „Anfrage erfolgreich storniert. Tom wurde
+  benachrichtigt.".
+- Idempotenz (`alreadyCancelled: true`) → zeigt Card „Diese Anfrage wurde bereits
+  storniert.".
+- Fehler 409 (Frist abgelaufen) → Card „Stornierung nicht mehr möglich. Bitte
+  rufen Sie uns an: 0157-74787512".
+- Fehler 401 (Token expired/invalid) → kann eigentlich nicht passieren (Server-Component
+  hat schon validiert), aber defensiv: Re-Direct auf Token-Expired-Fallback.
+
+### `<TokenExpiredPage>` — **neu**
+
+**Datei:** `src/components/booking/TokenExpiredPage.tsx`
+
+Wiederverwendbare Hinweis-Page für abgelaufene Tokens (Confirmation- ODER
+Cancellation-Flow). Wird von Server-Components gerendert, wenn Token-Verify
+fehlschlägt.
+
+```typescript
+interface TokenExpiredPageProps {
+  /** Welcher Flow ist betroffen — bestimmt die Microcopy. */
+  flow: 'confirmation' | 'cancellation';
+}
+```
+
+Inhalt:
+- Heading: „Link abgelaufen" (oder „Stornierungslink abgelaufen")
+- Body: „Dieser Link ist nicht mehr gültig. Bitte rufen Sie uns direkt an:"
+- CTA: `<a href="tel:+4915774787512">{CONTACT.phoneDisplay}</a>`
+- Sekundärer Link: „Zur Startseite"
+
+### `<BookingTable>` — **edit**
+
+**Datei:** `src/components/admin/BookingTable.tsx`
+
+Änderungen in der Anhang-Sektion (heute Z. 354–387):
+- Empty-State: wenn `b.attachments.length === 0`, zeige `<dt>Anhänge</dt><dd className="text-baerenstark-bark/60">Keine Dateien hochgeladen</dd>`.
+- Pro Anhang:
+  - Bei `contentType.startsWith('image/')`: zusätzlich zum Icon ein 60×60 px Thumbnail
+    (`<img src={att.url} alt="" loading="lazy" className="h-15 w-15 rounded-md object-cover" />`).
+  - Dateigröße via `humanSize(att.sizeBytes)` (z.B. „2.3 MB").
+  - Layout: Card-Style mit Thumbnail + Filename + Size + Download-Icon, statt Inline-Pill.
+
+### `<Header>` — **edit**
+
+**Datei:** `src/components/layout/Header.tsx`
+
+Änderung Z. 28–33: `<Link href="/buchung">` ersetzen durch:
+
+```tsx
+<button
+  type="button"
+  onClick={() => openBookingDialog()}
+  aria-haspopup="dialog"
+  className="rounded-lg bg-baerenstark-wood px-3 py-2 …"
+>
+  Termin buchen
+</button>
+```
+
+Wobei `openBookingDialog` aus `useBookingDialog()` kommt.
+
+### `<Hero>` — **edit**
+
+**Datei:** `src/components/home/Hero.tsx`
+
+Änderung Z. 27–32: gleiche Ersetzung wie Header. Sekundärer Tel-CTA bleibt.
+
+---
 
 ## API Consumption
 
-Alle Pfade werden via `src/lib/api-client.ts` aufgerufen. Antworten
-werden gegen die Schemas aus `contracts/zod-schemas.ts` validiert.
+**Zwei neue Endpoints in IT11** (siehe `ARCHITECTURE_IT11.md` §3.5 + §6.4):
 
-| Endpoint                                          | Verwendet von                                  | Anmerkung                                                                |
-| ------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ |
-| `POST /api/customer/register`                     | `<RegisterForm />`                             | Body `CustomerRegisterSchema`. 201 → `CustomerUserPublicSchema`.         |
-| `POST /api/customer/login`                        | `<LoginForm />`                                | Body `CustomerLoginSchema`. 200 → `CustomerLoginResponseSchema`.         |
-| `GET  /api/customer/verify?token=`                | `<VerifyClient />`                             | 200 → `{ ok: true }`. 410 → `<TokenInvalidCard />`.                      |
-| `POST /api/customer/resend-verification`          | `<UnverifiedEmailBanner />` Resend-Button      | Auth: Customer-Session. 200 → `{ ok: true }`.                            |
-| `POST /api/customer/forgot-password`              | `<ForgotPasswordForm />`                       | 200 → `<ConfirmationCard />`.                                            |
-| `POST /api/customer/reset-password`               | `<ResetPasswordForm />`                        | 200 → Redirect Login. 410 → `<TokenInvalidCard />`.                      |
-| `GET  /api/auth/customer/[...]` (NextAuth)        | `<OAuthButtons />` (via `signIn()`)            | unverändert seit IT5/IT6.                                                |
-| `GET  /api/auth/diagnose`                         | `npm run auth:check` (CLI-Tool, nicht UI)      | Dev-only.                                                                |
+| Aufrufer                          | Endpunkt                                                  | Zweck                                       |
+|-----------------------------------|-----------------------------------------------------------|---------------------------------------------|
+| `bestaetigung/[id]/page.tsx` (Server-Component, v3) | **NEU** `GET /api/bookings/:id/public-summary?token=<jwt>` | Reload-feste Bestätigungsseite (US-IT11-03). Akzeptiert Token-Scope `booking-confirmation`. |
+| `[id]/stornieren/page.tsx` (Server-Component, v3) | **NEU** `GET /api/bookings/:id/public-summary?token=<jwt>` | Storno-Page-Preview (US-IT11-06). Akzeptiert Token-Scope `booking-cancellation` (v3 Scope-Polymorphismus, kein separater Endpoint). |
+| `GuestCancelClient`               | **NEU** `POST /api/bookings/:id/cancel?token=<jwt>`       | Gast-Storno (US-IT11-06). Explizit POST nach User-Klick. |
+| `CustomerBookingsClient` (`/konto`) | **NEU** (kanonisch) `POST /api/bookings/:id/cancel`     | Eingeloggter Kunden-Storno (US-IT11-06). Auth via Cookie. |
 
-Frontend ruft `/api/auth/diagnose` **nicht direkt** aus dem UI auf — es
-ist ein Self-Service-Endpoint für Tom/Engineer im Browser oder via Curl.
+**Bestand-Aufrufe (unverändert):**
 
-## State Management
+| Aufrufer                  | Endpunkt                              | Zweck                                       |
+|---------------------------|---------------------------------------|---------------------------------------------|
+| `BookingDialogProvider`   | `GET /api/customer/me`                | Pre-Fill-Daten                              |
+| `QuickBookingModal`       | `POST /api/upload` (via FileUpload)   | Datei in Vercel Blob hochladen (Limits 10/50 MB serverseitig erzwungen) |
+| `QuickBookingModal`       | `POST /api/bookings`                  | Buchung anlegen (mit `attachmentIds[]`); Response enthält jetzt zusätzlich `confirmationToken` und `cancellationToken` |
+| `BookingForm`             | `POST /api/bookings`                  | gleicher Endpunkt (Fallback-Pfad)           |
+| `BookingTable` (Admin)    | `GET /api/bookings`                   | Liste inkl. `attachments[]`                 |
+| `CustomerBookingsClient`  | `GET /api/customer/bookings`          | Liefert `isCancellable`-Flag pro Buchung; Stornieren-Button basiert darauf |
+| `CustomerBookingsClient`  | `POST /api/customer/bookings/:id/cancel` | **Bestand seit IT4**, optional ablösbar durch neuen kanonischen Endpoint (Engineer-Entscheidung) |
 
-- Customer-Session: `useCustomerSession()` aus `src/lib/use-customer.ts`
-  (bestehend). `emailVerified`-Bool steuert Layout-Banner.
-- Form-State: lokal in jeder Page via React Hook Form.
-- Kein neuer globaler Store. Kein Redux, kein Zustand.
+**API-Client-Funktionen (zu ergänzen in `src/lib/api-client.ts`):**
 
-## Validation Rules (Client-Side, RHF + Zod)
+```typescript
+/** US-IT11-03 — Reload-feste Bestätigungsseite. Server-Component-Aufruf. */
+export async function getBookingPublicSummary(
+  id: string,
+  token?: string,    // optional bei Auth-Cookie-Auth
+): Promise<BookingPublicSummary>;
 
-| Feld                | Regel                                                            | Schema                              |
-| ------------------- | ---------------------------------------------------------------- | ----------------------------------- |
-| Email               | `z.string().email().toLowerCase().max(254)`                      | `customerEmailLoginSchema`          |
-| Passwort            | min 8, max 200                                                   | `customerPasswordSchema`            |
-| firstName/lastName  | min 1, max 120, getrimmt                                         | `CustomerRegisterSchema`            |
-| phone (optional)    | `phoneOptionalSchema` (bestehend)                                | `phoneOptionalSchema`               |
-| privacyAccepted     | `z.literal(true)` mit dt. Fehlertext                             | `CustomerRegisterSchema`            |
-| passwordConfirm     | gleich `password`                                                | `.refine()`                         |
-| token (Verify/Reset) | `z.string().min(1)`                                              | `CustomerVerifyTokenQuerySchema`    |
+/** US-IT11-06 — Gast-Storno mit signiertem Token. */
+export async function cancelBookingAsGuest(
+  id: string,
+  token: string,
+  reason?: string,
+): Promise<{ id: string; status: 'CANCELLED'; cancelledAt: string; alreadyCancelled: boolean }>;
 
-## Accessibility & Responsiveness
-
-- WCAG 2.1 Level AA — Form-Labels, Focus-Outlines, Touch-Targets ≥ 44px
-  (IT6 §17.8 Floor bleibt aktiv).
-- Mobile-First: Forms 1-spaltig, max-width 28rem, ausreichende Vertical-
-  Spacing.
-- Error-Banner wird per `role="alert"` ausgezeichnet, damit Screenreader
-  ihn vorlesen.
-- Submit-Buttons haben ein `disabled`-State während des Requests +
-  Spinner-Icon (kein Doppel-Submit).
-- Mehrsprachigkeit: Deutsch only (IT7 keine i18n).
-
-## Story Coverage (Frontend)
-
-| Story        | Frontend Deliverable                                                                                                                                  |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| US-IT7-01    | `/konto/registrieren` (neue Page), `/konto/login` (Credentials-Form ergänzt), `/konto/verifizieren(/erfolg)` (neue Pages), `<UnverifiedEmailBanner />` (Layout-Banner) |
-| US-IT7-02    | `/konto/login` Google-Button-Verhalten, deutsche Fehlermeldung bei `?error=` Query-Params                                                              |
-| US-IT7-03    | `/konto/login` Facebook-Button-Verhalten, gleiche Fehlerbanner-Logik                                                                                  |
-| US-IT7-04    | (kein Frontend) — CLI-Skript, dokumentiert in `scripts/README.md`                                                                                      |
-| US-IT7-05    | `/konto/passwort-vergessen` (neue Page), `/konto/passwort-zuruecksetzen` (neue Page), `<TokenInvalidCard />` (geteilt), Success-Banner auf `/konto/login` |
-
-## File Inventory (Frontend)
-
-Neue Dateien:
-
-```
-src/app/konto/registrieren/page.tsx              (NEU — IT6 hatte hier nur Redirect)
-src/app/konto/passwort-vergessen/page.tsx        (NEU)
-src/app/konto/passwort-zuruecksetzen/page.tsx    (NEU)
-src/app/konto/verifizieren/page.tsx              (NEU)
-src/app/konto/verifizieren/erfolg/page.tsx       (NEU)
-src/components/auth/RegisterForm.tsx             (NEU — Client)
-src/components/auth/LoginForm.tsx                (UPDATE — Credentials-Form ergänzt)
-src/components/auth/ForgotPasswordForm.tsx       (NEU — Client)
-src/components/auth/ResetPasswordForm.tsx        (NEU — Client)
-src/components/auth/VerifyClient.tsx             (NEU — Client)
-src/components/auth/UnverifiedEmailBanner.tsx    (NEU — Client)
-src/components/auth/TokenInvalidCard.tsx         (NEU — Server-Component)
-src/components/auth/ServerErrorBanner.tsx        (NEU — Server-Component)
-src/components/auth/OAuthButtons.tsx             (UPDATE — kein Code-Bruch, ggf. nur Refactor)
-```
-
-Updates:
-
-```
-src/app/konto/layout.tsx                         (UPDATE — Banner einbauen)
-src/lib/api-client.ts                            (UPDATE — neue Endpoints typisiert)
+/** US-IT11-06 — Eingeloggter Storno (kanonisch via /api/bookings/:id/cancel). */
+export async function cancelBookingAsCustomer(
+  id: string,
+  reason?: string,
+): Promise<{ id: string; status: 'CANCELLED'; cancelledAt: string; alreadyCancelled: boolean }>;
 ```
 
 ---
 
-# Frontend Requirements — Iteration 10 (Bug-Triage & Customer-Self-Service)
-
-> **Quelle der Wahrheit:** `ARCHITECTURE_IT10.md`. Vertrags-Schemas:
-> `contracts/api-routes.md` §24, `contracts/zod-schemas.ts` (unverändert).
-> Diese Datei ist **Hauptinput für den UX-Designer**.
-
-## Overview
-
-Iteration 10 enthält drei Bug-Fixes (zwei davon ohne FE-Touchpoint) und
-zwei FE-getriebene Features:
-
-1. **US-IT10-04 Quick-Booking-Modal:** Klick auf Slot im Kalender öffnet
-   ein Modal mit dem vollständigen Buchungsformular — kein Seitenwechsel.
-2. **US-IT10-05 Customer-Self-Service:** eingeloggte Kunden sehen alle
-   eigenen Anfragen mit Status; Buchungsformular wird mit Profildaten
-   vorausgefüllt (Name, Email, Telefon, Adresse).
-
-Bug-Stories US-IT10-01/02/03 sind fast vollständig backend-/konfig-seitig;
-das FE muss lediglich verifizieren, dass die bestehenden Seiten
-(`/konto/passwort-vergessen`, `/admin/users`, `/buchung`) den behobenen
-Endpoints korrekt vertrauen — keine UI-Änderung nötig.
-
-## Tech Stack (unverändert)
-
-- Next.js 14 App Router · React Server Components + Client Components
-- Tailwind CSS · React Hook Form · Zod
-- Native `<dialog>`-Element ODER bestehendes Headless-UI-Pattern für Modal
-  (Entscheidung trifft UX-Designer / Engineer).
-
-## Story Coverage (Iteration 10)
-
-| Story        | Frontend-Deliverable                                                                                                                              |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| US-IT10-01   | Keine UI-Änderung. Bestehende Pages `/konto/passwort-vergessen` und `/konto/passwort-zuruecksetzen` profitieren vom Backend-Konfig-Fix.            |
-| US-IT10-02   | Keine UI-Änderung. Bestehende Page `/admin/users` profitiert vom Backend-Migrations-Fix.                                                            |
-| US-IT10-03   | Keine UI-Änderung. Bestehende Page `/buchung` profitiert vom Backend-Migrations-Fix.                                                                |
-| US-IT10-04   | Neue Modal-Komponente `<QuickBookingModal />`; Update an `BookingCalendar` + `/buchung`-Page (State-Lifting für Modal-Open).                        |
-| US-IT10-05   | Page-Update `/konto` (Status-Badges-Mapping, Empty-State); Page-Update `/buchung` (SSR-Profil-Pre-Fill); ggf. neue Detail-Page `/konto/anfragen/[id]`. |
-
-## Pages / Screens
-
-### `/buchung` (UPDATE — Quick-Booking-Modal + Profil-Pre-Fill)
-
-- **Linked Stories:** US-IT10-04, US-IT10-05 (Teil B)
-- **Purpose:** Anonymer Gast oder eingeloggter Kunde stellt eine Buchungsanfrage.
-- **Komponenten:**
-  - `BookingCalendar` (UPDATE — Click-Handler ruft Parent-State-Setter, der das Modal öffnet)
-  - `QuickBookingModal` (NEU — Wrapper um `BookingForm`)
-  - `BookingForm` (UPDATE — `defaultValues`-Prop um `customerName/Email/Phone` erweitert; Adressfelder vorhanden)
-  - `ProfileAddressHint` (NEU — Hinweis-Banner "Adresse in Ihrem Profil hinterlegen" mit Link zu `/konto/profil`)
-- **Server-Side-Logik (Page Server-Component):**
-  - Liest `customer-session` via `getCustomerFromRequest()`.
-  - Falls eingeloggt: lädt Profil aus DB (oder via `/api/customer/me`-äquivalentem Server-Lookup) und reicht Felder als `defaultValues` an Modal/Form.
-  - Falls nicht eingeloggt: `defaultValues = {}`, Form bleibt leer.
-- **API-Konsumierungen (alle unverändert):**
-  - `GET /api/availability/calendar` — Kalender-Tagesstatus.
-  - `GET /api/slots/available?date=YYYY-MM-DD` — Slot-Liste pro Tag.
-  - `POST /api/bookings` — Buchungs-Anlage.
-  - `POST /api/upload` — Datei-Anhänge.
-- **User-Interactions:**
-  - Klick auf verfügbaren Slot im Kalender → `onSelectTimeSlot(slot)` setzt Parent-State `selectedTimeSlot` und `isQuickBookingOpen=true` → Modal öffnet sich. **Wichtig (STRUCT-4):** Modal-Trigger hat KEINE Vorbedingung „Service muss gewählt sein" — der Service wird im Modal selbst ausgewählt.
-  - Im Modal: Service auswählen (Pflichtfeld, kein Default — siehe „Service-Auswahl im Modal" unten), Pflichtfelder ausfüllen (Profilfelder bereits gefüllt bei eingeloggtem Kunden), „Anfrage absenden".
-  - Erfolg: Modal schließt, Erfolgs-Toast/Inline-Banner auf der Buchungs-Seite. **Kein Seitenwechsel** zu `/buchung/bestaetigt`.
-  - Schließen ohne Submit (Escape, Backdrop-Klick, Close-Button): Modal schließt, Form-Werte bleiben erhalten (Modal bleibt gemountet, `display:none`-Variante).
-  - Validation-Fehler: Inline am Feld, Modal bleibt offen.
-  - **409 mit `error.subcode === 'BOOKING_SLOT_TAKEN'`** (Slot inzwischen weg): Banner im Modal „Dieser Termin wurde inzwischen leider von jemand anderem gebucht. Bitte wählen Sie einen anderen Slot." — Modal bleibt offen, Submit-Label wechselt zu „Anderen Slot wählen", Klick schließt Modal und Fokus geht zurück zum Slot-Picker. Form-State bleibt erhalten. Defensiver Fallback: bei fehlendem `subcode` wird `code === 'CONFLICT' && field === 'date'` wie `BOOKING_SLOT_TAKEN` behandelt. Andere 409 (Tag inaktiv) → generische Konflikt-Microcopy.
-
-#### Service-Auswahl im Modal (STRUCT-4-Fix, verbindlich)
-
-- **Service ist Pflichtfeld im Modal-Form**, nicht Voraussetzung für den Modal-Trigger.
-- **Default-Service:** keiner. Wenn die Page-State einen `serviceSlug` hält (z. B. via URL-Param `?service=…` oder vorheriger ServiceGrid-Klick), wird er als Default ins Modal vorausgewählt; sonst startet das Service-Feld leer.
-- UI: Radio-Group oder Select mit allen `SERVICES`-Slugs (`reinigung`, `entruempelung`, `gartenpflege`, `hausmeister`, `umzugshilfe`, `sonstiges`). Genaue Position im Field-Order entscheidet UX-Designer in `ux-spec-iteration-10.md` §5.6.
-- Validation: leerer Service vor Submit → Inline-Fehler „Bitte wählen Sie einen Service." + Banner oben „Bitte prüfen Sie die markierten Felder." Submit bleibt blockiert.
-- Submit-Body an `POST /api/bookings`: `service` (Pflicht, der gewählte Slug). Backend-Validation greift wie bisher.
-
-### `/konto` (UPDATE — Anfragen-Übersicht refinement)
-
-- **Linked Story:** US-IT10-05 (Teil A)
-- **Purpose:** Eingeloggter Kunde sieht alle eigenen Anfragen mit Status.
-- **Komponenten:**
-  - `CustomerBookingCard` (Bestand — UPDATE: Status-Badge-Mapping prüfen)
-  - `EmptyState` (NEU oder Refinement) — „Sie haben noch keine Anfragen" + CTA-Button "Jetzt erste Anfrage stellen" (Link `/buchung`)
-- **API-Konsumierungen (unverändert):**
-  - `GET /api/customer/bookings` — `{ upcoming, past }` mit kompletten Booking-Details.
-- **Status-Badge-Mapping (deutsch):**
-
-  | BookingStatus       | Badge-Text                  | Farbe (Hinweis für UX)               |
-  | ------------------- | --------------------------- | ------------------------------------ |
-  | `PENDING`           | „Offen"                     | Neutral / Bärenstark-Wood            |
-  | `CONFIRMED`         | „Bestätigt"                 | Erfolg / Grün                        |
-  | `REJECTED`          | „Abgelehnt"                 | Fehler / Rot                         |
-  | `COUNTER_PROPOSED`  | „Gegenvorschlag ausstehend" | Warnung / Orange                     |
-  | `CANCELLED`         | „Storniert"                 | Neutral / Grau                       |
-  | `COMPLETED`         | „Abgeschlossen"             | Info / Bärenstark-Bark               |
-
-  Genaue Farb-Tokens in `tailwind.config.ts`. UX-Designer entscheidet im Detail.
-- **User-Interactions:**
-  - Liste anzeigen (sortiert: `upcoming` zuerst, dann `past`).
-  - Klick auf Eintrag → Detailseite `/konto/anfragen/:id`.
-  - Empty-State wenn `upcoming.length === 0 && past.length === 0`.
-
-### `/konto/anfragen/[id]` (NEU/PRÜFEN — Anfragen-Detailseite)
-
-- **Linked Story:** US-IT10-05 (Teil A) AC3
-- **Purpose:** Detailansicht einer einzelnen Anfrage.
-- **Hinweis:** Engineer prüft, ob diese Page bereits aus IT4 (US-26) existiert. Falls ja, AC3 nur auf Vollständigkeit verifizieren. Falls nein, neu anlegen.
-- **API-Konsumierung (unverändert):**
-  - `GET /api/customer/bookings/:id` — komplette Booking-Details.
-- **Pflichtfelder in der UI:**
-  - Datum (`date`)
-  - Uhrzeit (`startTime` – `endTime`)
-  - Service (Label aus `SERVICE_LABELS[service]`)
-  - Beschreibung
-  - Adresse (Straße + PLZ + Ort)
-  - Status-Badge (gleiches Mapping wie in `/konto`)
-  - Liste hochgeladener Dateien (Filename + Download-Link)
-  - Falls vorhanden: Bewertung (Sternen + Text + Approval-Status)
-  - Falls vorhanden: Zahlung (Betrag + Status + Pay-Link für PENDING)
-- **Optionale Aktionen (wenn Backend liefert):**
-  - „Anfrage stornieren" (wenn `isCancellable === true`) — **gilt in IT10 nur für `PENDING`-Buchungen** (bestehende IT4-Storno-Logik). Storno für `CONFIRMED`/`COUNTER_PROPOSED`-Buchungen ist **out-of-scope IT10** (PM-3, Backlog IT11+).
-  - „Bewertung abgeben" (wenn `canReview === true`).
-
-### `/admin/users`, `/konto/passwort-vergessen`, `/konto/passwort-zuruecksetzen`
-
-**Keine UI-Änderung in IT10.** Diese Pages werden durch die Backend-Bug-Fixes (Konfig + Migrations-Drift) wieder funktionsfähig. FE-Code bleibt unverändert.
-
-## Komponenten — Detail-Spec
-
-### `<QuickBookingModal />` (NEU)
-
-- **Props (final, nach STRUCT-4-Fix):**
-
-  | Prop                    | Typ                              | Pflicht | Beschreibung                                                          |
-  | ----------------------- | -------------------------------- | ------- | --------------------------------------------------------------------- |
-  | `isOpen`                | `boolean`                        | ja      | Steuert die Sichtbarkeit. Modal bleibt gemountet (Datenverlust-Schutz). |
-  | `onClose`               | `() => void`                     | ja      | Wird bei Escape, Backdrop-Klick, Close-Button gerufen.                  |
-  | `selectedTimeSlot`      | `TimeSlotInfo \| null`           | ja      | Vom Kalender vorausgewählter Slot (Datum + Start/End + Dauer).          |
-  | `defaultService`        | `ServiceSlug \| null`            | nein    | **NEU.** Optional vorausgewählter Service (aus Page-State / URL-Param `?service=…`); kein Default, wenn nicht gesetzt. Service ist Pflichtfeld im Modal selbst — siehe „Service-Auswahl im Modal". |
-  | `defaultValues`         | `Partial<BookingFormInput>`      | nein    | Pre-Fill aus Profil (US-IT10-05 Teil B).                                |
-  | `onSubmitted`           | `() => void`                     | ja      | Wird nach erfolgreichem Submit aufgerufen — Parent zeigt Erfolgs-Banner und schließt das Modal. |
-
-  Hinweis: Ein früher in der Component-Library angedachter Pflicht-Prop `service` entfällt mit STRUCT-4 — er wird ersetzt durch `defaultService` (optional). Die endgültige Service-Auswahl steckt im Form-State des Modals.
-
-- **Verhalten:**
-  - Rendert `BookingForm` als Inhalt.
-  - Tab-Trap, Focus-Restore beim Schließen.
-  - Auf Mobile: Vollflächig oder Bottom-Sheet (UX-Designer entscheidet).
-  - WAI-ARIA: `role="dialog"`, `aria-modal="true"`, `aria-labelledby` zeigt auf Modal-Headline.
-- **Conformance:** WCAG 2.1 AA — Focus-Outline sichtbar, Touch-Targets >= 44 px, Color-Contrast >= 4.5:1.
-
-### `<BookingForm />` (UPDATE)
-
-- **Bestehende Props bleiben.**
-- **Änderung:** `defaultValues`-Mechanik so erweitern, dass auch `customerName`, `customerEmail`, `customerPhone` aus dem Parent gesetzt werden können (heute gibt es bereits einen `profileAddress`-Prop für die drei Adressfelder — siehe `BookingForm.tsx` Z. 134–145).
-- **Empfohlene Strategie:** neuer Prop `customerProfile?: { name: string; email: string; phone: string | null; }` ODER Erweiterung des bestehenden `profileAddress`-Props zu einem allgemeineren `customerProfileDefaults`-Prop. Engineer entscheidet.
-- **Wichtig:** RHF `defaultValues` werden bei Mount gesetzt; beim Re-Mount müssen sie aus aktualisiertem Prop kommen. `useEffect`+`reset()` ist der RHF-konforme Weg.
-
-### `<ProfileAddressHint />` (NEU)
-
-- **Props:**
-
-  | Prop      | Typ       | Pflicht | Beschreibung                                          |
-  | --------- | --------- | ------- | ----------------------------------------------------- |
-  | `visible` | `boolean` | ja      | Nur sichtbar, wenn eingeloggt UND Profil-Adresse leer. |
-
-- **Inhalt:** Banner mit Text „Hinterlegen Sie Ihre Adresse im Profil — beim nächsten Mal ist sie schon vorausgefüllt." und Link `→ Zum Profil` (`/konto/profil` oder `/konto`, je nach bestehender Routing-Struktur).
-- **Position:** Über den Adressfeldern im Form.
-
-## API-Konsumierung (Iteration 10)
-
-| Endpoint                                  | Stories             | Methode | Verwendung                                                              |
-| ----------------------------------------- | ------------------- | ------- | ----------------------------------------------------------------------- |
-| `POST /api/customer/forgot-password`      | US-IT10-01          | POST    | Bestehende `<ForgotPasswordForm />`. Body: `{ email }`. Response: `{ ok: true }`. |
-| `POST /api/customer/reset-password`       | US-IT10-01          | POST    | Bestehende `<ResetPasswordForm />`. Body: `{ token, password, passwordConfirm }`. |
-| `GET /api/admin/users?…`                  | US-IT10-02          | GET     | Bestehender `<UserTable />`. Response: `{ data: { items, total, page, pageSize } }`. |
-| `POST /api/bookings`                      | US-IT10-03/04       | POST    | Bestehender `<BookingForm />`. Date-Mode mit `date/startTime/endTime/durationMinutes` + Adresse. |
-| `GET /api/customer/bookings`              | US-IT10-05          | GET     | `/konto`-Page. Response: `{ data: { upcoming, past } }`.                |
-| `GET /api/customer/bookings/:id`          | US-IT10-05          | GET     | `/konto/anfragen/:id`-Page. Response: einzelnes `CustomerBooking`-DTO.   |
-| `GET /api/customer/me`                    | US-IT10-05          | GET     | Server-Side Pre-Fill auf `/buchung` (über `getCustomerFromRequest()`). Alternativ Client-Side bei Bedarf. |
-
-**Keine neuen API-Wrapper** in `src/lib/api-client.ts` — alle Endpoints sind bereits typisiert.
-
-## Validation Rules (Frontend)
-
-Unverändert — `BookingFormSchema` aus `contracts/zod-schemas.ts` ist
-verbindlich. Die Quick-Booking-Modal verwendet das gleiche Schema.
-
-| Feld                | Regel                                                            |
-| ------------------- | ---------------------------------------------------------------- |
-| `customerName`      | `min(2)`, `max(120)`, getrimmt                                   |
-| `customerPhone`     | `phoneSchema` (mind. 6 Ziffern, erlaubte Sonderzeichen)          |
-| `customerEmail`     | `email`, `max(254)`, getrimmt                                    |
-| `service`           | `enum SERVICES`                                                  |
-| `description`       | `min(5)`, `max(2000)`. Bei `service === 'sonstiges'`: `min(20)`  |
-| `addressStreet`     | `min(3)`, `max(100)`, getrimmt                                   |
-| `addressZip`        | `^\d{5}$`                                                         |
-| `addressCity`       | `min(2)`, `max(100)`, getrimmt                                   |
-| `durationMinutes`   | Whitelist `[60,120,180,240,300,360,480]` oder `-1` (Ganztag)     |
-| `privacyAccepted`   | `literal(true)`                                                   |
-
-## Pre-Fill-Mapping (US-IT10-05 Teil B)
-
-**Verbindliche Mapping-Tabelle Profil → Booking-Form:**
-
-| Profil-Feld (`CustomerUser`) | Booking-Form-Feld (`BookingFormInput`) | Verhalten bei NULL                        |
-| ---------------------------- | -------------------------------------- | ----------------------------------------- |
-| `firstName + ' ' + lastName` | `customerName`                         | Beide Pflicht in DB → immer befüllt        |
-| `email`                      | `customerEmail`                        | Pflicht in DB → immer befüllt              |
-| `phone`                      | `customerPhone`                        | NULL → Feld leer, User muss eingeben       |
-| `streetAndNumber`            | `addressStreet`                        | NULL → Feld leer, `<ProfileAddressHint />` einblenden |
-| `postalCode`                 | `addressZip`                           | NULL → Feld leer                           |
-| `city`                       | `addressCity`                          | NULL → Feld leer                           |
-
-**User-Override:** geänderte Werte werden im Submit für **diese** Buchung verwendet; Profil bleibt unverändert. (Backend-Verhalten seit IT9 etabliert — siehe `schema.prisma` Doku zu `CustomerUser.streetAndNumber`.)
-
 ## State Management
 
-### Globaler State
+### Globaler State (neu: BookingDialog)
 
-Unverändert — Customer-Session via `customer-session`-JWT-Cookie. Kein neuer globaler State in IT10.
+```typescript
+interface BookingDialogState {
+  isOpen: boolean;
+  defaultService: Service | null;
+  // Customer aus useCustomer() wird hier zentralisiert geholt:
+  customer: CustomerUserPublic | null;
+  customerStatus: 'loading' | 'authenticated' | 'unauthenticated';
+}
+```
 
-### Per-Page State (`/buchung`)
+### Pro-Komponente lokaler State
 
-Neu in IT10:
+| Komponente            | Lokaler State                                                |
+|-----------------------|--------------------------------------------------------------|
+| `QuickBookingModal`   | `state: ModalState`, `attachmentIds: string[]`, RHF-Form-State, `selectedDate`, `durationMinutes`, `selectedTimeSlot` (im Standalone-Mode) |
+| `FileUpload`          | `entries: UploadEntry[]`, `dragOver`, `blobUnavailable`     |
+| `BookingTable`        | unverändert (`bookings`, `filter`, `pendingAction`, …)       |
+| `BestaetigtClient`    | unverändert                                                  |
 
-- `selectedTimeSlot: TimeSlotInfo | null` — Bestand, Quelle ist `BookingCalendar`.
-- `isQuickBookingOpen: boolean` — NEU. Setzt Parent bei Slot-Klick auf `true`, Modal-Close ruft `setIsQuickBookingOpen(false)`.
-- `customerProfile: CustomerProfileDefaults | null` — NEU. Wird in der Server-Component aus der Session gelesen und als Prop an Client-Component übergeben.
+---
 
-Modal-State liegt **bewusst nicht** in URL-Params (PM-2-Entscheidung: Tiefen-Verlinkung ist **out-of-scope für IT10**). Modal-State ist rein ephemerer Client-State. **Backlog (IT11+):** Tiefen-Verlinkung über `?date=…&time=…&duration=…[&service=…]` so dass Tom Termin-Links teilen kann. Kein UX-Spec-Eintrag für IT10 vorgesehen.
+## Validation Rules
+
+**Änderungen in IT11:**
+
+- **Upload-Limits — split by MIME (Tom-Bestätigung 2026-05-03):**
+  - `image/*` → max. 10 MB (`UPLOAD_MAX_IMAGE_BYTES`)
+  - `video/*` → max. 50 MB (`UPLOAD_MAX_VIDEO_BYTES`)
+  - `application/pdf` → max. 10 MB (`UPLOAD_MAX_DOCUMENT_BYTES`)
+  - Helper `getUploadLimitForType(contentType)` zentralisiert die Logik in
+    `src/lib/schemas.ts`.
+  - Client validiert vor Upload (Inline-Fehler pro File-Entry, kein Network-Roundtrip).
+  - Server validiert ebenfalls (HTTP 413 mit aussagekräftigem Body bei Verstoss).
+- **Storno-Reason** (optional, US-IT11-06): max. 500 Zeichen, Whitespace getrimmt,
+  leerer String wird zu `null` normalisiert.
+
+**Bestand:**
+
+- `BookingFormSchema` aus `src/lib/schemas.ts` (Pflicht-Felder, Telefon-Mindestlänge,
+  PLZ-Regex, Privacy-Checkbox) — unverändert.
+- `UPLOAD_ACCEPTED_CONTENT_TYPES` (Whitelist) — unverändert.
+- `UPLOAD_MAX_FILES_PER_BOOKING = 5` — unverändert.
+
+---
 
 ## Accessibility & Responsiveness
 
-- **WCAG 2.1 Level AA** — Modal: Focus-Trap, Escape-Schließen, ARIA-Dialog-Pattern, Focus-Restore, sichtbare Focus-Outlines.
-- **Mobile (`< 640px`):** Modal vollflächig oder Bottom-Sheet. Form-Felder einspaltig. Touch-Targets >= 44 px.
-- **Desktop (`>= 1024px`):** Modal zentriert, max-width 32rem, Backdrop dunkel mit Blur (UX-Designer entscheidet).
-- **Tablet:** Mittelweg, modal-zentriert mit max-width 28rem.
-- **Reduced-Motion:** Modal-Open/Close-Transition respektiert `prefers-reduced-motion`.
-- **Keyboard:** Tab-Reihenfolge folgt visueller Reihenfolge (oberster Slot-Hinweis → Form-Felder → Submit-Button → Close-Button).
+### A11y-Auflagen für IT11 (zusätzlich zu Bestand)
 
-## File Inventory (Frontend, Iteration 10)
+- **Modal-Trigger Button** hat `aria-haspopup="dialog"`, identische Tab-Reihenfolge
+  wie ein Link, Tastatur-Aktivierung via Enter und Space.
+- **Bestätigungsseite** rendert `role="status"` für die Erfolgsmeldung (Screen-Reader-
+  Live-Region nach Page-Load).
+- **Toast** mit `role="alert"` (Error) bzw. `role="status"` (Success) — bereits in
+  IT10 implementiert, bleibt.
+- **Admin-Thumbnail** hat `alt=""` (dekorativ, der Filename steht daneben).
+- **Empty-State „Keine Dateien hochgeladen"** ist semantischer Text in `<dd>`, kein
+  Icon-only.
 
-Neu:
+### Responsiveness
 
-```
-src/components/booking/QuickBookingModal.tsx       (NEU — Modal-Wrapper um BookingForm)
-src/components/booking/ProfileAddressHint.tsx      (NEU — Hinweisbanner für fehlende Profil-Adresse)
-src/app/konto/anfragen/[id]/page.tsx               (NEU oder PRÜFEN — Detail-Page falls noch nicht aus IT4)
-```
+- Modal: Mobile-Bottom-Sheet (≤ sm-Breakpoint, full-width, sticky-Header/Footer),
+  Desktop zentriertes Modal (max-w-2xl).
+- Im Standalone-Mode auf Desktop: zwei-Spalten-Layout (links Kalender + Slot-Picker,
+  rechts Form). Auf Mobile: vertikal gestapelt.
 
-Updates:
+---
 
-```
-src/components/booking/BookingCalendar.tsx         (UPDATE — Slot-Klick triggert Modal-Open im Parent)
-src/components/booking/BookingForm.tsx             (UPDATE — defaultValues für customerName/Email/Phone aus Prop)
-src/app/buchung/page.tsx                           (UPDATE — Server-Side Profil-Lookup, Modal-State, Render Modal)
-src/app/konto/page.tsx                             (UPDATE — Status-Badge-Mapping vollständig, Empty-State)
-src/components/customer/CustomerBookingCard.tsx    (UPDATE — Status-Mapping vollständig)
-```
+## Story Coverage
 
-Keine Änderung:
+| Story         | Frontend-Deliverable                                                                  |
+|---------------|---------------------------------------------------------------------------------------|
+| US-IT11-01    | **Kein FE-Change.** Operativ: Migration deployen, ENV setzen.                         |
+| US-IT11-02    | `BookingDialogProvider` neu, `QuickBookingModal` Standalone-Mode (Escape blockiert während Submit), Header + Hero CTAs umstellen, ServiceDetailModal optional CTA. |
+| US-IT11-03    | Toast nach Submit (in `BookingForm` + `QuickBookingModal`), **neue Route `/buchung/bestaetigung/[bookingId]?token=…`** (v3) mit Server-Component-Token-Verify + neue `BookingConfirmation`-Komponente, Push nach Erfolg. `<TokenExpiredPage flow="confirmation" />` inline-Fallback. **Bestand `BestaetigtClient.tsx` bleibt unangetastet.** |
+| US-IT11-04    | `<FileUpload />` in `QuickBookingModal` einbinden, **MIME-spezifische Client-Validation 10 MB Bilder / 50 MB Videos**, **Min-Size-Check 1 Byte**, **Parallel-Upload-Limit max 3** (v3), `BookingTable` Anhang-Anzeige mit Thumbnail/Größe/Empty-State (Lightbox **out-of-scope**, IT12), `BLOB_READ_WRITE_TOKEN` in Vercel setzen. |
+| US-IT11-05    | **Kein FE-Code-Change.** Operativ: Migration (US-IT11-01) deployen → `useCustomer()` liefert dann korrekt befüllte Profile. Defensive Index-Cast in `BookingClient.tsx` bleibt als Hardening. |
+| US-IT11-06    | Stornieren-Button im `/konto`-Dashboard, `<CancelConfirmationDialog />` (Standard-Confirm-Modal mit optionalem Reason-Feld, Escape blockiert während Submit), Erfolgs-Toast „Auftrag storniert", optimistic Status-Badge-Update. **Gast-Storno:** neue Page **`/buchung/[id]/stornieren?token=…`** (v3, Path-Param) mit Server-Component-Token-Verify, `<GuestCancelClient />`, Erfolgs-/Idempotenz-/Frist-Cards, `<TokenExpiredPage flow="cancellation" />` inline. Bestätigungs-E-Mail enthält Storno-Link mit neuer Route. **`cancelledBy` einheitlich `'CUSTOMER'`** (keine Differenzierung Gast vs. eingeloggt). |
 
-```
-src/lib/api-client.ts                              (alle benötigten Wrapper bereits vorhanden)
-contracts/zod-schemas.ts                           (keine Schema-Änderungen)
-```
+---
 
-## Test-Plan (Frontend)
+## Dateien-Inventar (Pflicht-Änderungen)
 
-- **Modal-Smoke:**
-  - M1: Slot-Klick im Kalender öffnet Modal mit korrekt vorausgefülltem Datum/Uhrzeit/Dauer — auch dann, wenn auf der Page kein Service vorausgewählt ist (STRUCT-4).
-  - M2: Escape, Backdrop-Klick und Close-Button schließen das Modal ohne Datenverlust (eingegebene Felder bleiben erhalten).
-  - M3: Submit im Modal mit gültigen Werten (inklusive im Modal gewähltem Service) → Modal schließt, Erfolgs-Banner sichtbar, Buchung in `/admin/bookings` sichtbar.
-  - M4: Submit im Modal mit ungültigem Pflichtfeld → Inline-Fehler am Feld, Modal bleibt offen.
-  - M5: Submit im Modal, Backend antwortet `409` mit `error.subcode === 'BOOKING_SLOT_TAKEN'` → Conflict-Banner mit UX-konformer Microcopy, Submit-Label wechselt zu „Anderen Slot wählen", Modal bleibt offen mit erhaltenem Form-State (STRUCT-3).
-  - M6 (STRUCT-4): Modal ohne Service-Auswahl absenden → Inline-Fehler am Service-Feld „Bitte wählen Sie einen Service.", Submit blockiert, Modal bleibt offen.
+| Datei                                                                | Aktion |
+|----------------------------------------------------------------------|--------|
+| `src/components/booking/BookingDialogProvider.tsx`                   | NEU (mit `reset()`-Methode, v3) |
+| `src/components/booking/use-booking-dialog.ts`                       | NEU    |
+| `src/components/booking/CancelConfirmationDialog.tsx`                | NEU (US-IT11-06) |
+| `src/components/booking/TokenExpiredPage.tsx`                        | NEU (US-IT11-03 + 06) |
+| `src/app/buchung/bestaetigung/[bookingId]/page.tsx`                  | **NEU (v3)** — Server-Component, Token-Verify + Public-Summary-Call |
+| `src/app/buchung/bestaetigung/[bookingId]/BookingConfirmation.tsx`   | **NEU (v3)** — Client-Component für initiale Bestätigung |
+| `src/app/buchung/[id]/stornieren/page.tsx`                           | **NEU (v3)** — Server-Component, Token-Verify, Path-Param-ID |
+| `src/app/buchung/[id]/stornieren/GuestCancelClient.tsx`              | **NEU (v3)** — Client-Component für Gast-Storno |
+| `src/components/booking/QuickBookingModal.tsx`                       | EDIT (Standalone-Mode + FileUpload + Push, Escape-Block beim Submit, ruft `reset()` vor Push v3) |
+| `src/components/booking/BookingForm.tsx`                             | EDIT (Push auf neue Route `/buchung/bestaetigung/<id>?token=…`) |
+| `src/components/booking/FileUpload.tsx`                              | EDIT (MIME-spezifische Limits 10/50 MB; v3: Min-Size-Check, Parallel-Upload-Limit max 3) |
+| `src/components/admin/BookingTable.tsx`                              | EDIT (Anhang-Anzeige; Lightbox out-of-scope, neuer Tab) |
+| `src/components/layout/Header.tsx`                                   | EDIT (CTA → Modal) |
+| `src/components/home/Hero.tsx`                                       | EDIT (CTA → Modal) |
+| `src/components/home/ServiceDetailModal.tsx`                         | EDIT (optional, sekundärer Buchen-CTA) |
+| `src/app/layout.tsx`                                                 | EDIT (`<BookingDialogProvider>` wraps `<main>`) |
+| `src/app/buchung/bestaetigt/BestaetigtClient.tsx`                    | **read-only (v3)** — bleibt unangetastet für Counter-Proposal-Flow |
+| `src/app/buchung/bestaetigt/page.tsx`                                | **read-only (v3)** — bleibt unangetastet |
+| `src/app/konto/...` (Customer-Bookings-Komponente)                   | EDIT (Stornieren-Button + Toast + optimistic Update) |
+| `src/lib/api-client.ts`                                              | EDIT (drei neue Funktionen — siehe API Consumption) |
+| `src/lib/schemas.ts`                                                 | EDIT (`UPLOAD_MAX_IMAGE_BYTES`, `UPLOAD_MAX_VIDEO_BYTES`, `getUploadLimitForType`) |
+| `next.config.js`                                                     | OPTIONAL EDIT (Redirect `/buchen` → `/buchung`, falls `/buchen` irgendwo existiert) |
 
-- **Pre-Fill-Smoke:**
-  - PF1: Eingeloggter Kunde mit vollständigem Profil öffnet `/buchung` → Form ist mit Name, Email, Telefon, Adresse vorausgefüllt.
-  - PF2: Eingeloggter Kunde **ohne** Profil-Adresse öffnet `/buchung` → Adressfelder leer, `<ProfileAddressHint />` sichtbar.
-  - PF3: Anonymer Gast öffnet `/buchung` → alle Felder leer, kein Hint.
-  - PF4: Eingeloggter Kunde ändert vorausgefüllten Wert und sendet ab → Buchung verwendet geänderten Wert; `GET /api/customer/me` zeigt Profil unverändert.
+**Keine Änderungen:**
+- `src/lib/use-customer.ts`
+- `src/lib/toast.ts`
+- `src/components/ui/Modal.tsx`
+- `src/components/ui/Toast.tsx`
+- `src/components/booking/Calendar.tsx`, `BookingCalendar.tsx`, `TimeSlotPicker.tsx`, `DurationPicker.tsx`
+- `src/app/buchung/page.tsx`, `BookingClient.tsx`
+- `src/app/buchung/storno/...` (Bestand für `respond`-Cancel-Flow, NICHT umbenennen)
+- `contracts/api-routes.md` (Backend-Architect aktualisiert separat — zwei neue Endpoints)
 
-- **Übersicht-Smoke:**
-  - O1: Eingeloggter Kunde mit Buchungen öffnet `/konto` → Liste zeigt alle Status-Badges korrekt auf Deutsch.
-  - O2: Eingeloggter Kunde ohne Buchungen öffnet `/konto` → Empty-State + CTA „Jetzt erste Anfrage stellen".
-  - O3: Klick auf Eintrag → Detailseite zeigt alle Pflichtfelder.
+---
 
-- **A11y:**
-  - A1: Modal ist mit Tastatur vollständig bedienbar (Tab, Shift-Tab, Escape).
-  - A2: Screenreader liest Modal-Titel beim Öffnen.
+## Open Questions (für UX-Designer / Tom)
 
-## UX-Hand-off Hinweise
+1. **(Q1, Tom — beantwortet 2026-05-03):** Upload-Limits split by MIME — 10 MB
+   Bilder, 50 MB Videos, 10 MB PDFs. **Erledigt — in Validation Rules eingearbeitet.**
+2. **(Q2, UX-Designer):** ServiceDetailModal sekundärer CTA „Diesen Service buchen"
+   wünschenswert? Empfehlung: ja, mit `defaultService=<slug>`.
+3. **(Q3, UX-Designer):** Microcopy auf Bestätigungsseite — „Eine weitere Anfrage
+   stellen" als CTA wünschenswert? Wie ist die exakte Erfolgs-Headline?
+4. **(Q4, UX-Designer):** Bottom-Sheet auf Mobile — soll der Standalone-Mode wirklich
+   alle vier Steps (Service + Kalender + Slot + Form) in einer einzelnen scrollbaren
+   Liste zeigen, oder mit Step-Indicator und Vor/Zurück-Buttons gechunkt?
+5. **(Q5, UX-Designer):** Soll das `<CancelConfirmationDialog />` einen optionalen
+   „Grund"-Textarea anzeigen (mappt auf `cancellationReason`)? Empfehlung: ja,
+   optional, max. 500 Zeichen, Placeholder „Grund (optional)". Tom-Mehrwert: er
+   sieht in seiner Storno-Mail warum der Kunde abgesprungen ist.
+6. **(Q6, UX-Designer):** Microcopy auf der Gast-Storno-Page `/buchung/stornieren`:
+   Soll die Buchungsdetails-Anzeige vor der Bestätigung nur Service+Datum zeigen,
+   oder auch die Adresse und Beschreibung? Empfehlung: minimal — Service+Datum+Status.
+7. **(Q7, UX-Designer):** Token-Expired-Page (`<TokenExpiredPage />`) — soll sie
+   einen sekundären CTA „Neue Anfrage stellen" bekommen, der das Booking-Modal öffnet?
+   Empfehlung: ja, defensiv (User landet hier evtl. weil er einen 30-Tage-alten Link
+   öffnet — gibt ihm einen klaren Next-Step).
 
-UX-Designer entscheidet:
+---
 
-1. Modal-Pattern (zentriert vs. Bottom-Sheet auf Mobile, Side-Panel-Variante auf Desktop?).
-2. Status-Badge-Farb-Tokens (innerhalb der bestehenden Bärenstark-Palette).
-3. Empty-State-Illustration / Icon (oder rein typografisch?).
-4. Erfolgs-Feedback nach Modal-Submit (Toast vs. Inline-Banner auf der Buchungs-Seite).
-5. Mobile-Behaviour des Modals — Bottom-Sheet mit Drag-to-Close-Geste oder Standard-Vollbild?
-6. Position und Wording des `<ProfileAddressHint />`-Banners.
-7. **Position und Pattern der Service-Auswahl im Modal** (STRUCT-4): Radio-Group oben (vor Kontaktdaten) ODER Select / nach Slot-Chips ODER zwischen Adresse und Beschreibung — UX-Designer entscheidet.
-8. **Service-Chip im Modal-Header** (STRUCT-4): Wie wird der Header dargestellt, wenn kein Service vorausgewählt ist? (Empfehlung: Placeholder-Pille „Service wählen", Klick scrollt Fokus zum Service-Feld im Body.)
-
-## Updates aus QA-Design-Review (2026-05-03, IT10)
-
-| Defekt    | FE-Auswirkung                                                                                                       | Status in dieser Datei |
-| --------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| STRUCT-3  | FE liest 409 primär über `error.subcode === 'BOOKING_SLOT_TAKEN'`, Fallback `code === 'CONFLICT' && field === 'date'`. | dokumentiert in `/buchung`-User-Interactions + Modal-Smoke M5 |
-| STRUCT-4  | Service ist Pflichtfeld im Modal-Form (kein Pflicht-Trigger-Vorbedingung). `defaultService` ersetzt `service`-Prop. | dokumentiert in `<QuickBookingModal />`-Spec + neue Modal-Smoke M6 |
-| PM-2      | Modal-URL-Deep-Link **out-of-scope IT10** → Backlog.                                                                 | aktualisiert im State-Management-Abschnitt |
-| PM-3      | Storno bestätigter Anfragen **out-of-scope IT10** → Backlog. Detail-Page rendert keinen Storno-Button für `CONFIRMED`-Buchungen. | siehe `/konto/anfragen/[id]` Aktionen unten |
+**Ende frontend-requirements.md (IT11 v3 — 2026-05-04, QA-Review-Resolution: Routing-Fixes, `cancelledBy`-Vereinheitlichung, Lightbox out-of-scope).**

@@ -1,0 +1,236 @@
+# OpenAPI 3.1 Stub — Booking Cancellation Endpoint (US-IT11-06)
+#
+# Single canonical endpoint for both eingeloggte Customer and Gast-via-Token.
+# Companion endpoint for US-IT11-03: GET /api/bookings/:id/public-summary.
+#
+# Source of truth: ARCHITECTURE_IT11.md §6.4 + §3.5.
+
+openapi: 3.1.0
+info:
+  title: Bärenstark Hausservice — Booking Cancellation API
+  version: "11.1"
+  description: |
+    Cancel-Endpoint mit Auth-Polymorphismus (signierter JWT-Token ODER
+    Customer-Session-Cookie). Ergänzt durch Public-Summary-Endpoint für
+    die reload-feste Bestätigungsseite.
+
+    Revision v11.1 (2026-05-04, post-QA-Review):
+    - `GET /api/bookings/{id}/public-summary` akzeptiert ab v11.1 Tokens mit
+      Scope `booking-confirmation` ODER `booking-cancellation` (Storno-Page
+      nutzt den Endpoint zur Preview-Anzeige; kein separater cancel-preview-
+      Endpoint).
+    - `cancelledBy` ist nicht im Public-Summary exponiert; intern einheitlich
+      `'CUSTOMER' | 'ADMIN' | 'SYSTEM'` (Gast-Storno via Token = `'CUSTOMER'`).
+    - Storno-Page-Route ist `/buchung/{id}/stornieren?token=…` (Path-Param).
+
+paths:
+  /api/bookings/{id}/cancel:
+    post:
+      operationId: cancelBooking
+      summary: Auftrag stornieren (Customer + Gast-via-Token)
+      tags: [Bookings, Cancellation]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: CUID der Buchung
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+            description: |
+              Signierter JWT (HS256, Secret = `BOOKING_TOKEN_SECRET`).
+              Pflicht für Gast-Storno (kein Auth-Cookie). Für eingeloggte
+              Kunden optional — Cookie reicht.
+              Payload: { sub, cid, scope: "booking-cancellation", iat, exp }
+              Gültigkeit: 30 Tage ab Issue.
+              **Strict scope:** Nur `booking-cancellation` wird akzeptiert
+              (im Gegensatz zu public-summary, das beide Scopes akzeptiert).
+              Schreibender Cancel ist scope-getrennt.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: Optionaler Storno-Grund. Whitespace getrimmt.
+              additionalProperties: false
+      responses:
+        '200':
+          description: |
+            Storno erfolgreich (oder idempotent — bereits storniert).
+            `alreadyCancelled: true` zeigt an, dass dies ein zweiter Aufruf
+            war und keine neue Mail an Tom verschickt wurde.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [id, status, cancelledAt, alreadyCancelled]
+                    properties:
+                      id:
+                        type: string
+                      status:
+                        type: string
+                        enum: [CANCELLED]
+                      cancelledAt:
+                        type: string
+                        format: date-time
+                      alreadyCancelled:
+                        type: boolean
+        '401':
+          description: |
+            Token abgelaufen (TOKEN_EXPIRED), ungültig (TOKEN_INVALID),
+            oder weder Token noch Cookie vorhanden (UNAUTHORIZED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                expired:
+                  value:
+                    error:
+                      code: TOKEN_EXPIRED
+                      message: "Bitte rufen Sie 0157-74787512 an"
+                invalid:
+                  value:
+                    error:
+                      code: TOKEN_INVALID
+                      message: "Ungültiger Storno-Link."
+                unauthorized:
+                  value:
+                    error:
+                      code: UNAUTHORIZED
+                      message: "Bitte einloggen."
+        '404':
+          description: |
+            Buchung nicht gefunden ODER (eingeloggt) gehört nicht dem User
+            (Ownership-Hide statt 403).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            Status nicht stornierbar (REJECTED/COMPLETED) ODER 24h-Frist
+            abgelaufen (Hinweis auf Telefonnummer im message-Feld).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unerwarteter Server-Fehler.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/bookings/{id}/public-summary:
+    get:
+      operationId: getBookingPublicSummary
+      summary: Bestätigungs-Summary mit Token-Auth (reload-fest)
+      tags: [Bookings, Confirmation]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+            description: |
+              Signierter JWT, Scope `booking-confirmation` ODER `booking-cancellation`
+              (v11.1: beide Scopes sind read-only-tauglich und werden vom
+              Public-Summary-Endpoint akzeptiert), 30 Tage gültig.
+              Optional bei Auth-Cookie-basiertem Aufruf (eingeloggter
+              Kunde, dem die Buchung gehört).
+              Verwendung:
+              - `/buchung/bestaetigung/{id}?token=…` (Confirmation-Token)
+              - `/buchung/{id}/stornieren?token=…` (Cancellation-Token; nutzt
+                public-summary für Preview-Daten vor dem POST /cancel-Aufruf)
+      responses:
+        '200':
+          description: Buchungs-Summary (minimal — kein PII-Leak).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [id, service, status]
+                    properties:
+                      id:
+                        type: string
+                      service:
+                        type: string
+                      date:
+                        type: string
+                        nullable: true
+                        description: ISO YYYY-MM-DD oder null
+                      startTime:
+                        type: string
+                        nullable: true
+                        description: HH:MM
+                      status:
+                        type: string
+                        enum: [PENDING, CONFIRMED, REJECTED, COUNTER_PROPOSED, CANCELLED, COMPLETED]
+                      createdAt:
+                        type: string
+                        format: date-time
+                      customerName:
+                        type: string
+                        description: Display-Name des Kunden (vom User selbst eingegeben)
+        '401':
+          description: TOKEN_EXPIRED, TOKEN_INVALID oder UNAUTHORIZED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Buchung nicht gefunden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - TOKEN_EXPIRED
+                - TOKEN_INVALID
+                - UNAUTHORIZED
+                - NOT_FOUND
+                - CONFLICT
+                - VALIDATION_ERROR
+                - INTERNAL_ERROR
+            message:
+              type: string
+              description: Deutschsprachige, kunden-taugliche Meldung. Kein Stack-Trace.
+            field:
+              type: string
+              description: (Optional) Feld-Referenz bei VALIDATION_ERROR.

@@ -18,6 +18,7 @@
 
 import { zodResolver } from '@hookform/resolvers/zod';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Banner } from '@/components/ui/Banner';
@@ -31,6 +32,8 @@ import {
   rebookViaToken,
 } from '@/lib/api-client';
 import { formatSlotRange } from '@/lib/format';
+import { toast } from '@/lib/toast';
+import { CONTACT } from '@/lib/contact';
 import {
   BookingFormSchema,
   CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH,
@@ -108,6 +111,7 @@ export function BookingForm({
   defaultName = null,
   defaultPhone = null,
 }: BookingFormProps) {
+  const router = useRouter();
   const [status, setStatus] = useState<FormStatus>({ kind: 'idle' });
   const [rebookSubmitting, setRebookSubmitting] = useState(false);
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
@@ -261,9 +265,25 @@ export function BookingForm({
     }
 
     try {
-      await createBooking(payload);
+      const res = await createBooking(payload);
+      // IT11 / US-IT11-03 — Erfolgs-Toast und Redirect zur Bestätigungsseite.
+      toast.success(
+        `Anfrage gesendet — Tom meldet sich innerhalb von 24h. Telefonisch erreichbar: ${CONTACT.phoneDisplay}`,
+        {
+          action: {
+            label: 'Anrufen',
+            onClick: () => {
+              window.location.href = `tel:${CONTACT.phoneTel}`;
+            },
+          },
+        },
+      );
       setStatus({ kind: 'success' });
       onSubmitted();
+      const tokenQuery = res.confirmationToken
+        ? `?token=${encodeURIComponent(res.confirmationToken)}&new=true`
+        : '?new=true';
+      router.push(`/buchung/bestaetigung/${encodeURIComponent(res.id)}${tokenQuery}`);
     } catch (err) {
       handleApiError(err);
     }
