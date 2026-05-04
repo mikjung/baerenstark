@@ -11,20 +11,19 @@
 import type { NextRequest } from 'next/server';
 import { ZodError } from 'zod';
 import { revalidateTag } from 'next/cache';
-import { auth } from '@/lib/auth';
 import { apiError, apiSuccess, internalError, zodErrorResponse } from '@/lib/api';
 import { UpdateBufferConfigSchema } from '@/lib/schemas';
 import { getBufferConfig, setBufferConfig } from '@/lib/buffer-config';
+import { requireAdmin, isAdminError } from '@/lib/require-admin';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function GET(): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()` (DISABLED-Check + 401/403-Konsistenz).
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const cfg = await getBufferConfig();
     return apiSuccess({
@@ -38,10 +37,9 @@ export async function GET(): Promise<Response> {
 
 export async function PUT(req: NextRequest): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()` (DISABLED-Check + 401/403-Konsistenz).
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const json = await req.json().catch(() => null);
     if (!json || typeof json !== 'object') {

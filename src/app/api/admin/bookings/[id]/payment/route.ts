@@ -15,10 +15,10 @@
 import type { NextRequest } from 'next/server';
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
-import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { CreatePaymentSchema } from '@/lib/schemas';
 import { apiError, apiSuccess, apiNoContent, internalError, zodErrorResponse } from '@/lib/api';
+import { requireAdmin, isAdminError } from '@/lib/require-admin';
 import { sendPaymentRequestEmail } from '@/lib/mail';
 import { isStripeConfigured } from '@/lib/stripe';
 import type { Service } from '@/lib/services';
@@ -39,10 +39,9 @@ export async function POST(
   ctx: { params: Promise<{ id: string }> | { id: string } },
 ): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()` (DISABLED-Check + 401/403-Konsistenz).
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const params = await ctx.params;
     const { id } = params;
@@ -158,10 +157,9 @@ export async function DELETE(
   ctx: { params: Promise<{ id: string }> | { id: string } },
 ): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()` (DISABLED-Check + 401/403-Konsistenz).
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const params = await ctx.params;
     const { id } = params;

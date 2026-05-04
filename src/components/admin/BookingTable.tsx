@@ -5,6 +5,11 @@ import { Badge } from '@/components/ui/Badge';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import {
+  ArrowRightIcon,
+  FilterIcon,
+  InboxIcon,
+} from '@/components/ui/icons';
 import { SkeletonCard } from '@/components/ui/Skeleton';
 import {
   ApiClientError,
@@ -18,23 +23,40 @@ import {
   formatSlotRangeCompact,
   humanSize,
 } from '@/lib/format';
-import type { BookingAdmin, BookingStatus } from '@/lib/schemas';
+import type { BookingAdminIT14, BookingStatus } from '@/lib/schemas';
 import { getServiceLabel } from '@/lib/services';
 import { CounterProposalDialog } from './CounterProposalDialog';
 import { PaymentEditor } from './PaymentEditor';
 import { FinalPriceEditor } from './FinalPriceEditor';
 
-type StatusFilter = 'ALL' | BookingStatus;
+// IT14-S03 — Multi-Select-Filter über die kanonischen 6 BookingStatus-Werte
+// (`PENDING, CONFIRMED, COUNTER_PROPOSED, REJECTED, CANCELLED, COMPLETED`).
+// Default beim Mount: nur PENDING + CONFIRMED — Tom sieht offene + bestätigte
+// Anfragen, ohne erst manuell filtern zu müssen.
+type ActiveFilters = ReadonlySet<BookingStatus>;
 
-const FILTERS: ReadonlyArray<{ value: StatusFilter; label: string }> = [
-  { value: 'ALL', label: 'Alle' },
-  { value: 'PENDING', label: 'Offen' },
-  { value: 'COUNTER_PROPOSED', label: 'Vorschlag offen' },
-  { value: 'CONFIRMED', label: 'Bestätigt' },
-  { value: 'COMPLETED', label: 'Abgeschlossen' },
-  { value: 'REJECTED', label: 'Abgelehnt' },
-  { value: 'CANCELLED', label: 'Storniert' },
+const ALL_STATUS: ReadonlyArray<BookingStatus> = [
+  'PENDING',
+  'CONFIRMED',
+  'COUNTER_PROPOSED',
+  'CANCELLED',
+  'REJECTED',
+  'COMPLETED',
 ];
+
+const DEFAULT_FILTERS: ActiveFilters = new Set<BookingStatus>([
+  'PENDING',
+  'CONFIRMED',
+]);
+
+const FILTER_PILL_LABEL: Record<BookingStatus, string> = {
+  PENDING: 'Offen',
+  CONFIRMED: 'Bestätigt',
+  COUNTER_PROPOSED: 'Gegenvorschlag',
+  CANCELLED: 'Storniert',
+  REJECTED: 'Abgelehnt',
+  COMPLETED: 'Abgeschlossen',
+};
 
 const STATUS_LABEL: Record<BookingStatus, string> = {
   PENDING: 'Offen',
@@ -43,6 +65,11 @@ const STATUS_LABEL: Record<BookingStatus, string> = {
   COUNTER_PROPOSED: 'Vorschlag ausstehend',
   CANCELLED: 'Storniert',
   COMPLETED: 'Abgeschlossen',
+};
+
+const PAYMENT_METHOD_LABEL: Record<'CASH' | 'BANK_TRANSFER', string> = {
+  CASH: 'Bar',
+  BANK_TRANSFER: 'Überweisung',
 };
 
 type BadgeTone = 'neutral' | 'success' | 'danger' | 'warning' | 'info';
@@ -70,9 +97,11 @@ interface CounterProposalTarget {
 
 export function BookingTable() {
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
-  const [bookings, setBookings] = useState<BookingAdmin[]>([]);
+  const [bookings, setBookings] = useState<BookingAdminIT14[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [filter, setFilter] = useState<StatusFilter>('ALL');
+  // IT14-S03 — Multi-Select-Filter, Default-Werte ['PENDING', 'CONFIRMED'].
+  // Kein localStorage-Persist (AC#3): bei jedem Mount ist Default aktiv.
+  const [filter, setFilter] = useState<ActiveFilters>(DEFAULT_FILTERS);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [actionInProgress, setActionInProgress] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -107,10 +136,39 @@ export function BookingTable() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // IT14-S03 — Multi-Select-Filter. `filter.size === 0` zeigt einen
+  // separaten Empty-State (Tom hat alle Pills deaktiviert), nicht „alle".
   const filtered = useMemo(() => {
-    if (filter === 'ALL') return bookings;
-    return bookings.filter((b) => b.status === filter);
+    if (filter.size === 0) return [];
+    return bookings.filter((b) => filter.has(b.status));
   }, [bookings, filter]);
+
+  const togglePill = useCallback((s: BookingStatus) => {
+    setFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(s)) next.delete(s);
+      else next.add(s);
+      return next;
+    });
+  }, []);
+
+  const showAll = useCallback(() => {
+    setFilter(new Set(ALL_STATUS));
+  }, []);
+
+  const resetToDefault = useCallback(() => {
+    setFilter(new Set(DEFAULT_FILTERS));
+  }, []);
+
+  // IT14-S03 — Erkennt, ob aktuell der Default-Filter aktiv ist (für die
+  // korrekte Empty-State-Headline „Keine offenen Anfragen").
+  const isDefaultFilter = useMemo(() => {
+    if (filter.size !== DEFAULT_FILTERS.size) return false;
+    for (const s of DEFAULT_FILTERS) {
+      if (!filter.has(s)) return false;
+    }
+    return true;
+  }, [filter]);
 
   async function confirmAction() {
     if (!pendingAction) return;
@@ -200,25 +258,30 @@ export function BookingTable() {
 
   return (
     <div className="space-y-4">
-      <div role="tablist" aria-label="Status-Filter" className="flex flex-wrap gap-2">
-        {FILTERS.map((f) => {
-          const active = filter === f.value;
+      {/*
+        IT14-S03 — Multi-Select-Toggle-Pills. Semantik: jede Pill ist eine
+        Checkbox (`role="checkbox"` + `aria-checked`), keine Tabs. Container
+        ist `role="group"` mit Label „Status-Filter".
+      */}
+      <div role="group" aria-label="Status-Filter" className="flex flex-wrap gap-2">
+        {ALL_STATUS.map((s) => {
+          const active = filter.has(s);
           return (
             <button
-              key={f.value}
+              key={s}
               type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => setFilter(f.value)}
+              role="checkbox"
+              aria-checked={active}
+              onClick={() => togglePill(s)}
               className={[
-                'rounded-full border px-3 py-1.5 text-sm font-medium transition-colors',
+                'rounded-full border px-3 py-1.5 text-sm font-medium transition-colors min-h-[44px]',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2',
                 active
                   ? 'border-baerenstark-wood bg-baerenstark-wood text-baerenstark-cream'
                   : 'border-baerenstark-sand bg-white/60 text-baerenstark-bark hover:bg-baerenstark-sand/50',
               ].join(' ')}
             >
-              {f.label}
+              {FILTER_PILL_LABEL[s]}
             </button>
           );
         })}
@@ -231,13 +294,64 @@ export function BookingTable() {
       )}
 
       {filtered.length === 0 ? (
-        <Banner tone="info" title="Keine Anfragen in dieser Ansicht">
-          <p>
-            {filter === 'ALL'
-              ? 'Es liegen noch keine Anfragen vor.'
-              : 'In dieser Filteransicht ist nichts vorhanden.'}
-          </p>
-        </Banner>
+        // IT14-S03 — Drei Empty-State-Variants:
+        //  1) `no-active-filter` — Tom hat alle Pills deaktiviert.
+        //  2) `default-empty`   — Default-Filter aktiv, aber 0 Treffer.
+        //  3) Fallback          — Andere Filter-Kombination, 0 Treffer
+        //                          (z. B. nur „Abgelehnt" und keine
+        //                          abgelehnten Anfragen vorhanden).
+        filter.size === 0 ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-baerenstark-sand bg-white/70 py-12 text-center"
+          >
+            <span aria-hidden="true" className="text-baerenstark-bark/40">
+              <FilterIcon size={32} />
+            </span>
+            <h3 className="text-lg font-semibold text-baerenstark-bark">
+              Wähle mindestens einen Status
+            </h3>
+            <p className="max-w-md text-sm text-baerenstark-bark/70">
+              Aktiviere oben mindestens einen Status-Filter, um Buchungen zu sehen.
+            </p>
+            <Button variant="ghost" size="sm" onClick={resetToDefault}>
+              Standard wiederherstellen
+            </Button>
+          </div>
+        ) : isDefaultFilter ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-baerenstark-sand bg-white/70 py-12 text-center"
+          >
+            <span aria-hidden="true" className="text-baerenstark-bark/40">
+              <InboxIcon size={32} />
+            </span>
+            <h3 className="text-lg font-semibold text-baerenstark-bark">
+              Keine offenen Anfragen
+            </h3>
+            <p className="max-w-md text-sm text-baerenstark-bark/70">
+              Sobald eine neue Buchungsanfrage eingeht, erscheint sie hier
+              automatisch.
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={showAll}
+              className="inline-flex items-center gap-1"
+            >
+              Alle Anfragen anzeigen
+              <span aria-hidden="true">
+                <ArrowRightIcon size={14} />
+              </span>
+            </Button>
+          </div>
+        ) : (
+          <Banner tone="info" title="Keine Anfragen in dieser Ansicht">
+            <p>In dieser Filteransicht ist nichts vorhanden.</p>
+          </Banner>
+        )
       ) : (
         <ul role="list" className="space-y-3">
           {filtered.map((b) => {
@@ -284,10 +398,12 @@ export function BookingTable() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <Badge tone={STATUS_TONE[b.status]}>{STATUS_LABEL[b.status]}</Badge>
+                      {/*
+                        IT14-S04 — Schema-Refactor: kein `as`-Cast mehr,
+                        `b.finalPriceEur` ist Teil von `BookingAdminIT14`.
+                      */}
                       {(() => {
-                        const fp = (b as BookingAdmin & {
-                          finalPriceEur?: string | null;
-                        }).finalPriceEur;
+                        const fp = b.finalPriceEur;
                         if (fp === null || fp === undefined || fp === '') return null;
                         const n = Number(fp);
                         if (!Number.isFinite(n)) return null;
@@ -301,6 +417,16 @@ export function BookingTable() {
                           </Badge>
                         );
                       })()}
+                      {/*
+                        IT14-S05 — Zahlungsart-Badge (Bar / Überweisung) nur
+                        rendern, wenn `paymentMethod` gesetzt ist. NULL =
+                        kein Badge (UX-Spec §4.4).
+                      */}
+                      {b.paymentMethod && (
+                        <Badge tone="info" title="Zahlungsart">
+                          {PAYMENT_METHOD_LABEL[b.paymentMethod]}
+                        </Badge>
+                      )}
                       {mailFailed && (
                         <Badge tone="danger" title={b.mailError ?? 'Mail-Versand fehlgeschlagen'}>
                           Mail nicht zugestellt
@@ -462,27 +588,23 @@ export function BookingTable() {
                     </div>
                   )}
 
-                  {/* US-IT6-08: Finaler Preis (Admin-internes Feld) */}
+                  {/* US-IT6-08 + IT14-S04/S05: Finaler Preis + Zahlungsart (Admin-intern) */}
                   <div className="mt-3">
                     <FinalPriceEditor
                       bookingId={b.id}
-                      initialFinalPriceEur={
-                        (b as BookingAdmin & { finalPriceEur?: string | null })
-                          .finalPriceEur ?? null
-                      }
-                      initialFinalPriceNote={
-                        (b as BookingAdmin & { finalPriceNote?: string | null })
-                          .finalPriceNote ?? null
-                      }
-                      onSaved={(price, note) => {
+                      initialFinalPriceEur={b.finalPriceEur ?? null}
+                      initialFinalPriceNote={b.finalPriceNote ?? null}
+                      initialPaymentMethod={b.paymentMethod ?? null}
+                      onSaved={(price, note, method) => {
                         setBookings((prev) =>
                           prev.map((x) =>
                             x.id === b.id
-                              ? ({
+                              ? {
                                   ...x,
                                   finalPriceEur: price,
                                   finalPriceNote: note,
-                                } as BookingAdmin)
+                                  paymentMethod: method,
+                                }
                               : x,
                           ),
                         );

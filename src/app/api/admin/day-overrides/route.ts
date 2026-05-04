@@ -7,8 +7,8 @@
 
 import type { NextRequest } from 'next/server';
 import { ZodError } from 'zod';
-import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { requireAdmin, isAdminError } from '@/lib/require-admin';
 import {
   CreateDayOverrideSchema,
   DayOverrideMonthQuerySchema,
@@ -51,10 +51,9 @@ function serializeOverride(o: {
 
 export async function GET(req: NextRequest): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()` (DISABLED-Check + 401/403-Konsistenz).
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const url = new URL(req.url);
     const scopeRaw = url.searchParams.get('scope');
@@ -125,10 +124,9 @@ export async function GET(req: NextRequest): Promise<Response> {
 
 export async function POST(req: NextRequest): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()` (DISABLED-Check + 401/403-Konsistenz).
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const json = await req.json().catch(() => null);
     if (!json || typeof json !== 'object') {

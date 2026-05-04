@@ -125,6 +125,10 @@ export async function PATCH(
     if (body.finalPriceNote !== undefined) {
       updateData.finalPriceNote = body.finalPriceNote;
     }
+    // IT14 / US-IT14-S05 — Zahlungsart. NULL erlaubt = zurücksetzen.
+    if (body.paymentMethod !== undefined) {
+      updateData.paymentMethod = body.paymentMethod;
+    }
 
     // Wenn aus COUNTER_PROPOSED in CANCELLED/REJECTED → Slot disconnect.
     if (
@@ -251,6 +255,9 @@ export async function PATCH(
           ? String(updated.finalPriceEur as unknown as string | number)
           : null,
       finalPriceNote: updated.finalPriceNote,
+      // IT14 / US-IT14-S05 — Zahlungsart in der Response.
+      paymentMethod:
+        (updated.paymentMethod as 'CASH' | 'BANK_TRANSFER' | null) ?? null,
       updatedAt: updated.updatedAt.toISOString(),
     });
   } catch (err) {

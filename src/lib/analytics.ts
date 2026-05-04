@@ -149,6 +149,22 @@ async function computeAnalyticsRaw(
   const { from, to } = bounds;
 
   // KPIs ----------------------------------------------------------------
+  // IT14 / US-IT14-S07 — Bug-Fix: vorher hat ein Filter
+  // `finalPriceEur: { not: null }` auch die KPI „Abgeschlossene Buchungen"
+  // verzerrt — Buchungen ohne Preis fielen aus dem Count. Lösung:
+  // zwei Queries — ein Count über ALLE COMPLETED im Range (Tom sieht
+  // damit die wahre Anzahl seiner abgeschlossenen Aufträge), und eine
+  // zweite über die mit Preis für Umsatz/Avg/Aggregationen.
+  //
+  // `revenueByMonth`, `bookingsByService` und `topCustomers` bleiben auf
+  // `finalPriceEur != null` gefiltert — sonst keine sinnvolle Aussage.
+  const completedTotalCount = await prisma.booking.count({
+    where: {
+      status: 'COMPLETED',
+      date: { not: null, gte: from, lte: to },
+    },
+  });
+
   const completedInRange = await prisma.booking.findMany({
     where: {
       status: 'COMPLETED',
@@ -166,8 +182,9 @@ async function computeAnalyticsRaw(
       if (Number.isFinite(v)) totalRevenue += v;
     }
   }
-  const completedCount = completedInRange.length;
-  const avg = completedCount > 0 ? totalRevenue / completedCount : null;
+  const completedWithPriceCount = completedInRange.length;
+  const avg =
+    completedWithPriceCount > 0 ? totalRevenue / completedWithPriceCount : null;
 
   // Buchungen "diesen Monat" (unabhängig vom Range — User-erwartetes KPI).
   const today = todayBerlin();
@@ -180,8 +197,13 @@ async function computeAnalyticsRaw(
   });
 
   const kpis: KPIs = {
-    totalRevenueEur: completedCount > 0 ? toDecimalString(totalRevenue) : null,
-    completedBookings: completedCount,
+    // Umsatz und Avg basieren auf Buchungen MIT Preis (sonst keine Aussage).
+    totalRevenueEur:
+      completedWithPriceCount > 0 ? toDecimalString(totalRevenue) : null,
+    // IT14 / S07: Anzahl ALLER abgeschlossenen Aufträge im Range — auch
+    // ohne Preis — damit Tom sieht, wie viele Aufträge er insgesamt
+    // abgeschlossen hat.
+    completedBookings: completedTotalCount,
     averageOrderValueEur: avg !== null ? toDecimalString(avg) : null,
     bookingsThisMonth,
   };

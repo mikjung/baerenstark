@@ -150,6 +150,17 @@ export async function GET(req: NextRequest): Promise<Response> {
         sizeBytes: a.sizeBytes,
         createdAt: a.createdAt.toISOString(),
       })),
+      // IT14 / S04 — finalPriceEur + finalPriceNote im Mapping fehlten
+      // (Symptom „Preis wird nicht gespeichert"). Decimal → String, damit
+      // BookingAdminSchemaIT14 typkonform ist.
+      finalPriceEur:
+        b.finalPriceEur != null
+          ? String(b.finalPriceEur as unknown as string | number)
+          : null,
+      finalPriceNote: b.finalPriceNote ?? null,
+      // IT14 / S05 — Zahlungsart, intern. NULL = nicht erfasst.
+      paymentMethod:
+        (b.paymentMethod as 'CASH' | 'BANK_TRANSFER' | null) ?? null,
       payment: b.payment
         ? {
             id: b.payment.id,

@@ -1,0 +1,31 @@
+-- IT14-S05 — Booking.paymentMethod hinzufügen.
+--
+-- SQLite kennt kein natives ENUM. Wir speichern den Wert als TEXT und
+-- validieren im App-Layer über Zod (PaymentMethodSchema).
+--
+-- Werte (App-Layer-Whitelist, Rev 2 nach QA-Review):
+--   'CASH'          — Tom hat Bar erhalten.
+--   'BANK_TRANSFER' — Banküberweisung (Tom verbucht manuell).
+--   NULL            — noch nicht erfasst (Default).
+--
+-- BEWUSST NICHT enthalten (siehe ARCHITECTURE_IT14.md §4.2):
+--   'STRIPE'  — Tom hat aktuell keine Stripe-Admin-UI; eine Auswahl
+--               würde falsche Erwartungen erzeugen. Kommt zurück, sobald
+--               Stripe reaktiviert wird (mit Backfill-Migration für
+--               existierende Bookings mit `payment.status = 'PAID'`).
+--   'CARD'    — Tom hat keine Kartenzahlungs-Hardware.
+--   'INVOICE' — im Hausservice redundant zu BANK_TRANSFER (Rechnung
+--               wird per Überweisung beglichen). Bei Bedarf später als
+--               separates Feld `paymentDueDate`.
+--
+-- Migration ist additiv und kompatibel zu Bestand-Daten — alle
+-- existierenden Bookings behalten paymentMethod = NULL. UI rendert
+-- für NULL keinen Listen-Badge (siehe ARCHITECTURE_IT14.md §4.8).
+--
+-- In Production einspielen mit:
+--   turso db shell baerenstark-prod < prisma/migrations/20260504130000_iteration_14_payment_method/migration.sql
+--
+-- Danach _prisma_migrations-Tabelle manuell ergänzen (siehe
+-- ARCHITECTURE_IT14.md §7.1).
+
+ALTER TABLE bookings ADD COLUMN paymentMethod TEXT;

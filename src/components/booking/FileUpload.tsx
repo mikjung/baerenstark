@@ -275,42 +275,39 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
         ),
       );
     } catch (err) {
-      let message = 'Upload fehlgeschlagen.';
-      let code: string | null = null;
+      // IT14-S08 — User-freundliche deutsche Error-Microcopy. NIEMALS rohe
+      // Server-Codes (`BLOB_NOT_CONFIGURED`, `INTERNAL_ERROR`) im sichtbaren
+      // Text. UX-Spec-Mapping siehe `ux-spec-iteration-14.md` §6.2.
+      let message = 'Upload fehlgeschlagen. Bitte erneut versuchen.';
       if (err instanceof ApiClientError) {
-        code = err.code;
         if (err.code === 'PAYLOAD_TOO_LARGE') {
-          // Server-Antwort kann ein Limit-Hint im message-Feld haben.
-          message =
-            err.message ||
-            `Datei ist zu groß. Bilder bis ${humanSize(UPLOAD_MAX_IMAGE_BYTES)}, Videos bis ${humanSize(
-              UPLOAD_MAX_VIDEO_BYTES,
-            )}.`;
+          message = `Datei zu groß (max. ${humanSize(UPLOAD_MAX_IMAGE_BYTES)}).`;
         } else if (err.code === 'UNSUPPORTED_MEDIA_TYPE') {
-          message = 'Dieser Dateityp wird nicht unterstützt.';
+          message =
+            'Dieser Dateityp wird nicht unterstützt. Erlaubt: JPEG, PNG.';
         } else if (err.code === 'RATE_LIMITED') {
           message = 'Zu viele Uploads — bitte später erneut versuchen.';
         } else if (err.code === 'NETWORK_ERROR') {
-          message = 'Verbindungsfehler — bitte erneut versuchen.';
+          message =
+            'Verbindung zum Bild-Speicher unterbrochen. Bitte erneut versuchen.';
         } else if (err.code === 'BLOB_NOT_CONFIGURED') {
           // Blob-Storage ist nicht konfiguriert — wir blenden die Sektion aus.
           setBlobUnavailable(true);
-          // Alle erfolgreichen Anhänge werden verworfen, da sie nicht persistiert werden können.
           setEntries([]);
           return;
+        } else if (err.code === 'UNAUTHORIZED' || err.code === 'FORBIDDEN') {
+          message = 'Upload-Sitzung abgelaufen. Bitte Datei erneut wählen.';
         } else if (err.code === 'VALIDATION_ERROR') {
-          // Server-side Magic-Bytes-Check (FILE_TYPE_MISMATCH / FILE_EMPTY) etc.
+          // Server-Magic-Bytes-Check / FILE_EMPTY etc.: Server-Message wird
+          // bereits auf Deutsch geliefert. Falls leer → generischer Fallback.
           message = err.message || 'Datei wurde abgelehnt.';
         } else if (err.code === 'GONE' || err.subcode === 'UPLOAD_LEGACY') {
-          // IT13-S05 Defensive: alter `/api/upload`-Multipart-Endpoint
-          // antwortet mit 410 + subcode `UPLOAD_LEGACY`. Sollte nach
-          // Frontend-Refactor nicht mehr passieren — schützt aber alte
-          // Browser-Tabs ohne neuen JS-Bundle.
           message =
             'Bitte die Seite neu laden — der Upload-Pfad wurde aktualisiert.';
-        } else {
-          message = err.message || message;
         }
+        // Default-Fallback (z. B. INTERNAL_ERROR, unbekannte Codes): generische
+        // deutsche Meldung. Wir geben die Server-Message NICHT durch, weil
+        // sie englische Codes enthalten kann.
       }
       setEntries((prev) =>
         prev.map((e) =>
@@ -319,7 +316,8 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
                 ...e,
                 status: 'error',
                 progress: undefined,
-                error: message + (code ? ` (${code})` : ''),
+                // KEIN ` (CODE)`-Suffix mehr (IT14-S08).
+                error: message,
               }
             : e,
         ),

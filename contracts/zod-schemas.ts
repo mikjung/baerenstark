@@ -2108,7 +2108,24 @@ const finalPriceEurInputSchema = z
     },
   );
 
-/** Erweitertes Body-Schema für PATCH /api/admin/bookings/:id (IT6). */
+// ---------------------------------------------------------------------------
+// US-IT14-S05 — PaymentMethod-Enum (kanonische Quelle).
+// ---------------------------------------------------------------------------
+//
+// HINWEIS (Architektur-Entscheidung Rev 2): die Whitelist ist absichtlich
+// auf `['CASH', 'BANK_TRANSFER']` reduziert. Begründung in
+// ARCHITECTURE_IT14.md §4.2:
+//   - STRIPE bleibt aussen vor, bis Tom Stripe wieder aktiviert (dann mit
+//     Backfill-Migration für existing Stripe-Bookings).
+//   - CARD entfällt — keine Hardware.
+//   - INVOICE entfällt — redundant zu BANK_TRANSFER.
+// SQLite kennt kein ENUM — Spalte ist TEXT, App-Layer validiert über
+// dieses Schema.
+
+export const PaymentMethodSchema = z.enum(['CASH', 'BANK_TRANSFER']);
+export type PaymentMethod = z.infer<typeof PaymentMethodSchema>;
+
+/** Erweitertes Body-Schema für PATCH /api/admin/bookings/:id (IT6 + IT14). */
 export const AdminBookingPatchSchema = z
   .object({
     status: BookingStatusSchema.optional(),
@@ -2119,12 +2136,15 @@ export const AdminBookingPatchSchema = z
       .max(BOOKING_FINAL_PRICE_NOTE_MAX_LENGTH)
       .nullable()
       .optional(),
+    // IT14 / US-IT14-S05 — Zahlungsart (intern). NULL erlaubt (zurücksetzen).
+    paymentMethod: PaymentMethodSchema.nullable().optional(),
   })
   .superRefine((data, ctx) => {
     const hasAny =
       data.status !== undefined ||
       data.finalPriceEur !== undefined ||
-      data.finalPriceNote !== undefined;
+      data.finalPriceNote !== undefined ||
+      data.paymentMethod !== undefined;
     if (!hasAny) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -2141,6 +2161,17 @@ export const BookingAdminSchemaIT6 = BookingAdminSchema.extend({
   finalPriceNote: z.string().nullable(),
 });
 export type BookingAdminIT6 = z.infer<typeof BookingAdminSchemaIT6>;
+
+/**
+ * IT14 / US-IT14-S05 + S04 — Erweiterung von BookingAdminSchemaIT6 um
+ * `paymentMethod`. Verbindlicher Vertrag-Schema für `GET /api/bookings`
+ * (Admin-Liste) und PATCH-Response. Konsumenten (`fetchBookings()`,
+ * `BookingTable.tsx`) typisieren auf diesen Schema — keine `as`-Casts mehr.
+ */
+export const BookingAdminSchemaIT14 = BookingAdminSchemaIT6.extend({
+  paymentMethod: PaymentMethodSchema.nullable(),
+});
+export type BookingAdminIT14 = z.infer<typeof BookingAdminSchemaIT14>;
 
 // ---------------------------------------------------------------------------
 // US-IT6-09 — Analytics

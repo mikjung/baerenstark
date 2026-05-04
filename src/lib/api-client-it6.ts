@@ -28,6 +28,7 @@ import type {
   CalendarEvent,
   CreateAdminInput,
   CustomerUserAdmin,
+  PaymentMethod,
   ReviewAdminIT6,
   ReviewModerationStatus,
   UpdateAdminInput,
@@ -321,6 +322,8 @@ export interface AdminBookingPatchPayload {
   status?: BookingStatus;
   finalPriceEur?: string | number | null;
   finalPriceNote?: string | null;
+  /** IT14 / US-IT14-S05 — Zahlungsart (intern, von Admin gesetzt). NULL = nicht erfasst. */
+  paymentMethod?: PaymentMethod | null;
 }
 
 export async function patchAdminBooking(

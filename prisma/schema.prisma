@@ -261,6 +261,15 @@ model Booking {
   /// (App-Layer). NIEMALS customer-facing.
   finalPriceNote String?
 
+  // IT14 / US-IT14-S05 — Zahlungsart (intern, von Tom erfasst).
+  /// Werte: 'CASH' | 'BANK_TRANSFER'. NULL = nicht erfasst (Default).
+  /// SQLite hat kein ENUM — App-Layer validiert via Zod
+  /// (PaymentMethodSchema in contracts/zod-schemas.ts). Migration:
+  /// prisma/migrations/20260504130000_iteration_14_payment_method.
+  /// Customer-facing NIE — internes Admin-Feld, keine UI im
+  /// Buchungsformular.
+  paymentMethod  String?
+
   // IT11 / US-IT11-06 — Audit-Trail für Stornierungen.
   /// Zeitpunkt der Stornierung (UTC). NULL solange nicht storniert.
   cancelledAt        DateTime?

@@ -14,9 +14,11 @@
  */
 
 import dynamic from 'next/dynamic';
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
+import { ArrowUpRightIcon } from '@/components/ui/icons';
 import { SkeletonCard } from '@/components/ui/Skeleton';
 import { ApiClientError } from '@/lib/api-client';
 import { fetchAdminCalendarEvents } from '@/lib/api-client-it6';
@@ -177,9 +179,15 @@ export function AdminCalendarView() {
 
   const handleEventClick = useCallback((event: CalendarEvent) => {
     if (event.type !== 'BOOKING') {
+      // IT14-S06 / M-8 — BUFFER/AVAILABILITY haben keine Booking-Detail-Ziel.
+      // Popover gar nicht öffnen (UX-Spec §5.3 — verbindlich: Button nicht
+      // rendern, statt disabled).
       setPopover(null);
       return;
     }
+    // Detail-Route ist seit IT14 sauber: `/admin/bookings/[id]` existiert.
+    // Backend liefert `event.url` bereits korrekt; Fallback nur als
+    // Defense-in-Depth.
     setPopover({
       event,
       href: event.url ?? `/admin/bookings/${encodeURIComponent(event.id)}`,
@@ -237,17 +245,26 @@ export function AdminCalendarView() {
               <dd>{formatDateTime(ev.end)}</dd>
             </div>
           </dl>
+          {/*
+            IT14-S06 — Buchung-öffnen-Button:
+              · nur rendern, wenn `event.type === 'BOOKING'` UND `popover.href`.
+              · Mobile-Touch-Target ≥ 44 px (`min-h-[44px]`, `py-3` Layout).
+              · Nutzt Next.js `<Link>` für Client-Navigation ohne Full-Reload.
+          */}
           <div className="mt-5 flex flex-wrap justify-end gap-2">
             <Button variant="ghost" size="sm" onClick={() => setPopover(null)}>
               Schließen
             </Button>
-            {popover.href && (
-              <a
+            {ev.type === 'BOOKING' && popover.href && (
+              <Link
                 href={popover.href}
-                className="inline-flex items-center justify-center rounded-md bg-baerenstark-wood px-4 py-2 text-sm font-medium text-baerenstark-cream hover:bg-baerenstark-bark"
+                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md bg-baerenstark-wood px-4 py-3 text-sm font-medium text-baerenstark-cream hover:bg-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
               >
                 Buchung öffnen
-              </a>
+                <span aria-hidden="true">
+                  <ArrowUpRightIcon size={14} />
+                </span>
+              </Link>
             )}
           </div>
         </div>

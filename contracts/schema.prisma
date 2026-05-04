@@ -389,6 +389,12 @@ model Booking {
   /// Zeichen (App-Layer). NIE in customer-facing Endpoints.
   finalPriceNote  String?
 
+  // --- Iteration 14 / US-IT14-S05 — Zahlungsart (intern) ---
+  /// Werte: 'CASH' | 'BANK_TRANSFER'. NULL = nicht erfasst (Default).
+  /// SQLite hat kein ENUM — App-Layer validiert via Zod
+  /// (`PaymentMethodSchema`). Internes Admin-Feld, customer-facing NIE.
+  paymentMethod   String?
+
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 

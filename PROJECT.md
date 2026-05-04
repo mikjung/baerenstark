@@ -26,7 +26,8 @@ Professionelle, mobiloptimierte Website für Bärenstark Hausservice (Darmstadt)
 | IT10 | Bug-Triage & Customer-Self-Service | US-IT10-01–US-IT10-05 | ✅ Done |
 | IT11 | Produktions-Stabilisierung & UX-Konsolidierung | US-IT11-01–US-IT11-06 | ✅ Done |
 | IT12 | Stakeholder-Feedback-Sweep | IT12-S01–IT12-S15 | ✅ Done |
-| IT13 | Stakeholder-Feedback & Facebook-OAuth-Vorbereitung | IT13-S01–IT13-S08 | 🟡 Draft |
+| IT13 | Stakeholder-Feedback & Facebook-OAuth-Vorbereitung | IT13-S01–IT13-S08 | ✅ Done |
+| IT14 | Live-Feedback aus Tom's Praxisbetrieb — Auth-Härtung, Admin-Workflow-Bugs, Analytics | IT14-S01–IT14-S08 | 🟡 Draft |
 
 ---
 
@@ -1224,6 +1225,117 @@ Professionelle, mobiloptimierte Website für Bärenstark Hausservice (Darmstadt)
 - Given DOM-Inspektion, Then `object-fit: contain` oder äquivalentes Layout gesetzt.
 - Given alle 7 Service-Detail-Seiten, Then auf allen kein Abschneiden.
 - Given Viewport 375px, Then Bild responsiv skaliert, kein horizontales Overflow.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 2
+
+---
+
+### Iteration 14 — Live-Feedback aus Tom's Praxisbetrieb
+
+#### IT14-S01 — Bug: Prefill funktioniert in Production nicht (Regression IT13-S04)
+**Type:** Bug
+**Story:** Als eingeloggter Kunde möchte ich dass meine Konto-Informationen im Termin-Anfrage-Formular automatisch eingetragen sind, damit ich keine bekannten Daten wiederholt eingeben muss.
+**Kategorie:** Bug | **Priorität:** P1
+**AC:**
+- Given eingeloggt + `/buchen` geöffnet, Then Vorname, Nachname und E-Mail vorausgefüllt.
+- Given Adresse im Profil vorhanden, Then Adressfelder ebenfalls vorausgefüllt.
+- Given keine Adresse im Profil, Then Adressfelder leer + Hinweis-Banner mit Link zu `/konto`.
+- Given nicht eingeloggt, Then alle Felder leer — kein Fehler, kein 401-Banner.
+- Given `GET /api/customer/me` in Prod-Logs, Then HTTP 200 für eingeloggte Nutzer — kein 401.
+- Given Root-Ursache identifiziert, Then im PR dokumentiert.
+**Status:** 🟡 Draft | **Priority:** Should Have | **SP:** 3
+
+---
+
+#### IT14-S02 — Härtung: Admin-Seiten nur für Admins zugänglich (Auth-Gate)
+**Type:** Härtung
+**Story:** Als Inhaber möchte ich dass ausschließlich verifizierte Admin-Accounts die Admin-Seiten aufrufen können, damit Kundendaten und Geschäftsinformationen vor unbefugtem Zugriff geschützt sind.
+**Kategorie:** Härtung | **Priorität:** P0
+**AC:**
+- Given nicht eingeloggter Nutzer ruft `/admin/**` auf, Then HTTP 302 Redirect auf `/admin/login` — kein Admin-Inhalt.
+- Given eingeloggter Customer-Account (kein Admin) ruft `/admin/**` auf, Then HTTP 403 + Redirect auf `/admin/login`.
+- Given verifizierter Admin eingeloggt ruft `/admin` auf, Then Dashboard korrekt angezeigt — kein Redirect.
+- Given `/api/admin/**` ohne gültige Admin-Session, Then HTTP 401 oder 403 — kein Datenleck.
+- Given `curl -i https://www.baerenstark-hausservice.app/admin` ohne Cookies, Then HTTP 302 nach `/admin/login`.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT14-S03 — Bug: Admin-Dashboard Default-Filter soll Offen + Bestätigt anzeigen
+**Type:** Bug
+**Story:** Als Admin möchte ich beim Öffnen des Admin-Dashboards sofort die offenen und bestätigten Buchungsanfragen sehen, damit ich ohne manuelles Filtern erkenne was meine Aufmerksamkeit braucht.
+**Kategorie:** Bug | **Priorität:** P1
+**AC:**
+- Given Tom öffnet `/admin`, Then Filter „Offen" und „Bestätigt" vorausgewählt — andere Status deaktiviert.
+- Given Default-Filter aktiv, Then Liste zeigt nur PENDING und CONFIRMED Anfragen.
+- Given Tom ändert Filter + lädt Seite neu, Then Default-Filter wieder aktiv (keine Persistierung).
+- Given keine offenen/bestätigten Buchungen, Then freundlicher Leerstand „Keine offenen Anfragen".
+**Status:** 🟡 Draft | **Priority:** Should Have | **SP:** 2
+
+---
+
+#### IT14-S04 — Bug: Preis wird im Admin-Dashboard nicht gespeichert
+**Type:** Bug
+**Story:** Als Admin möchte ich einen Preis für eine Buchungsanfrage hinterlegen und speichern, damit ich meine Einnahmen korrekt erfassen kann.
+**Kategorie:** Bug | **Priorität:** P0
+**AC:**
+- Given Tom trägt Preis ein und klickt Speichern, Then HTTP 200 + Erfolgs-Meldung — kein Fehler.
+- Given Preis gespeichert + Seite neu geladen, Then Preis-Wert korrekt im Feld vorausgefüllt.
+- Given Preis auf neuen Wert geändert + gespeichert, Then neuer Wert persistiert.
+- Given `GET /api/admin/bookings/[id]`, Then Response enthält Preisfeld mit gespeichertem Wert.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT14-S05 — Feature: Barzahlung als Zahlungsoption hinzufügen
+**Type:** Feature
+**Story:** Als Admin möchte ich bei einer Buchungsanfrage „Barzahlung" als Zahlungsart auswählen und speichern, damit ich Aufträge die vor Ort in bar bezahlt werden korrekt erfassen kann.
+**Kategorie:** Feature | **Priorität:** P1
+**AC:**
+- Given Buchungsdetail im Admin, Then „Barzahlung" als Option in der Zahlungsart-Auswahl vorhanden.
+- Given „Barzahlung" gewählt + gespeichert + Seite neu geladen, Then „Barzahlung" als gewählte Zahlungsart angezeigt.
+- Given bestehende Zahlungsoptionen, Then weiterhin unverändert funktionsfähig — keine Regression.
+- Given `GET /api/admin/bookings/[id]`, Then Response enthält Zahlungsart `CASH` (oder äquivalent).
+**Status:** 🟡 Draft | **Priority:** Should Have | **SP:** 2
+
+---
+
+#### IT14-S06 — Bug: Admin-Kalender „Buchung öffnen" führt zu 404
+**Type:** Bug
+**Story:** Als Admin möchte ich im Kalender einen Termin auswählen und direkt zur zugehörigen Buchungsanfrage navigieren, damit ich schnell Detailinfos zu einem Auftrag aufrufen kann.
+**Kategorie:** Bug | **Priorität:** P1
+**AC:**
+- Given Tom klickt auf Kalender-Eintrag, Then „Buchung öffnen"-Link oder -Button sichtbar.
+- Given Tom klickt auf „Buchung öffnen", Then Buchungsdetail lädt korrekt — HTTP 200, kein 404.
+- Given verschiedene Kalender-Einträge angeklickt, Then jeweils korrekte Buchung geöffnet (richtige ID).
+- Given Smartphone-Viewport, Then „Buchung öffnen"-Link ohne Scrollen oder Zoomen erreichbar.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 2
+
+---
+
+#### IT14-S07 — Bug: Abgeschlossene Aufträge erscheinen nicht in den Analytics
+**Type:** Bug
+**Story:** Als Admin möchte ich in den Auswertungen alle abgeschlossenen Aufträge inklusive ihrer Endpreise sehen, damit ich meine tatsächlichen Einnahmen korrekt auswerten kann.
+**Kategorie:** Bug | **Priorität:** P0
+**AC:**
+- Given Auftrag mit Status „Abgeschlossen" und gespeichertem Endpreis, Then erscheint in der Umsatz-Übersicht der Analytics.
+- Given Default-Zeitraum-Filter der Analytics, Then zeigt aktuellen Monat oder einen Zeitraum der aktuelle Daten enthält.
+- Given mehrere abgeschlossene Aufträge mit Endpreisen, Then Umsatz-Summe entspricht Addition aller finalPrice-Werte.
+- Given Auftrag ohne Endpreis, Then als „0 €" oder „Kein Preis" dargestellt — nicht aus der Liste ausgeblendet.
+- Given Root-Ursache identifiziert, Then im PR dokumentiert.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT14-S08 — Bug: Image-Upload funktioniert in Production nicht
+**Type:** Bug
+**Story:** Als Kunde möchte ich Bilder zum Buchungsformular hochladen können, damit Tom einen visuellen Eindruck des Auftrags erhält.
+**Kategorie:** Bug | **Priorität:** P1
+**AC:**
+- Given JPEG oder PNG unter 10 MB ausgewählt, Then Fortschrittsanzeige 0–100 % + Bildvorschau nach Abschluss — kein Fehler.
+- Given Upload erfolgreich + Buchung abgesendet, Then Bilder im Admin-Auftragsdetail mit Vorschau und Download-Link sichtbar.
+- Given Datei über 10 MB, Then Fehlermeldung „Datei zu groß (max. 10 MB)".
+- Given Ursache identifiziert (BLOB_READ_WRITE_TOKEN, Token-Drift, Endpoint-Problem), Then im PR dokumentiert.
+- Given Fix deployed, Then keine 503/BLOB_NOT_CONFIGURED und keine INTERNAL_ERROR in Prod-Logs.
 **Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 2
 
 ---

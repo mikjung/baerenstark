@@ -14,6 +14,7 @@ import type {
   AvailabilityTemplateDay,
   AvailableSlotsResponse,
   BookingAdmin,
+  BookingAdminIT14,
   BookingStatus,
   BufferConfig,
   CalendarMonth,
@@ -176,6 +177,24 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       typeof errorPayload?.error?.subcode === 'string'
         ? errorPayload.error.subcode
         : undefined;
+    // IT14 / US-IT14-S02 — Frontend-Aspekt: 401/403 von Admin-API → Redirect
+    // auf /admin/login. Backend gilt als Single-Source-Of-Truth (Middleware +
+    // requireActiveAdmin), aber wenn ein Admin-Client-Component nach Session-
+    // Ablauf weiterläuft, soll er nicht still scheitern — er navigiert zur
+    // Login-Seite. Nur clientseitig, nur Admin-Pfade.
+    if (
+      typeof window !== 'undefined' &&
+      (response.status === 401 || response.status === 403) &&
+      path.startsWith('/api/admin/')
+    ) {
+      try {
+        const current = window.location.pathname + window.location.search;
+        const next = encodeURIComponent(current);
+        window.location.href = `/admin/login?next=${next}`;
+      } catch {
+        /* ignore — fallthrough auf throw */
+      }
+    }
     throw new ApiClientError(response.status, code, message, field, rawSubcode);
   }
 
@@ -291,15 +310,28 @@ export async function createBooking(
   return res.data;
 }
 
+/**
+ * IT14 / S04 (C-5 Schema-Refactor) — Liste-Type ist `BookingAdminIT14[]`.
+ *
+ * Backend (`GET /api/bookings`, Admin-List) liefert seit IT14 die erweiterten
+ * Felder `finalPriceEur`, `finalPriceNote`, `paymentMethod`. Frontend nutzt
+ * `BookingAdminIT14` als kanonischen Liste-Type — keine `as`-Casts mehr.
+ *
+ * `status`-Param akzeptiert eine kommaseparierte Liste mehrerer Werte
+ * (Multi-Select-Filter S03). Ein einzelner Wert oder `'ALL'`/`undefined`
+ * funktioniert weiterhin; Backend filtert serverseitig.
+ */
 export async function fetchBookings(params?: {
-  status?: BookingStatus;
+  status?: BookingStatus | string;
   signal?: AbortSignal;
-}): Promise<BookingAdmin[]> {
+}): Promise<BookingAdminIT14[]> {
   const search = new URLSearchParams();
   if (params?.status) search.set('status', params.status);
   const qs = search.toString();
   const path = qs ? `/api/bookings?${qs}` : '/api/bookings';
-  const res = await request<DataEnvelope<BookingAdmin[]>>(path, { signal: params?.signal });
+  const res = await request<DataEnvelope<BookingAdminIT14[]>>(path, {
+    signal: params?.signal,
+  });
   return res.data;
 }
 

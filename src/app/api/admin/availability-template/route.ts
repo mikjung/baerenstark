@@ -7,7 +7,6 @@
 
 import type { NextRequest } from 'next/server';
 import { ZodError } from 'zod';
-import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { UpdateAvailabilityTemplateSchema } from '@/lib/schemas';
 import {
@@ -16,6 +15,7 @@ import {
   internalError,
   zodErrorResponse,
 } from '@/lib/api';
+import { requireAdmin, isAdminError } from '@/lib/require-admin';
 import { getAvailabilityTemplate } from '@/lib/availability';
 import { revalidateTag } from 'next/cache';
 
@@ -24,10 +24,10 @@ export const runtime = 'nodejs';
 
 export async function GET(_req: NextRequest): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()`: einheitliches 401/403,
+    // DISABLED-Check inklusive.
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const days = await getAvailabilityTemplate();
     return apiSuccess({ days });
@@ -38,10 +38,10 @@ export async function GET(_req: NextRequest): Promise<Response> {
 
 export async function PUT(req: NextRequest): Promise<Response> {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return apiError({ code: 'UNAUTHORIZED', message: 'Bitte einloggen.' });
-    }
+    // IT14 / S02 — `requireAdmin()` statt `auth()`: einheitliches 401/403,
+    // DISABLED-Check inklusive.
+    const me = await requireAdmin();
+    if (isAdminError(me)) return me.error;
 
     const json = await req.json().catch(() => null);
     if (!json || typeof json !== 'object') {
