@@ -87,6 +87,16 @@ export async function createBookingWithOverlapCheck(
   const reqStartMin = timeToMinutes(reqStart);
   const reqEndMin = timeToMinutes(reqEnd);
 
+  // IT13 / S06 Bugfix:
+  // Buffer-Config VOR der Transaktion lesen. Innerhalb der libSQL-/Turso-
+  // Transaktion einen separaten globalen Prisma-Client zu benutzen erzeugt
+  // eine zweite Connection und führt zu sequenziellen Network-Round-Trips,
+  // die Vercels 10s-Function-Limit kosten — Symptom: P2028 „Transaction
+  // already closed". Wir lesen die Config einmal vorher und reichen den
+  // Wert als Closure in die Transaktion.
+  const cfg = await getBufferConfig();
+  const bufferMinutes = cfg.bufferMinutes;
+
   const result = await prisma.$transaction(
     async (tx) => {
       // 1) Overlap-Check gegen aktive Buchungen am gleichen Tag.
@@ -115,9 +125,8 @@ export async function createBookingWithOverlapCheck(
       //    [endTime, endTime + bufferMinutes) mit [reqStart, reqEnd)
       //    überlappt? SQLite kann Minuten-Arithmetik auf "HH:MM" nicht
       //    direkt — wir laden alle CONFIRMED-Buchungen am Tag (max ~5)
-      //    und prüfen in JS.
-      const cfg = await getBufferConfig();
-      const bufferMinutes = cfg.bufferMinutes;
+      //    und prüfen in JS. `bufferMinutes` ist VOR der Transaktion
+      //    eingelesen worden — siehe IT13/S06-Bugfix oberhalb.
       if (bufferMinutes > 0) {
         const confirmed = await tx.booking.findMany({
           where: {
