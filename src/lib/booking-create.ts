@@ -171,12 +171,11 @@ export async function createBookingWithOverlapCheck(
       return created;
     },
     {
-      // SQLite: Serializable ≈ BEGIN IMMEDIATE (single-writer-Lock).
-      // IT10 / US-IT10-03: defensiv erhöht (5s→10s, 2s→4s), um seltene
-      // libSQL/Turso-Latenz-Spitzen aus Vercel zu absorbieren ohne P2028.
-      // ARCHITECTURE_IT10.md §1.3 (Hypothese 4) erlaubt diesen Eingriff
-      // explizit — klein und lokal.
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      // libSQL/Turso über @prisma/adapter-libsql akzeptiert `isolationLevel`
+      // NICHT — der Adapter wirft sonst und der Booking-POST endet in 500
+      // (Tom-Feedback IT13). libSQL ist ohnehin single-writer (BEGIN
+      // IMMEDIATE-äquivalent), die Serialisierungs-Garantie bleibt erhalten.
+      // IT10 / US-IT10-03: timeout/maxWait defensiv erhöht für Turso-Latenz.
       timeout: 10000,
       maxWait: 4000,
     },
