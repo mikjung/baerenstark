@@ -25,6 +25,11 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
+import {
+  logRequestError,
+  newRequestId,
+  type RequestAuthState,
+} from './log-request-error';
 
 export type ApiErrorCode =
   | 'VALIDATION_ERROR'
@@ -179,8 +184,22 @@ export function zodErrorResponse(err: ZodError): NextResponse {
  * @param err - der gefangene Fehler.
  * @param context - optionaler Endpoint-Marker (z. B. `'POST /api/bookings'`),
  *   landet als Tag im Log-Eintrag und erleichtert die Vercel-Filterung.
+ * @param ctx   - IT13: optionale Logging-Erweiterung. Wenn gesetzt, wird der
+ *                strukturierte `logRequestError`-Eintrag mit `requestId`,
+ *                `authState` und `customerId` geschrieben, und die Antwort
+ *                bekommt einen `X-Request-Id`-Header. Falls `ctx.requestId`
+ *                fehlt, wird ein frischer UUID erzeugt — sodass jede 5xx-
+ *                Antwort die Header-Korrelation hat.
  */
-export function internalError(err: unknown, context?: string): NextResponse {
+export function internalError(
+  err: unknown,
+  context?: string,
+  ctx?: {
+    requestId?: string;
+    authState?: RequestAuthState;
+    customerId?: string | null;
+  },
+): NextResponse {
   const tag = context ? ` ${context}` : '';
   const errAny = err as
     | { name?: string; message?: string; stack?: string; code?: string; meta?: unknown }
@@ -216,8 +235,27 @@ export function internalError(err: unknown, context?: string): NextResponse {
     );
   }
 
+  // IT13 / S05+S06 — Strukturiertes Pflicht-Logging.
+  // Jede 5xx-Antwort bekommt einen frischen oder vorher reservierten
+  // `requestId` und einen entsprechenden `X-Request-Id`-Header. Der
+  // strukturierte Log-Eintrag ergänzt den oben geschriebenen klassischen
+  // `[internal_error]`/`[prisma_error]`-Eintrag und liefert dem Operator
+  // ein deterministisches Grep-Format.
+  const requestId = ctx?.requestId ?? newRequestId();
+  logRequestError(
+    {
+      endpoint: context ?? 'unknown',
+      requestId,
+      authState: ctx?.authState ?? 'anonymous',
+      customerId: ctx?.customerId ?? null,
+      status: 500,
+    },
+    err,
+  );
+
   return apiError({
     code: 'INTERNAL_ERROR',
     message: 'Interner Serverfehler. Bitte später erneut versuchen.',
+    headers: { 'X-Request-Id': requestId },
   });
 }

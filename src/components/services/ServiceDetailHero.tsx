@@ -52,18 +52,30 @@ export function ServiceDetailHero({
     );
   }
 
+  // IT13-S07 + S08: Drei-Schicht-Modell
+  //  1. Outer-Wrapper (Card): bg-baerenstark-cream/60 = Letterbox-Token
+  //     (Cream, leicht transparent — sanfter Frame).
+  //  2. Image-Container: bg-transparent — der Cream-Layer scheint durch
+  //     transparente PNG-Pixel.
+  //  3. <Image>: bg-transparent + object-contain — vollständig sichtbar,
+  //     keine Self-Backgrounds.
+  // Frame-Cap: max-h-[28rem] (≈ 448 px) verhindert übergroße Darstellung
+  // auf 4K-Screens. Aspect-Ratios pro Viewport: 4/3 Mobile, 3/2 ab `sm`.
   return (
-    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-baerenstark-sand bg-baerenstark-cream/40 shadow-md sm:aspect-[3/2] sm:rounded-xl">
-      <Image
-        src={imageSrc}
-        alt={`${serviceName} — Beispielbild`}
-        fill
-        sizes="(max-width: 1024px) 100vw, 60vw"
-        quality={85}
-        priority={priority}
-        onError={() => setErrored(true)}
-        className="object-cover transition-transform duration-200 ease-out motion-safe:hover:scale-[1.02]"
-      />
+    <div className="overflow-hidden rounded-lg border border-baerenstark-sand bg-baerenstark-cream/60 shadow-md sm:rounded-xl">
+      <div className="relative aspect-[4/3] w-full overflow-hidden bg-transparent sm:aspect-[3/2] max-h-[28rem]">
+        <Image
+          src={imageSrc}
+          alt={`${serviceName} — Beispielbild`}
+          fill
+          sizes="(max-width: 1024px) 100vw, 60vw"
+          quality={85}
+          priority={priority}
+          placeholder="empty"
+          onError={() => setErrored(true)}
+          className="bg-transparent object-contain transition-transform duration-200 ease-out motion-safe:hover:scale-[1.02]"
+        />
+      </div>
     </div>
   );
 }

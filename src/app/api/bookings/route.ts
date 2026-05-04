@@ -56,6 +56,10 @@ import {
   storeIdempotencyResponse,
 } from '@/lib/idempotency';
 import { NextResponse } from 'next/server';
+import {
+  newRequestId,
+  type RequestAuthState,
+} from '@/lib/log-request-error';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -198,6 +202,16 @@ export async function POST(req: NextRequest): Promise<Response> {
   // neuer Insert.
   const idempotencyKey = readIdempotencyKey(req.headers);
 
+  // IT13 / S06 — Strukturiertes Pflicht-Logging.
+  // `requestId` wird bei JEDEM 5xx-Pfad als `X-Request-Id`-Header
+  // mitgegeben, sodass Tom dem Kunden eine Fehler-ID zur Vercel-Log-
+  // Korrelation nennen kann. `authState` und `customerIdForLog` werden
+  // gefüllt, sobald die Customer-Session gelesen wurde — wichtig, damit
+  // der Log-Eintrag bei eingeloggten Buchungen den Kontext mitführt.
+  const requestId = newRequestId();
+  let authStateForLog: RequestAuthState = 'anonymous';
+  let customerIdForLog: string | null = null;
+
   try {
     if (idempotencyKey) {
       const cached = await lookupIdempotencyResponse(idempotencyKey);
@@ -249,6 +263,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     // funktioniert.
     // ---------------------------------------------------------------------
     const customerSession = await readCustomerSessionFromRequest(req);
+    if (customerSession?.customerId) {
+      authStateForLog = 'authenticated';
+      customerIdForLog = customerSession.customerId;
+    }
 
     if (isDateMode && customerSession?.customerId) {
       const bodyHasAddress =
@@ -677,6 +695,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
   } catch (err) {
     if (err instanceof ZodError) return zodErrorResponse(err);
-    return internalError(err, 'POST /api/bookings');
+    return internalError(err, 'POST /api/bookings', {
+      requestId,
+      authState: authStateForLog,
+      customerId: customerIdForLog,
+    });
   }
 }

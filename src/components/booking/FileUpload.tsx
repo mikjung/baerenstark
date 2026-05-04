@@ -43,6 +43,11 @@ interface UploadEntry {
   localId: string;
   file: File;
   status: UploadStatus;
+  /**
+   * IT13-S05 — Direct-Upload-Fortschritt 0–100 für die laufende Übertragung
+   * Browser → Vercel Blob. `undefined` solange kein Update angekommen ist.
+   */
+  progress?: number;
   /** Server-side ID (vorhanden, wenn status === 'success'). */
   attachmentId?: string;
   url?: string;
@@ -230,19 +235,39 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
    * Setzt den State für einen Eintrag auf `uploading`, ruft den API-Client und
    * persistiert das Ergebnis in den State. Wird intern von `drainQueue()`
    * aufgerufen — nicht direkt vom UI.
+   *
+   * IT13-S05 — Direct-Upload-Flow: `uploadFile()` ruft intern Token-Endpoint
+   * → Vercel Blob (Browser-Direct) → Confirm-Endpoint. Der `onProgress`-
+   * Callback liefert den Browser→Blob-Fortschritt in Prozent; wir spiegeln
+   * ihn am Upload-Eintrag.
    */
   async function runUpload(localId: string, file: File) {
     setEntries((prev) =>
-      prev.map((e) => (e.localId === localId ? { ...e, status: 'uploading' } : e)),
+      prev.map((e) =>
+        e.localId === localId ? { ...e, status: 'uploading', progress: 0 } : e,
+      ),
     );
     try {
-      const res = await uploadFile(file);
+      const res = await uploadFile(file, {
+        onProgress: ({ percentage }) => {
+          // Defensive Klammerung: SDK kann auch >100 oder NaN liefern.
+          const safe = Number.isFinite(percentage)
+            ? Math.max(0, Math.min(100, Math.round(percentage)))
+            : 0;
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.localId === localId ? { ...e, progress: safe } : e,
+            ),
+          );
+        },
+      });
       setEntries((prev) =>
         prev.map((e) =>
           e.localId === localId
             ? {
                 ...e,
                 status: 'success',
+                progress: 100,
                 attachmentId: res.attachmentId,
                 url: res.url,
               }
@@ -276,6 +301,13 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
         } else if (err.code === 'VALIDATION_ERROR') {
           // Server-side Magic-Bytes-Check (FILE_TYPE_MISMATCH / FILE_EMPTY) etc.
           message = err.message || 'Datei wurde abgelehnt.';
+        } else if (err.code === 'GONE' || err.subcode === 'UPLOAD_LEGACY') {
+          // IT13-S05 Defensive: alter `/api/upload`-Multipart-Endpoint
+          // antwortet mit 410 + subcode `UPLOAD_LEGACY`. Sollte nach
+          // Frontend-Refactor nicht mehr passieren — schützt aber alte
+          // Browser-Tabs ohne neuen JS-Bundle.
+          message =
+            'Bitte die Seite neu laden — der Upload-Pfad wurde aktualisiert.';
         } else {
           message = err.message || message;
         }
@@ -283,7 +315,12 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
       setEntries((prev) =>
         prev.map((e) =>
           e.localId === localId
-            ? { ...e, status: 'error', error: message + (code ? ` (${code})` : '') }
+            ? {
+                ...e,
+                status: 'error',
+                progress: undefined,
+                error: message + (code ? ` (${code})` : ''),
+              }
             : e,
         ),
       );
@@ -302,7 +339,7 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
     setEntries((prev) =>
       prev.map((e) =>
         e.localId === localId
-          ? { ...e, status: 'pending', error: undefined }
+          ? { ...e, status: 'pending', error: undefined, progress: undefined }
           : e,
       ),
     );
@@ -463,7 +500,10 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
                 </p>
                 <p className="text-xs text-baerenstark-bark/60">
                   {humanSize(entry.file.size)}
-                  {entry.status === 'uploading' && ' · wird hochgeladen…'}
+                  {entry.status === 'uploading' &&
+                    (typeof entry.progress === 'number'
+                      ? ` · wird hochgeladen… ${entry.progress}%`
+                      : ' · wird hochgeladen…')}
                   {entry.status === 'success' && ' · hochgeladen'}
                   {entry.status === 'pending' && ' · wartet…'}
                 </p>
@@ -479,13 +519,30 @@ export function FileUpload({ onAttachmentsChange, hideSection = false }: FileUpl
                 {(entry.status === 'uploading' || entry.status === 'pending') && (
                   <div
                     className="mt-1 h-1 w-full overflow-hidden rounded bg-baerenstark-sand/40"
-                    aria-hidden="true"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={
+                      entry.status === 'uploading' && typeof entry.progress === 'number'
+                        ? entry.progress
+                        : undefined
+                    }
+                    aria-label={`Upload-Fortschritt für ${entry.file.name}`}
                   >
+                    {/*
+                      IT13-S05 — echter Progress-Wert aus
+                      `@vercel/blob/client.put().onUploadProgress`. Solange
+                      `pending` (in der Queue) zeigen wir nur einen schmalen
+                      Indikator-Stub (1/6 Breite), kein animate-pulse.
+                    */}
                     <div
-                      className={[
-                        'h-full bg-leaf transition-all',
-                        entry.status === 'uploading' ? 'animate-pulse w-3/4' : 'w-1/6',
-                      ].join(' ')}
+                      className="h-full bg-leaf transition-[width] duration-200 ease-out"
+                      style={{
+                        width:
+                          entry.status === 'uploading'
+                            ? `${typeof entry.progress === 'number' ? entry.progress : 5}%`
+                            : '16%',
+                      }}
                     />
                   </div>
                 )}

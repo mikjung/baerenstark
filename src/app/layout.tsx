@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { Inter, Playfair_Display } from 'next/font/google';
 import './globals.css';
 import { Header } from '@/components/layout/Header';
+import { HeaderOffsetSync } from '@/components/layout/HeaderOffsetSync';
 import { Footer } from '@/components/layout/Footer';
 import { Toaster } from '@/components/ui/Toast';
 import { BookingDialogProvider } from '@/components/booking/BookingDialogProvider';
@@ -56,6 +57,7 @@ export default function RootLayout({
         </a>
         <BookingDialogProvider>
           <Header />
+          <HeaderOffsetSync />
           <main id="main" className="flex-1">
             {children}
           </main>

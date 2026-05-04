@@ -41,6 +41,15 @@ const config: Config = {
           'completed-bg': '#EADBC0',
           'completed-border': '#A38660',
         },
+        // IT13-D1 — OAuth-Provider-Brand-Colors (Facebook).
+        // Siehe `project/design/ux/design-system-iteration-13-additions.md` §IT13-D1.
+        oauth: {
+          facebook: {
+            DEFAULT: '#1877F2',
+            hover: '#166FE5',
+            active: '#0F5FCD',
+          },
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],

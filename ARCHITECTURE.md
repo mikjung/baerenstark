@@ -866,6 +866,55 @@ only, Hard-Cap 50 Empfänger pro Send (Vercel-Hobby-Timeout-konform),
 Test-Send an Admin-Mail, Audit-Trail in `MarketingEmail` +
 `MarketingEmailRecipient` mit Resend-Message-IDs.
 
+**IT13 — Bug-Fix-Sweep + Facebook OAuth + Direct-Upload-Refactor (2026-05-04):**
+Production-Bug-Sweep nach Tom's Stakeholder-Feedback nach IT12-Go-Live.
+Zwei Production-Blocker strukturell behoben:
+**`/api/upload` Refactor auf Direct-Upload via `@vercel/blob/client`**
+— neue Endpoints `POST /api/upload/token` (signed Token, 5 min,
+MIME/Size in Token eingebrannt) + `PATCH /api/upload/attachments/[id]`;
+alter `POST /api/upload` antwortet während der Übergangsphase mit
+410 GONE. Browser lädt Datei direkt zu Vercel Blob, Server-Function-
+Body-Limit von Vercel Hobby (4.5 MB) ist damit irrelevant — 10-MB-Bilder
+und 50-MB-Videos sauber möglich. `/api/bookings` 500 (Prisma-Migrations-
+Drift gegen Turso erneut — IT11 + IT12 Migrations nicht vollständig
+eingespielt; manuelle Turso-Shell-Schritte nachgezogen).
+**Strukturiertes Pflicht-Logging** in beiden Bug-Routen via neuem
+`src/lib/log-request-error.ts`: jede 5xx-Antwort erzeugt einen single-
+line `console.error`-Eintrag mit `requestId` (UUID), `prismaCode`/
+`prismaMeta`, `resendCode`, `blobErrorName`, `authState`, `customerId`,
+`endpoint`, `status`, `errorClass`, `message`. `internalError()` in
+`src/lib/api.ts` erweitert: ruft intern `logRequestError` auf und gibt
+`X-Request-Id`-Header zurück; FE zeigt diese ID dem Kunden bei 5xx zur
+Support-Korrelation. UX-Bugs: **`useScrollToSection()`-Hook** neu in
+`src/lib/scroll-to-section.ts` (Pflicht-Sequenz `requestAnimationFrame
+× 2 → scrollIntoView → heading.focus({ preventScroll: true })`),
+ersetzt `scroll-into-view.ts` (gelöscht). Header-Höhe via
+`[data-app-header]`, Modal-aware via `[data-modal-body]` (mit
+optionalem `[data-modal-header]` für Modal-internen Sticky-Header),
+prefers-reduced-motion-konform, ±8 px Komfort-Tolerance. Form-Prefill
+konsolidiert über `useCustomer()` in allen Forms (Buchungs-Wizard,
+Profil) mit Skeleton-Gating gegen Hydration-Mismatch. Service-Detail-
+Bilder (`/services/[slug]`): Drei-Schicht-Modell — Outer-Wrapper
+`bg-baerenstark-cream/60` (Letterbox-Token), Image-Container
+`bg-transparent`, `<Image>` `bg-transparent object-contain` mit
+`max-h-[28rem]` (Stories S07/S08). Compliance: neue statische Server-
+Component-Page `/datenschutz/datenloesung` (kein Backend-State) als
+Voraussetzung für Facebook App Review live; Footer-Link
+„Datenlöschung" + Datenschutz-Seite-Abschnitt mit Querverweis.
+**Facebook OAuth produktiv aktiv** (Provider in
+`src/lib/customer-oauth.ts` schon seit IT6 registriert, IT13 erstmals
+live): ENV-Naming auf `AUTH_FACEBOOK_ID`/`AUTH_FACEBOOK_SECRET`
+harmonisiert (mit Alias-Akzeptanz für `FACEBOOK_CLIENT_ID/SECRET`),
+Scope-String auf `'email,public_profile'` (Facebook-Komma-Konvention),
+Redirect-URI in Facebook Developer Console exakt
+`https://www.baerenstark-hausservice.app/api/auth/customer/callback/facebook`
+(mit `customer/`-Pfadsegment). Account-Linking konsistent mit Google:
+verifiziert → auto-link, unverifiziert → 422 `oauth_unverified_conflict`
+(Hijacking-Schutz). Single-Valued `oauthProvider`-Spalte: bei
+Multi-OAuth wird überschrieben — Login funktioniert weiter über
+E-Mail-Match-Pfad (akzeptierter Trade-off; Multi-OAuth-Schema bleibt
+im Backlog).
+
 ---
 
 ## 12. Risiken & Tech-Debt (offen)

@@ -26,6 +26,7 @@ Professionelle, mobiloptimierte Website für Bärenstark Hausservice (Darmstadt)
 | IT10 | Bug-Triage & Customer-Self-Service | US-IT10-01–US-IT10-05 | ✅ Done |
 | IT11 | Produktions-Stabilisierung & UX-Konsolidierung | US-IT11-01–US-IT11-06 | ✅ Done |
 | IT12 | Stakeholder-Feedback-Sweep | IT12-S01–IT12-S15 | ✅ Done |
+| IT13 | Stakeholder-Feedback & Facebook-OAuth-Vorbereitung | IT13-S01–IT13-S08 | 🟡 Draft |
 
 ---
 
@@ -1121,6 +1122,109 @@ Professionelle, mobiloptimierte Website für Bärenstark Hausservice (Darmstadt)
 - Given > 50 Empfänger, Then Bestätigungswarnung „X Empfänger — fortfahren?".
 - Given Versand abgeschlossen, Then Erfolgsmeldung mit Anzahl versendeter E-Mails; bei Fehlern: Liste fehlgeschlagener Adressen.
 **Status:** ✅ Done | **Priority:** Must Have | **SP:** 8
+
+---
+
+### Iteration 13 — Stakeholder-Feedback & Facebook-OAuth-Vorbereitung
+
+#### IT13-S01 — Facebook-OAuth: Datenlöschungsseite einrichten
+**Type:** Compliance
+**Story:** Als Website-Besucher möchte ich eine öffentlich zugängliche Datenlöschungsseite finden, damit ich weiß wie ich meine Daten löschen lassen kann und Facebook die App-Freigabe erteilt.
+**AC:**
+- Given `/datenschutz/datenloesung` aufgerufen, Then HTTP 200, ohne Login erreichbar, Inhalt: Überschrift „Datenlöschung", Kontakt-E-Mail, 30-Tage-Frist, gespeicherte Datenkategorien.
+- Given Facebook App-Dashboard + URL eingetragen, Then URL-Validierung schlägt nicht fehl.
+- Given Datenschutzhauptseite, Then Abschnitt zur Datenlöschung vorhanden (direkt oder via Link).
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 2
+
+---
+
+#### IT13-S02 — Facebook OAuth aktivieren und testen
+**Type:** Feature
+**Story:** Als Kunde möchte ich mich mit meinem Facebook-Konto anmelden, damit ich kein weiteres Passwort benötige.
+**AC:**
+- Given `/konto/login`, Then „Mit Facebook anmelden"-Button sichtbar und aktiv.
+- Given OAuth-Flow abgeschlossen, Then eingeloggt, Weiterleitung zu `/konto`.
+- Given erster Facebook-Login, Then neues CustomerUser-Konto angelegt.
+- Given E-Mail stimmt mit bestehendem Konto überein, Then Konten verknüpft — kein Duplikat.
+- Given IT13-S01 live + Facebook App auf „Live", Then Login in Prod ohne Review-Blocker.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT13-S03 — Scroll-Bug: Automatisches Scrollen zur nächsten Sektion (alle Formulare)
+**Type:** Bug
+**Story:** Als Kunde möchte ich nach jeder Auswahl in einem Formular automatisch zur nächsten Sektion scrollen, wobei die Abschnittsüberschrift vollständig sichtbar ist.
+**AC:**
+- Given Tag im Kalender gewählt, Then Scroll zur Dauer-Abschnittsüberschrift — vollständig unter Sticky-Header sichtbar.
+- Given Dauer gewählt, Then Scroll zur Zeitslot-Überschrift — vollständig sichtbar.
+- Given Zeitslot gewählt, Then Scroll zur Kontaktdaten-Überschrift — vollständig sichtbar.
+- Given Header-Höhe variabel, Then Offset dynamisch berechnet — kein hartcodierter Wert.
+- Given Quick-Booking-Modal, Then Modal scrollt intern — nicht das Hintergrunddokument.
+- Given `prefers-reduced-motion`, Then kein Smooth-Scrolling.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT13-S04 — Formular-Prefill: Alle Formulare für eingeloggte Nutzer automatisch befüllen
+**Type:** Enhancement
+**Story:** Als eingeloggter Kunde möchte ich dass alle Formulare automatisch mit meinen Profildaten vorausgefüllt sind, damit ich keine bekannten Informationen wiederholt eingeben muss.
+**AC:**
+- Given eingeloggt + Buchungsformular, Then Vorname, Nachname, E-Mail, Telefon (wenn vorhanden), Adressfelder (wenn vorhanden) vorausgefüllt.
+- Given eingeloggt + kein Adresse, Then Adressfelder leer + Hinweis mit Link zu `/konto`.
+- Given eingeloggt + Profilseite, Then alle Profilfelder vorausgefüllt.
+- Given eingeloggt + Kontaktformular, Then Name und E-Mail vorausgefüllt.
+- Given nicht eingeloggt, Then alle Felder leer — kein Fehler.
+- Given Formularwert geändert + abgesendet, Then geänderter Wert verwendet, Profil nicht überschrieben.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT13-S05 — Production-Bug: Bilder-Upload schlägt fehl (INTERNAL_ERROR)
+**Type:** Bug
+**Story:** Als Kunde möchte ich Bilder hochladen können, damit Tom einen visuellen Eindruck des Auftrags erhält.
+**Fehlermeldung:** „Upload zum Speicher fehlgeschlagen. Bitte später erneut versuchen. (INTERNAL_ERROR)" — Endpoint: `POST /api/upload` (Vercel Blob).
+**AC:**
+- Given Ursache aus Vercel-Logs identifiziert, Then im PR dokumentiert.
+- Given `BLOB_READ_WRITE_TOKEN` in Vercel Production gesetzt, When JPEG/PNG (≤ 10 MB) hochgeladen, Then HTTP 200 + gültige Blob-URL — kein INTERNAL_ERROR.
+- Given Datei > 10 MB, Then Fehlermeldung „Datei zu groß (max. 10 MB)".
+- Given Upload erfolgreich + Buchung abgesendet, Then Bilder im Admin-Auftragsdetail sichtbar.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT13-S06 — Production-Bug: Anfrage absenden schlägt fehl (Interner Serverfehler)
+**Type:** Bug
+**Story:** Als Kunde möchte ich eine Buchungsanfrage in Produktion erfolgreich absenden, damit Tom sie erhält.
+**Fehlermeldung:** „Interner Serverfehler. Bitte später erneut versuchen." — Endpoint: `POST /api/bookings`.
+**AC:**
+- Given Ursache aus Vercel-Logs identifiziert (P2022/P1001/Resend-Fehler), Then im PR dokumentiert.
+- Given alle Pflicht-ENV gesetzt, When Formular abgesendet, Then HTTP 201 — kein 500.
+- Given HTTP 201, Then Anfrage im Admin-Portal als PENDING + Tom erhält E-Mail.
+- Given Smoke-Test in Prod (Gast + eingeloggt), Then beide Buchungen erfolgreich.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 3
+
+---
+
+#### IT13-S07 — Bilder: PNG-Transparenz korrekt darstellen
+**Type:** Bug
+**Story:** Als Website-Besucher möchte ich Service-Bilder auf transparentem Hintergrund sehen, damit das Design ohne störende opake Boxen wirkt.
+**AC:**
+- Given Service-Karten auf Startseite, Then transparente PNG-Bereiche durchsichtig — Seitenhintergrund sichtbar.
+- Given alle 7 Service-Detail-Seiten, Then keine weißen/grauen Boxen um Bilder.
+- Given DOM-Inspektion, Then kein `background-color: white` oder äquivalent an Bild oder direktem Container.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 2
+
+---
+
+#### IT13-S08 — Service-Detail-Bilder: Größe anpassen (vollständig sichtbar)
+**Type:** Bug
+**Story:** Als Website-Besucher möchte ich das Service-Bild auf Detail-Seiten vollständig sehen, nicht abgeschnitten.
+**AC:**
+- Given Service-Detail-Seite (`/services/[slug]`) geladen, Then Bild vollständig sichtbar — kein Abschneiden.
+- Given DOM-Inspektion, Then `object-fit: contain` oder äquivalentes Layout gesetzt.
+- Given alle 7 Service-Detail-Seiten, Then auf allen kein Abschneiden.
+- Given Viewport 375px, Then Bild responsiv skaliert, kein horizontales Overflow.
+**Status:** 🟡 Draft | **Priority:** Must Have | **SP:** 2
 
 ---
 

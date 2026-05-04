@@ -13,12 +13,20 @@
  *   - DSGVO-Lösch-Pfad: alle drei Felder leeren + speichern → Backend
  *     setzt sie auf NULL (Frontend sendet leere Strings, Schema akzeptiert
  *     `union([string, '', null])`).
+ *
+ * IT13-S03 — Section-Anchors mit `data-section-anchor` + Heading-Focus:
+ *   - Persönliche Daten → `profile-section-personal`
+ *   - Kontaktdaten      → `profile-section-contact`
+ *   - Adresse           → `profile-section-address`
+ *   Hash-Anker (#profile-section-address) triggert beim Mount einen Scroll
+ *   auf die Section via `useScrollToSection`.
  */
 
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
+import { useScrollToSection } from '@/lib/scroll-to-section';
 import { Banner } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -85,6 +93,18 @@ export function ProfileForm({ initialCustomer }: ProfileFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
+  const scrollToSection = useScrollToSection();
+
+  // IT13-S03: Hash-Anker beim Mount auswerten — z. B. wenn der User
+  // aus dem Buchungsformular über den „Adresse in deinem Profil
+  // hinterlegen"-Banner zu `/konto/profil#profile-section-address`
+  // navigiert wird.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const hash = window.location.hash.slice(1);
+    if (!hash) return;
+    scrollToSection(hash);
+  }, [scrollToSection]);
 
   const {
     register,
@@ -151,46 +171,85 @@ export function ProfileForm({ initialCustomer }: ProfileFormProps) {
 
   return (
     <form onSubmit={onSubmit} noValidate className="space-y-4">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Input
-          label="Vorname"
-          autoComplete="given-name"
-          required
-          error={errors.firstName?.message}
-          {...register('firstName')}
-        />
-        <Input
-          label="Nachname"
-          autoComplete="family-name"
-          required
-          error={errors.lastName?.message}
-          {...register('lastName')}
-        />
-      </div>
+      <section
+        id="profile-section-personal"
+        data-section-anchor="profile-section-personal"
+        aria-labelledby="profile-section-personal-heading"
+        className="scroll-mt-[var(--header-offset)] space-y-4"
+      >
+        <h2
+          id="profile-section-personal-heading"
+          tabIndex={-1}
+          className="sr-only focus:outline-none"
+        >
+          Persönliche Daten
+        </h2>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Input
+            label="Vorname"
+            autoComplete="given-name"
+            required
+            error={errors.firstName?.message}
+            {...register('firstName')}
+          />
+          <Input
+            label="Nachname"
+            autoComplete="family-name"
+            required
+            error={errors.lastName?.message}
+            {...register('lastName')}
+          />
+        </div>
+      </section>
 
-      <Input
-        label="E-Mail"
-        type="email"
-        value={initialCustomer.email}
-        readOnly
-        disabled
-        hint="E-Mail-Adresse kann derzeit nicht selbst geändert werden. Bitte wende dich an unser Team."
-        autoComplete="email"
-      />
+      <section
+        id="profile-section-contact"
+        data-section-anchor="profile-section-contact"
+        aria-labelledby="profile-section-contact-heading"
+        className="scroll-mt-[var(--header-offset)] space-y-4"
+      >
+        <h2
+          id="profile-section-contact-heading"
+          tabIndex={-1}
+          className="sr-only focus:outline-none"
+        >
+          Kontaktdaten
+        </h2>
+        <Input
+          label="E-Mail"
+          type="email"
+          value={initialCustomer.email}
+          readOnly
+          disabled
+          hint="E-Mail-Adresse kann derzeit nicht selbst geändert werden. Bitte wende dich an unser Team."
+          autoComplete="email"
+        />
 
-      <Input
-        label="Telefon"
-        type="tel"
-        autoComplete="tel"
-        error={errors.phone?.message}
-        {...register('phone')}
-      />
+        <Input
+          label="Telefon"
+          type="tel"
+          autoComplete="tel"
+          error={errors.phone?.message}
+          {...register('phone')}
+        />
+      </section>
 
       {/*
         IT9 / US-IT9-02 — Adresse. Optional auf Form-Level. Hinweistext
         erklärt den Lösch-Pfad (alle Felder leer → Adresse wird entfernt).
+        IT13-S03: data-section-anchor + scroll-mt für Hash-Anker.
       */}
-      <fieldset className="rounded-lg border border-baerenstark-sand bg-baerenstark-cream/40 p-4">
+      <fieldset
+        id="profile-section-address"
+        data-section-anchor="profile-section-address"
+        className="scroll-mt-[var(--header-offset)] rounded-lg border border-baerenstark-sand bg-baerenstark-cream/40 p-4"
+      >
+        <h2
+          tabIndex={-1}
+          className="sr-only focus:outline-none"
+        >
+          Adresse
+        </h2>
         <legend className="px-1 text-sm font-medium text-baerenstark-bark">
           Adresse
         </legend>

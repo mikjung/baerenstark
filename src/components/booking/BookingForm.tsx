@@ -617,7 +617,7 @@ export function BookingForm({
                 <p className="text-sm">
                   Wenn du deine Adresse einmal in deinem{' '}
                   <Link
-                    href="/konto/profil"
+                    href="/konto/profil#profile-section-address"
                     className="font-medium text-baerenstark-wood underline-offset-2 hover:underline"
                   >
                     Profil
@@ -672,6 +672,17 @@ export function BookingForm({
                 />
               </div>
             </div>
+            {/*
+              IT13-S04 / UX-Spec §3.4.4a — Editable-Default-Hint:
+              Eingeloggte Kunden mit Profil-Adresse können für diese Buchung
+              eine andere Adresse eintragen, ohne ihr Profil zu ändern.
+            */}
+            {profileAddress && (
+              <p className="pl-1 text-xs text-baerenstark-bark/60">
+                Möchtest du an einer anderen Adresse buchen? Überschreibe die
+                Felder einfach — dein Profil bleibt unverändert.
+              </p>
+            )}
           </div>
 
           <div className="mt-4">

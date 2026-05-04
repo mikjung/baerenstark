@@ -82,9 +82,16 @@ export function isCustomerOAuthEnabled(): boolean {
   const hasGoogle = !!(
     process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
   );
-  const hasFacebook = !!(
-    process.env.FACEBOOK_CLIENT_ID && process.env.FACEBOOK_CLIENT_SECRET
-  );
+  // IT13 / S02 — Facebook ENV-Naming auf NextAuth-v5-Konvention
+  // `AUTH_FACEBOOK_ID` / `AUTH_FACEBOOK_SECRET` harmonisiert. Während der
+  // Übergangsphase bleiben die Legacy-Namen `FACEBOOK_CLIENT_ID` /
+  // `FACEBOOK_CLIENT_SECRET` als Alias akzeptiert — kein Big-Bang-Switch
+  // im Vercel-Dashboard erforderlich.
+  const fbId =
+    process.env.AUTH_FACEBOOK_ID ?? process.env.FACEBOOK_CLIENT_ID;
+  const fbSecret =
+    process.env.AUTH_FACEBOOK_SECRET ?? process.env.FACEBOOK_CLIENT_SECRET;
+  const hasFacebook = !!(fbId && fbSecret);
   return hasGoogle || hasFacebook;
 }
 
@@ -345,12 +352,20 @@ function buildProviders(): NextAuthConfig['providers'] {
       }),
     );
   }
-  if (process.env.FACEBOOK_CLIENT_ID && process.env.FACEBOOK_CLIENT_SECRET) {
+  // IT13 / S02 — Facebook ENV-Aliasing (AUTH_FACEBOOK_* primär,
+  // FACEBOOK_CLIENT_* als Legacy-Alias). Scope auf Komma-Separator
+  // (`email,public_profile`) gemäß Facebook-Konvention; Space-Variante
+  // funktionierte historisch zwar auch, ist aber laut FB-Doku falsch.
+  const fbId =
+    process.env.AUTH_FACEBOOK_ID ?? process.env.FACEBOOK_CLIENT_ID;
+  const fbSecret =
+    process.env.AUTH_FACEBOOK_SECRET ?? process.env.FACEBOOK_CLIENT_SECRET;
+  if (fbId && fbSecret) {
     providers.push(
       FacebookProvider({
-        clientId: process.env.FACEBOOK_CLIENT_ID,
-        clientSecret: process.env.FACEBOOK_CLIENT_SECRET,
-        authorization: { params: { scope: 'email public_profile' } },
+        clientId: fbId,
+        clientSecret: fbSecret,
+        authorization: { params: { scope: 'email,public_profile' } },
       }),
     );
   }

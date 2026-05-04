@@ -84,6 +84,20 @@ export function Footer() {
                 Datenschutz
               </Link>
             </li>
+            <li>
+              {/*
+                IT13 / S01 — Footer-Link auf die Datenlöschungs-Seite.
+                Kanonische URL (Decision IT13): `/datenschutz/datenloesung`.
+                Dient (a) Tom-Komfort und (b) Facebook App Review (Footer-
+                Sichtbarkeit zählt als „leicht auffindbar").
+              */}
+              <Link
+                href="/datenschutz/datenloesung"
+                className="hover:text-baerenstark-accent"
+              >
+                Datenlöschung
+              </Link>
+            </li>
           </ul>
         </section>
       </div>

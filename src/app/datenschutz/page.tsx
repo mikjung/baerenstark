@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { CONTACT } from '@/lib/contact';
 
 export const metadata: Metadata = {
@@ -106,6 +107,41 @@ export default function DatenschutzPage() {
           <a className="break-all underline" href={`mailto:${CONTACT.email}`}>
             {CONTACT.email}
           </a>
+          .
+        </p>
+
+        {/*
+          IT13 / S01 — Datenlöschungs-Abschnitt mit Anker `#datenloesung`.
+          Dient (a) dem Footer-Link-Ziel und (b) der Querverlinkung aus der
+          Facebook Developer Console; die separate Detail-Seite liegt unter
+          `/datenschutz/datenloesung` (Decision IT13 — kanonische URL).
+        */}
+        <h2
+          id="datenloesung"
+          className="mt-6 scroll-mt-24 font-serif text-xl font-semibold"
+        >
+          6a. Datenlöschung
+        </h2>
+        <p>
+          Sie können die Löschung Ihrer personenbezogenen Daten jederzeit per
+          E-Mail beantragen. Schreiben Sie eine Nachricht mit dem Betreff{' '}
+          <strong>„Datenlöschung"</strong> an{' '}
+          <a
+            className="break-all underline"
+            href={`mailto:${CONTACT.email}?subject=Datenl%C3%B6schung`}
+          >
+            {CONTACT.email}
+          </a>
+          . Wir bearbeiten Ihre Anfrage innerhalb von 30 Tagen (Art. 17 DSGVO).
+          Eine ausführliche Erläuterung — welche Daten gelöscht werden, welche
+          aus gesetzlichen Aufbewahrungspflichten weiter gespeichert bleiben
+          und wie der Ablauf konkret aussieht — finden Sie auf unserer{' '}
+          <Link
+            href="/datenschutz/datenloesung"
+            className="underline underline-offset-2"
+          >
+            Datenlöschungs-Seite
+          </Link>
           .
         </p>
 

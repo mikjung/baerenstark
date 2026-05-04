@@ -34,7 +34,7 @@ import {
   fetchSlots,
   type RebookInfoResponse,
 } from '@/lib/api-client';
-import { scrollIntoViewIfNeeded } from '@/lib/scroll-into-view';
+import { useScrollToSection } from '@/lib/scroll-to-section';
 import { useCustomer } from '@/lib/use-customer';
 import type { SlotPublic } from '@/lib/schemas';
 import { SERVICE_LIST, type Service } from '@/lib/services';
@@ -67,6 +67,7 @@ export function BookingClient() {
   const params = useSearchParams();
   const rebookToken = params.get('rebookToken');
   const defaultService = params.get('service');
+  const scrollToSection = useScrollToSection();
 
   const isRebookMode = Boolean(rebookToken);
 
@@ -203,9 +204,10 @@ export function BookingClient() {
     if (selectedTimeSlot && selectedTimeSlot.date !== date) {
       setSelectedTimeSlot(null);
     }
-    // IT12-S04: scrollIntoViewIfNeeded — kein Scroll, wenn das Ziel
-    // bereits sichtbar ist.
-    setTimeout(() => scrollIntoViewIfNeeded('duration-section'), 50);
+    // IT13-S03: useScrollToSection — rAF×2 → scrollIntoView → heading.focus.
+    // Komfort-Tolerance ±8 px (intern im Hook) verhindert Scroll-Jumps,
+    // wenn das Ziel bereits im Idealbereich liegt (IT12-S04-Schutz).
+    scrollToSection('duration-section');
   }
 
   function handleDurationSelect(minutes: number) {
@@ -213,20 +215,20 @@ export function BookingClient() {
     // Wenn der Kunde die Dauer wechselt, den bisher gewählten Zeitslot fallen lassen
     // (der gehört zur alten Dauer und ist nicht mehr gültig).
     setSelectedTimeSlot(null);
-    setTimeout(() => scrollIntoViewIfNeeded('slot-list-section'), 50);
+    scrollToSection('slot-list-section');
   }
 
   function handleTimeSlotSelect(slot: SelectedTimeSlot) {
     setSelectedTimeSlot(slot);
     // IT10 / US-IT10-04: Bei normalem (non-rebook) Buchungs-Flow öffnet
-    // der Slot-Klick das QuickBookingModal — KEIN scrollIntoView nötig
+    // der Slot-Klick das QuickBookingModal — KEIN Scroll nötig
     // (IT12-S04 Fix: Modal-Open hatte unnötigen Scroll-Jump getriggert).
     if (!isRebookMode) {
       setIsQuickBookingOpen(true);
       return;
     }
     // Nur im Rebook-Mode: zur Inline-Form scrollen, falls nicht sichtbar.
-    setTimeout(() => scrollIntoViewIfNeeded('booking-form-section'), 50);
+    scrollToSection('booking-form-section');
   }
 
   // Im Re-Booking-Modus brauchen wir keine Dauer-Auswahl (Slot enthält die Zeit).
@@ -287,10 +289,16 @@ export function BookingClient() {
         </Banner>
       )}
 
-      <section aria-labelledby="calendar-heading">
+      <section
+        aria-labelledby="calendar-heading"
+        id="calendar-section"
+        data-section-anchor="calendar-section"
+        className="scroll-mt-[var(--header-offset)]"
+      >
         <h2
           id="calendar-heading"
-          className="mb-4 font-serif text-2xl font-semibold text-baerenstark-bark"
+          tabIndex={-1}
+          className="mb-4 font-serif text-2xl font-semibold text-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:rounded-sm"
         >
           1. Wähle einen Tag
         </h2>
@@ -308,11 +316,14 @@ export function BookingClient() {
         <section
           aria-labelledby="duration-heading"
           id="duration-section"
+          data-section-anchor="duration-section"
+          className="scroll-mt-[var(--header-offset)]"
         >
           <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
             <h2
               id="duration-heading"
-              className="font-serif text-2xl font-semibold text-baerenstark-bark"
+              tabIndex={-1}
+              className="font-serif text-2xl font-semibold text-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:rounded-sm"
             >
               2. Wähle die Auftragsdauer
             </h2>
@@ -334,11 +345,17 @@ export function BookingClient() {
         </section>
       )}
 
-      <section aria-labelledby="slots-heading" id="slot-list-section">
+      <section
+        aria-labelledby="slots-heading"
+        id="slot-list-section"
+        data-section-anchor="slot-list-section"
+        className="scroll-mt-[var(--header-offset)]"
+      >
         <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
           <h2
             id="slots-heading"
-            className="font-serif text-2xl font-semibold text-baerenstark-bark"
+            tabIndex={-1}
+            className="font-serif text-2xl font-semibold text-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:rounded-sm"
           >
             {isRebookMode ? '2. Wähle ein Zeitfenster' : '3. Wähle ein Zeitfenster'}
           </h2>
@@ -387,8 +404,8 @@ export function BookingClient() {
             onSelect={(slot) => {
               if (!slot.isBooked) {
                 setSelectedSlotId(slot.id);
-                // IT12-S04: Nur scrollen wenn Form nicht bereits sichtbar.
-                setTimeout(() => scrollIntoViewIfNeeded('booking-form-section'), 50);
+                // IT13-S03: useScrollToSection — komfort-toleriert.
+                scrollToSection('booking-form-section');
               }
             }}
             onRetry={loadLegacySlots}
@@ -396,10 +413,16 @@ export function BookingClient() {
         )}
       </section>
 
-      <section aria-labelledby="form-heading" id="booking-form-section">
+      <section
+        aria-labelledby="form-heading"
+        id="booking-form-section"
+        data-section-anchor="booking-form-section"
+        className="scroll-mt-[var(--header-offset)]"
+      >
         <h2
           id="form-heading"
-          className="mb-4 font-serif text-2xl font-semibold text-baerenstark-bark"
+          tabIndex={-1}
+          className="mb-4 font-serif text-2xl font-semibold text-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:rounded-sm"
         >
           {isRebookMode
             ? '3. Neuen Termin bestätigen'
@@ -455,9 +478,9 @@ export function BookingClient() {
             addressCity: profileAddress?.city ?? null,
           }}
           onSlotChange={() => {
-            // Modal schließt sich, Scroll zurück zum Slot-Picker (nur falls
-            // nicht schon sichtbar — IT12-S04).
-            setTimeout(() => scrollIntoViewIfNeeded('slot-list-section'), 50);
+            // Modal schließt sich, Scroll zurück zum Slot-Picker
+            // (komfort-toleriert via useScrollToSection — IT13-S03).
+            scrollToSection('slot-list-section');
           }}
           onSubmitSuccess={() => {
             setSelectedTimeSlot(null);

@@ -11,6 +11,20 @@
   --baerenstark-sand: #d9c2a2;
   --baerenstark-accent: #c8a064;
   --baerenstark-forest: #4a5d3a;
+  /*
+   * IT13-D3 — Sticky-Header-Offset für scroll-margin-top an Section-Anchors.
+   * Wird ggf. zur Laufzeit von <HeaderOffsetSync /> auf die echte Header-Höhe
+   * (+ 16 px Komfort-Buffer) gesetzt. Default deckt 64-px-Mobile-Header ab.
+   */
+  --header-offset: 80px;
+  --header-offset-modal: 16px;
+}
+
+@media (min-width: 640px) {
+  :root {
+    /* Desktop: Logo h-12 + py-3 ≈ 80 px Header → 96 px Offset. */
+    --header-offset: 96px;
+  }
 }
 
 html,

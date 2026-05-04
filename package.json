@@ -17,6 +17,7 @@
     "test:it10": "tsx --env-file=.env.local tests/it10-backend.test.ts 2>/dev/null || tsx tests/it10-backend.test.ts",
     "test:it11": "tsx --env-file=.env.local tests/it11-backend.test.ts 2>/dev/null || tsx tests/it11-backend.test.ts",
     "test:it12": "tsx --env-file=.env.local tests/it12-backend.test.ts 2>/dev/null || tsx tests/it12-backend.test.ts",
+    "test:it13": "tsx --env-file=.env.local tests/it13-backend.test.ts 2>/dev/null || tsx tests/it13-backend.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

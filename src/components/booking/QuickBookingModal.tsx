@@ -40,6 +40,7 @@ import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { XIcon } from '@/components/ui/icons';
 import { ApiClientError, createBooking } from '@/lib/api-client';
+import { useScrollToSection } from '@/lib/scroll-to-section';
 import {
   BookingFormSchema,
   CUSTOM_SERVICE_MIN_DESCRIPTION_LENGTH,
@@ -136,6 +137,7 @@ export function QuickBookingModal({
   showProfileAddressHint = false,
 }: QuickBookingModalProps) {
   const router = useRouter();
+  const scrollToSection = useScrollToSection();
   // Direkt den Context lesen — wenn das Modal außerhalb des Providers
   // gerendert wird (Bestand-Pfad in `BookingClient.tsx`), ist `dialog === null`
   // und das `dialog?.reset()` ist ein No-Op.
@@ -377,7 +379,10 @@ export function QuickBookingModal({
       describedBy="quick-booking-slot-info"
     >
       {/* Sticky Header */}
-      <header className="sticky top-0 z-10 flex items-start justify-between gap-3 rounded-t-modal border-b border-baerenstark-sand bg-baerenstark-cream p-4 shadow-soft sm:p-6">
+      <header
+        data-modal-header
+        className="sticky top-0 z-10 flex items-start justify-between gap-3 rounded-t-modal border-b border-baerenstark-sand bg-baerenstark-cream p-4 shadow-soft sm:p-6"
+      >
         <div className="min-w-0">
           <h2
             id="quick-booking-title"
@@ -423,6 +428,7 @@ export function QuickBookingModal({
       {/* Scrollable Body */}
       <form
         id="quick-booking-form"
+        data-modal-body
         noValidate
         onSubmit={onSubmit}
         aria-busy={isBusy || undefined}
@@ -464,7 +470,13 @@ export function QuickBookingModal({
         )}
 
         {/* Service-Pflicht-Feld (zuerst — STRUCT-4) */}
-        <fieldset className="mb-5">
+        <fieldset
+          data-section-anchor="modal-step-service"
+          className="mb-5 scroll-mt-[var(--header-offset-modal)]"
+        >
+          <h3 tabIndex={-1} className="sr-only focus:outline-none">
+            Welcher Service?
+          </h3>
           <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
             Welcher Service?
           </legend>
@@ -487,31 +499,57 @@ export function QuickBookingModal({
             (Dauer + TimeSlotPicker). */}
         {isStandalone && (
           <>
-            <fieldset className="mb-5">
+            <fieldset
+              data-section-anchor="modal-step-when"
+              className="mb-5 scroll-mt-[var(--header-offset-modal)]"
+            >
+              <h3 tabIndex={-1} className="sr-only focus:outline-none">
+                Wann?
+              </h3>
               <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
                 Wann?
               </legend>
               <BookingCalendar
                 selectedDate={internalDate}
-                onSelectDay={(d) => setInternalDate(d)}
+                onSelectDay={(d) => {
+                  setInternalDate(d);
+                  // IT13-S03: Auto-Scroll zur nächsten Sektion
+                  // (Modal-internes useScrollToSection — komfort-toleriert).
+                  scrollToSection('modal-step-duration');
+                }}
               />
             </fieldset>
 
             {internalDate && (
-              <fieldset className="mb-5">
+              <fieldset
+                data-section-anchor="modal-step-duration"
+                className="mb-5 scroll-mt-[var(--header-offset-modal)]"
+              >
+                <h3 tabIndex={-1} className="sr-only focus:outline-none">
+                  Wie lange?
+                </h3>
                 <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
                   Wie lange?
                 </legend>
                 <DurationPicker
                   value={internalDuration}
-                  onSelect={(m) => setInternalDuration(m)}
+                  onSelect={(m) => {
+                    setInternalDuration(m);
+                    scrollToSection('modal-step-time-slot');
+                  }}
                   service={pickedServiceForPricing}
                 />
               </fieldset>
             )}
 
             {internalDate && internalDuration !== null && (
-              <fieldset className="mb-5">
+              <fieldset
+                data-section-anchor="modal-step-time-slot"
+                className="mb-5 scroll-mt-[var(--header-offset-modal)]"
+              >
+                <h3 tabIndex={-1} className="sr-only focus:outline-none">
+                  Welches Zeitfenster?
+                </h3>
                 <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
                   Welches Zeitfenster?
                 </legend>
@@ -519,7 +557,10 @@ export function QuickBookingModal({
                   date={internalDate}
                   duration={internalDuration}
                   selectedSlot={internalTimeSlot}
-                  onSelect={(slot) => setInternalTimeSlot(slot)}
+                  onSelect={(slot) => {
+                    setInternalTimeSlot(slot);
+                    scrollToSection('modal-step-contact');
+                  }}
                 />
               </fieldset>
             )}
@@ -533,7 +574,7 @@ export function QuickBookingModal({
               <p className="text-sm">
                 Wenn Sie Ihre Adresse einmal in Ihrem{' '}
                 <Link
-                  href="/konto/profil"
+                  href="/konto/profil#profile-section-address"
                   className="font-medium text-baerenstark-wood underline-offset-2 hover:underline"
                 >
                   Profil
@@ -546,7 +587,13 @@ export function QuickBookingModal({
         )}
 
         {/* Kontaktdaten */}
-        <fieldset className="mb-5 space-y-3">
+        <fieldset
+          data-section-anchor="modal-step-contact"
+          className="mb-5 space-y-3 scroll-mt-[var(--header-offset-modal)]"
+        >
+          <h3 tabIndex={-1} className="sr-only focus:outline-none">
+            Ihre Kontaktdaten
+          </h3>
           <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
             Ihre Kontaktdaten
           </legend>
@@ -580,7 +627,13 @@ export function QuickBookingModal({
         </fieldset>
 
         {/* Adresse */}
-        <fieldset className="mb-5 space-y-3 rounded-xl border border-baerenstark-sand/60 bg-baerenstark-cream/40 p-3">
+        <fieldset
+          data-section-anchor="modal-step-address"
+          className="mb-5 space-y-3 rounded-xl border border-baerenstark-sand/60 bg-baerenstark-cream/40 p-3 scroll-mt-[var(--header-offset-modal)]"
+        >
+          <h3 tabIndex={-1} className="sr-only focus:outline-none">
+            Wohin sollen wir kommen?
+          </h3>
           <legend className="mb-1 font-serif text-sm font-semibold text-baerenstark-bark">
             Wohin sollen wir kommen?
           </legend>
@@ -620,7 +673,13 @@ export function QuickBookingModal({
         </fieldset>
 
         {/* Anfragedetails */}
-        <fieldset className="mb-5">
+        <fieldset
+          data-section-anchor="modal-step-description"
+          className="mb-5 scroll-mt-[var(--header-offset-modal)]"
+        >
+          <h3 tabIndex={-1} className="sr-only focus:outline-none">
+            Worum geht es?
+          </h3>
           <legend className="mb-2 font-serif text-sm font-semibold text-baerenstark-bark">
             Worum geht es?
           </legend>

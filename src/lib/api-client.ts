@@ -8,6 +8,7 @@
  *   - Cookie-basierter Auth via NextAuth ist same-origin → credentials: 'include'.
  */
 
+import { put } from '@vercel/blob/client';
 import type {
   ApiError,
   AvailabilityTemplateDay,
@@ -665,27 +666,160 @@ export async function fetchUpcomingBookings(
 
 // ---------------------------------------------------------------------------
 // Iteration 3 — Datei-Upload (US-18)
+// IT13-S05 — Refactor auf Direct-Upload via @vercel/blob/client.
 // ---------------------------------------------------------------------------
 
 /**
- * Lädt eine einzelne Datei via `POST /api/upload` (multipart/form-data) hoch
- * und liefert die Attachment-Metadaten zurück.
+ * IT13-S05 — Vom Server signiertes Client-Token plus Upload-Metadaten.
+ * Antwort von `POST /api/upload/token`.
  *
- * Wirft ApiClientError mit Code:
- *   - PAYLOAD_TOO_LARGE  → Datei > 20 MB.
- *   - UNSUPPORTED_MEDIA_TYPE → MIME-Type nicht erlaubt.
- *   - RATE_LIMITED       → 20/h/IP überschritten.
- *   - BLOB_NOT_CONFIGURED → Blob-Storage ist nicht konfiguriert (siehe US-18 Fallback).
+ * Vertrag: `project/design/requirements/backend-requirements-iteration-13.md`
+ *          §S05 + `src/app/api/upload/token/route.ts`.
  */
-export async function uploadFile(file: File): Promise<UploadResponse> {
-  const formData = new FormData();
-  formData.append('file', file);
-  const res = await request<DataEnvelope<UploadResponse>>('/api/upload', {
-    method: 'POST',
-    body: formData,
-    rawBody: true,
-  });
+export interface UploadTokenResponse {
+  uploadUrl: string;
+  token: string;
+  blobPath: string;
+  attachmentId: string;
+  maxBytes: number;
+}
+
+/** Body für `POST /api/upload/token`. */
+interface UploadTokenRequest {
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+}
+
+/**
+ * IT13-S05 / Schritt 1 — Server signiert ein kurz-lebiges Vercel-Blob-Client-
+ * Token und legt das `BookingAttachment`-Skelett an.
+ *
+ * Errors werden vom Caller via `ApiClientError` weiterbehandelt
+ * (PAYLOAD_TOO_LARGE / UNSUPPORTED_MEDIA_TYPE / RATE_LIMITED /
+ * BLOB_NOT_CONFIGURED / VALIDATION_ERROR).
+ */
+export async function requestUploadToken(
+  payload: UploadTokenRequest,
+): Promise<UploadTokenResponse> {
+  const res = await request<DataEnvelope<UploadTokenResponse>>(
+    '/api/upload/token',
+    { method: 'POST', body: payload },
+  );
   return res.data;
+}
+
+/**
+ * IT13-S05 / Schritt 3 — Confirm-Step nach erfolgreichem Direct-Upload.
+ * Trägt die finale Blob-URL am `BookingAttachment` nach.
+ *
+ * Vertrag: `PATCH /api/upload/attachments/[id]` (siehe
+ *          `src/app/api/upload/attachments/[id]/route.ts`).
+ */
+export async function confirmUploadAttachment(
+  attachmentId: string,
+  url: string,
+): Promise<UploadResponse> {
+  const res = await request<DataEnvelope<UploadResponse>>(
+    `/api/upload/attachments/${encodeURIComponent(attachmentId)}`,
+    { method: 'PATCH', body: { url } },
+  );
+  return res.data;
+}
+
+/**
+ * IT13-S05 — Optionaler Progress-Callback für die Direct-Upload-Phase.
+ * `@vercel/blob/client.put()` ruft ihn mit `{ loaded, total, percentage }`.
+ */
+export interface UploadProgress {
+  /** Bereits übertragene Bytes. */
+  loaded: number;
+  /** Gesamtgröße der Datei. */
+  total: number;
+  /** Fortschritt in Prozent (0–100). */
+  percentage: number;
+}
+
+export interface UploadFileOptions {
+  /** Wird während des Direct-Uploads zu Vercel Blob aufgerufen. */
+  onProgress?: (progress: UploadProgress) => void;
+  /** Optional zum Abbrechen (z. B. wenn der User die Datei aus der Liste entfernt). */
+  signal?: AbortSignal;
+}
+
+/**
+ * Lädt eine Datei via Direct-Upload zu Vercel Blob hoch (IT13-S05).
+ *
+ * Drei Phasen:
+ *   1. Server-Token-Issue: `POST /api/upload/token` liefert
+ *      `{ uploadUrl, token, blobPath, attachmentId, maxBytes }`.
+ *   2. Browser → Vercel Blob: `put(blobPath, file, { token, access: 'public', ... })`.
+ *      Damit fällt das Vercel-Hobby-4.5-MB-Function-Body-Limit weg —
+ *      AC „bis 10 MB für Bilder, 50 MB für Videos" ist sauber erfüllt.
+ *   3. Confirm: `PATCH /api/upload/attachments/[id]` trägt die finale
+ *      Blob-URL am `BookingAttachment` nach.
+ *
+ * Wirft `ApiClientError` mit u. a.:
+ *   - PAYLOAD_TOO_LARGE       (Server lehnt Datei wegen Größe ab)
+ *   - UNSUPPORTED_MEDIA_TYPE  (MIME nicht in Whitelist)
+ *   - RATE_LIMITED            (10/min/IP für /api/upload/token)
+ *   - BLOB_NOT_CONFIGURED     (BLOB_READ_WRITE_TOKEN-ENV fehlt server-seitig)
+ *   - VALIDATION_ERROR        (Body-Felder oder Confirm-URL ungültig)
+ *   - NETWORK_ERROR           (Server unerreichbar oder Direct-Upload abgebrochen)
+ *   - GONE + subcode UPLOAD_LEGACY  (alter Multipart-Endpoint — sollte nicht
+ *     mehr erreicht werden, Defensive für alte Browser-Tabs)
+ */
+export async function uploadFile(
+  file: File,
+  options?: UploadFileOptions,
+): Promise<UploadResponse> {
+  // Phase 1 — Token-Anfrage.
+  const tokenResp = await requestUploadToken({
+    filename: file.name,
+    contentType: file.type,
+    sizeBytes: file.size,
+  });
+
+  // Phase 2 — Direct-Upload Browser → Vercel Blob.
+  // `@vercel/blob/client.put()` nimmt den vom Server signierten Token entgegen
+  // und lädt direkt zur Blob-URL hoch. Kein Server-Function-Body involviert.
+  let blob: { url: string };
+  try {
+    blob = await put(tokenResp.blobPath, file, {
+      access: 'public',
+      token: tokenResp.token,
+      contentType: file.type,
+      // Multipart wird vom SDK ab größeren Dateien automatisch gewählt.
+      // Wir lassen den Default — funktioniert für Bilder + Videos sauber.
+      onUploadProgress: options?.onProgress
+        ? (progress) =>
+            options.onProgress!({
+              loaded: progress.loaded,
+              total: progress.total,
+              percentage: progress.percentage,
+            })
+        : undefined,
+      abortSignal: options?.signal,
+    });
+  } catch (err) {
+    // `put()` wirft eigene Error-Klassen (BlobAccessError, BlobNotFoundError,
+    // ...). Wir mappen sie auf NETWORK_ERROR / RATE_LIMITED, damit das UI
+    // einen einheitlichen Pfad hat. Das User-Cancel via AbortSignal werfen
+    // wir transparent weiter — der Caller unterdrückt den Listing-Eintrag.
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw err;
+    }
+    const message =
+      err instanceof Error
+        ? err.message
+        : 'Datei konnte nicht hochgeladen werden.';
+    throw new ApiClientError(0, 'NETWORK_ERROR', message);
+  }
+
+  // Phase 3 — Confirm-Step. Trägt die finale `blob.url` am Attachment-Record
+  // nach. Bei VALIDATION_ERROR / CONFLICT bekommt der User die normale
+  // Server-Fehlermeldung.
+  return confirmUploadAttachment(tokenResp.attachmentId, blob.url);
 }
 
 // ---------------------------------------------------------------------------
