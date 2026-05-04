@@ -359,6 +359,11 @@ function buildProviders(): NextAuthConfig['providers'] {
 
 const customerOauthConfig: NextAuthConfig = {
   providers: buildProviders(),
+  // Auth.js v5 verwendet sonst den Default-basePath `/api/auth`. Da der
+  // Customer-Handler unter `/api/auth/customer/[...nextauth]` läuft, würde
+  // `customer/csrf`, `customer/signin`, … als unbekannte Action geparst →
+  // `UnknownAction: Cannot parse action at /api/auth/customer/csrf`.
+  basePath: '/api/auth/customer',
   pages: {
     signIn: '/konto/login',
     error: '/konto/login',
