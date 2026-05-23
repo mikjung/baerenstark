@@ -1,24 +1,12 @@
 'use client';
 
-/**
- * Header — globale Navigation.
- *
- * IT11 / US-IT11-02:
- *   - Der „Termin buchen"-CTA ist jetzt ein Button, der über den
- *     `useBookingDialog()`-Hook das globale Booking-Modal öffnet — kein
- *     `<Link href="/buchung">` mehr.
- *   - Die `/buchung`-Seite bleibt als Fallback (SEO + JS-Off-Browser +
- *     direkter URL-Aufruf).
- */
-
 import Image from 'next/image';
 import Link from 'next/link';
-import { CustomerHeaderMenu } from '@/components/customer/CustomerHeaderMenu';
-import { useBookingDialog } from '@/components/booking/use-booking-dialog';
+import { useAnfrageDialog } from '@/components/anfrage/use-anfrage-dialog';
 import { CONTACT } from '@/lib/contact';
 
 export function Header() {
-  const { open } = useBookingDialog();
+  const { open } = useAnfrageDialog();
 
   return (
     <header
@@ -50,9 +38,8 @@ export function Header() {
             aria-haspopup="dialog"
             className="rounded-lg bg-baerenstark-wood px-3 py-2 text-sm font-medium text-baerenstark-cream transition-colors hover:bg-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent sm:px-5 sm:py-2.5 sm:text-base"
           >
-            Termin buchen
+            Anfrage stellen
           </button>
-          <CustomerHeaderMenu />
           <a
             href={`tel:${CONTACT.phoneTel}`}
             className="hidden rounded-lg border border-baerenstark-wood/40 px-3 py-2 text-sm font-medium text-baerenstark-bark transition-colors hover:bg-baerenstark-sand/40 lg:inline-flex lg:px-4"

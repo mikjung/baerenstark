@@ -16,7 +16,7 @@ export function Footer() {
               <a
                 href={`tel:${CONTACT.phoneTel}`}
                 className="text-baerenstark-accent underline-offset-2 hover:underline"
-                aria-label={`${CONTACT.ownerName} anrufen unter ${CONTACT.phoneDisplay}`}
+                aria-label={`Anrufen unter ${CONTACT.phoneDisplay}`}
               >
                 {CONTACT.phoneDisplay}
               </a>
@@ -43,7 +43,7 @@ export function Footer() {
 
         <section aria-labelledby="footer-links">
           <h2 id="footer-links" className="mb-3 font-serif text-lg font-semibold">
-            Services
+            Dienstleistungen
           </h2>
           <ul className="space-y-2 text-sm">
             <li>
@@ -53,7 +53,7 @@ export function Footer() {
             </li>
             <li>
               <Link href="/buchung" className="hover:text-baerenstark-accent">
-                Termin buchen
+                Anfrage stellen
               </Link>
             </li>
             {SERVICE_DETAIL_SLUGS.map((slug) => (
@@ -82,20 +82,6 @@ export function Footer() {
             <li>
               <Link href="/datenschutz" className="hover:text-baerenstark-accent">
                 Datenschutz
-              </Link>
-            </li>
-            <li>
-              {/*
-                IT13 / S01 — Footer-Link auf die Datenlöschungs-Seite.
-                Kanonische URL (Decision IT13): `/datenschutz/datenloesung`.
-                Dient (a) Tom-Komfort und (b) Facebook App Review (Footer-
-                Sichtbarkeit zählt als „leicht auffindbar").
-              */}
-              <Link
-                href="/datenschutz/datenloesung"
-                className="hover:text-baerenstark-accent"
-              >
-                Datenlöschung
               </Link>
             </li>
           </ul>

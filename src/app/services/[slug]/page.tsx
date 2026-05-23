@@ -24,7 +24,6 @@ import { JsonLd } from '@/components/seo/JsonLd';
 import { ServiceDetailHero } from '@/components/services/ServiceDetailHero';
 import { serviceJsonLd } from '@/lib/seo/jsonLd';
 import {
-  formatPrice,
   getServiceBySlug,
   SERVICE_DETAIL_SLUGS,
 } from '@/lib/services';
@@ -84,7 +83,7 @@ const FAQS: Record<string, ReadonlyArray<{ q: string; a: string }>> = {
     },
     {
       q: 'Was kostet eine Entrümpelung?',
-      a: 'Wir starten ab 35 €/Std. Den Endpreis vereinbaren wir nach einer kostenlosen Besichtigung — fair, transparent, schriftlich.',
+      a: 'Wir kalkulieren individuell — je nach Umfang und Aufwand. Nach einer kostenlosen Besichtigung erhältst du ein faires, transparentes Angebot.',
     },
     {
       q: 'Übernehmt ihr auch die Entsorgung?',
@@ -144,7 +143,7 @@ const FAQS: Record<string, ReadonlyArray<{ q: string; a: string }>> = {
     },
     {
       q: 'Was kostet das?',
-      a: 'Ab 20 € pro Einsatz, je nach Tonnen-Anzahl. Im Abo wird es günstiger.',
+      a: 'Die Konditionen sprechen wir individuell ab — je nach Tonnen-Anzahl und Häufigkeit. Im Abo wird es günstiger.',
     },
     {
       q: 'Was passiert, wenn ich kurzfristig verhindert bin?',
@@ -158,7 +157,7 @@ const FAQS: Record<string, ReadonlyArray<{ q: string; a: string }>> = {
     },
     {
       q: 'Bekomme ich etwas für den Schrott?',
-      a: 'Ab gewissen Mengen ja — wir geben dir den Materialwert transparent an und ziehen ihn vom Aufwand ab.',
+      a: 'Ab gewissen Mengen ja — wir besprechen den Materialwert transparent mit dir und ziehen ihn vom Aufwand ab.',
     },
     {
       q: 'Gibt es eine Mindestmenge?',
@@ -173,7 +172,6 @@ export default function ServiceDetailPage({ params }: PageProps) {
     notFound();
   }
 
-  const priceLabel = formatPrice(info);
   const ctaHref = `/buchung?service=${encodeURIComponent(info.slug)}`;
   const faq = FAQS[info.slug] ?? [];
 
@@ -213,25 +211,17 @@ export default function ServiceDetailPage({ params }: PageProps) {
             <p className="mb-6 text-base text-baerenstark-bark/80 sm:text-lg">
               {info.description}
             </p>
-            <div className="mb-6 flex flex-wrap items-baseline gap-3">
-              <span className="rounded-full bg-leaf px-4 py-1.5 text-base font-semibold text-white shadow-soft">
-                {priceLabel}
-              </span>
-              <span className="text-sm text-baerenstark-bark/70">
-                {info.priceNote}
-              </span>
-            </div>
             <div className="flex flex-col gap-3 sm:flex-row">
               <Link
                 href={ctaHref}
                 className="inline-flex items-center justify-center rounded-lg bg-baerenstark-wood px-6 py-3 text-base font-medium text-baerenstark-cream shadow-soft transition-colors hover:bg-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
               >
-                Jetzt buchen
+                Anfrage stellen
               </Link>
               <a
                 href={`tel:${CONTACT.phoneTel}`}
                 className="inline-flex items-center justify-center rounded-lg border-2 border-baerenstark-wood px-6 py-3 text-base font-medium text-baerenstark-bark transition-colors hover:bg-baerenstark-sand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
-                aria-label={`${CONTACT.ownerName} anrufen unter ${CONTACT.phoneDisplay}`}
+                aria-label={`Anrufen unter ${CONTACT.phoneDisplay}`}
               >
                 Anrufen: {CONTACT.phoneDisplay}
               </a>
@@ -365,21 +355,21 @@ export default function ServiceDetailPage({ params }: PageProps) {
             Bereit für {info.label.toLowerCase()}?
           </h2>
           <p className="mb-6 text-base text-baerenstark-bark/80 sm:text-lg">
-            Sag {CONTACT.ownerName} kurz Bescheid — wir melden uns innerhalb
-            von 24 Stunden mit einem fairen, transparenten Angebot.
+            Schreib uns kurz, was du brauchst — wir melden uns innerhalb von
+            24 Stunden mit einem fairen, transparenten Angebot.
           </p>
           <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Link
               href={ctaHref}
               className="inline-flex items-center justify-center rounded-lg bg-leaf px-6 py-3 text-base font-medium text-white shadow-soft transition-colors hover:bg-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
             >
-              Jetzt buchen →
+              Jetzt Anfrage stellen →
             </Link>
             <Link
               href="/"
               className="inline-flex items-center justify-center rounded-lg border-2 border-baerenstark-wood px-6 py-3 text-base font-medium text-baerenstark-bark transition-colors hover:bg-baerenstark-sand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
             >
-              Alle Services ansehen
+              Alle Dienstleistungen ansehen
             </Link>
           </div>
         </div>

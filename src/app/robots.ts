@@ -1,10 +1,3 @@
-/**
- * robots.txt — Next.js Route Handler (US-IT6-04).
- *
- * Erlaubt Crawler auf öffentlichen Pfaden, sperrt Admin-Bereich,
- * API-Routes und das Kunden-Konto.
- */
-
 import type { MetadataRoute } from 'next';
 
 const DEFAULT_BASE_URL = 'https://www.baerenstark-hausservice.app';
@@ -21,7 +14,7 @@ export default function robots(): MetadataRoute.Robots {
       {
         userAgent: '*',
         allow: '/',
-        disallow: ['/admin', '/admin/', '/api', '/api/', '/konto', '/konto/'],
+        disallow: ['/api', '/api/'],
       },
     ],
     sitemap: `${url}/sitemap.xml`,

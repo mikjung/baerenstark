@@ -1,11 +1,3 @@
-/**
- * sitemap.xml — Next.js Route Handler (US-IT6-04).
- *
- * Listet alle öffentlichen Seiten:
- *   - Startseite, Buchung, Bewertungen, Kontakt, Impressum, Datenschutz.
- *   - Service-Detail-Pages (1 pro Service-Slug).
- */
-
 import type { MetadataRoute } from 'next';
 import { SERVICE_LIST } from '@/lib/services';
 
@@ -36,12 +28,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.9,
     },
     {
-      url: `${url}/bewertungen`,
-      lastModified: now,
-      changeFrequency: 'weekly',
-      priority: 0.7,
-    },
-    {
       url: `${url}/impressum`,
       lastModified: now,
       changeFrequency: 'yearly',
@@ -55,8 +41,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
     },
   ];
 
-  // `sonstiges` ist nur eine Anfrage-Kategorie im Buchungs-Formular und hat
-  // keine eigene Detail-Page (siehe `src/app/services/[slug]/page.tsx`).
   const servicePages: MetadataRoute.Sitemap = SERVICE_LIST
     .filter((s) => s.slug !== 'sonstiges')
     .map((s) => ({

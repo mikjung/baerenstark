@@ -3,14 +3,12 @@
 /**
  * Service-Grid auf der Startseite.
  *
- * Iteration 3:
- *  - US-20: Preis-Anzeige unter dem Beschreibungstext.
- *  - US-23: Klick auf Karte öffnet ServiceDetailModal mit Vorher/Nachher.
+ * US-23: Klick auf Karte öffnet ServiceDetailModal mit Vorher/Nachher.
  */
 
 import { useState } from 'react';
 import { ServiceDetailModal } from './ServiceDetailModal';
-import { formatPrice, SERVICE_LIST, type ServiceInfo } from '@/lib/services';
+import { SERVICE_LIST, type ServiceInfo } from '@/lib/services';
 
 export function ServiceGrid() {
   const [activeService, setActiveService] = useState<ServiceInfo | null>(null);
@@ -25,11 +23,11 @@ export function ServiceGrid() {
           id="services-title"
           className="mb-3 font-serif text-3xl font-bold text-baerenstark-bark sm:text-4xl"
         >
-          Unsere Services
+          Unsere Dienstleistungen
         </h2>
         <p className="mx-auto max-w-2xl text-base text-baerenstark-bark/80">
-          Sieben Bereiche rund ums Haus — alles aus einer Hand. Klick auf eine
-          Karte für Details und Preise.
+          Alles aus einer Hand — rund ums Haus. Klick auf eine Karte für mehr
+          Details.
         </p>
       </div>
 
@@ -68,10 +66,7 @@ export function ServiceGrid() {
               <p className="mb-3 text-sm text-baerenstark-bark/80">
                 {service.description}
               </p>
-              <p className="mt-auto text-sm font-semibold text-leaf">
-                {formatPrice(service)}
-              </p>
-              <span className="mt-2 text-xs text-baerenstark-wood underline-offset-2 group-hover:underline">
+              <span className="mt-auto text-xs text-baerenstark-wood underline-offset-2 group-hover:underline">
                 Mehr erfahren →
               </span>
             </button>
@@ -80,8 +75,7 @@ export function ServiceGrid() {
       </ul>
 
       <p className="mt-6 text-center text-xs text-baerenstark-bark/60">
-        * Endpreise nach individueller Besichtigung. Richtpreise gelten für die
-        Region Darmstadt.
+        Konditionen und Aufwand werden individuell mit Ihnen abgesprochen.
       </p>
 
       <ServiceDetailModal

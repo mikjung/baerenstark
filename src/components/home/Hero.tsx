@@ -11,11 +11,11 @@
  */
 
 import Image from 'next/image';
-import { useBookingDialog } from '@/components/booking/use-booking-dialog';
+import { useAnfrageDialog } from '@/components/anfrage/use-anfrage-dialog';
 import { CONTACT } from '@/lib/contact';
 
 export function Hero() {
-  const { open } = useBookingDialog();
+  const { open } = useAnfrageDialog();
 
   return (
     <section
@@ -31,11 +31,11 @@ export function Hero() {
             id="hero-title"
             className="mb-4 font-serif text-3xl font-bold leading-tight text-baerenstark-bark sm:text-4xl md:text-5xl"
           >
-            Ihr Haus in bärenstarken Händen!
+            Ihr Haus in Bärenstarken Händen!
           </h1>
           <p className="mb-6 text-base text-baerenstark-bark/80 sm:text-lg">
             Entrümpelung, Entkernung, Reinigung, Grünflächenpflege und mehr —
-            zuverlässig, fair und transparent von {CONTACT.ownerName}.
+            zuverlässig, fair und transparent.
           </p>
           <div className="flex flex-col gap-3 sm:flex-row">
             <button
@@ -44,7 +44,7 @@ export function Hero() {
               aria-haspopup="dialog"
               className="inline-flex items-center justify-center rounded-lg bg-baerenstark-wood px-6 py-3 text-base font-medium text-baerenstark-cream shadow-soft transition-colors hover:bg-baerenstark-bark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-baerenstark-accent focus-visible:ring-offset-2"
             >
-              Jetzt Termin buchen
+              Anfrage stellen
             </button>
             <a
               href={`tel:${CONTACT.phoneTel}`}

@@ -5,7 +5,7 @@ import { Header } from '@/components/layout/Header';
 import { HeaderOffsetSync } from '@/components/layout/HeaderOffsetSync';
 import { Footer } from '@/components/layout/Footer';
 import { Toaster } from '@/components/ui/Toast';
-import { BookingDialogProvider } from '@/components/booking/BookingDialogProvider';
+import { AnfrageDialogProvider } from '@/components/anfrage/AnfrageDialogProvider';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -21,13 +21,12 @@ const playfair = Playfair_Display({
 
 export const metadata: Metadata = {
   title: {
-    default: 'Bärenstark Hausservice — Ihr Haus in bärenstarken Händen',
+    default: 'Bärenstark Hausservice — Ihr Haus in Bärenstarken Händen',
     template: '%s · Bärenstark Hausservice',
   },
   description:
     'Bärenstark Hausservice in Darmstadt: Entrümpelungen, Entkernung, Reinigung, Grünflächenpflege, Mülltonnenservice, Schrott- und Metallentsorgung. Zuverlässig, fair, transparent.',
   applicationName: 'Bärenstark Hausservice',
-  authors: [{ name: 'Tom Siefert' }],
   robots: {
     index: true,
     follow: true,
@@ -55,14 +54,14 @@ export default function RootLayout({
         >
           Zum Hauptinhalt springen
         </a>
-        <BookingDialogProvider>
+        <AnfrageDialogProvider>
           <Header />
           <HeaderOffsetSync />
           <main id="main" className="flex-1">
             {children}
           </main>
           <Footer />
-        </BookingDialogProvider>
+        </AnfrageDialogProvider>
         <Toaster />
       </body>
     </html>

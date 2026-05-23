@@ -11,24 +11,25 @@ export function About() {
           id="about-title"
           className="mb-4 font-serif text-3xl font-bold text-baerenstark-bark sm:text-4xl"
         >
-          Über Tom Siefert
+          Über mich
         </h2>
         <div className="space-y-4 text-base text-baerenstark-bark/85 sm:text-lg">
           <p>
-            Mein Name ist <strong>{CONTACT.ownerName}</strong>, ich bin 29 Jahre alt
-            und selbstständig in Darmstadt unterwegs. Mit Bärenstark Hausservice
-            biete ich praktische Lösungen rund ums Haus an — vom kompletten
-            Räumen einer Wohnung bis zur regelmäßigen Pflege Ihrer Grünanlagen.
+            Ich bin 29 Jahre alt und selbstständig in Darmstadt unterwegs. Mit
+            Bärenstark Hausservice biete ich praktische Lösungen rund ums Haus
+            an — vom kompletten Räumen einer Wohnung bis zur regelmäßigen
+            Pflege Ihrer Grünanlagen.
           </p>
           <p>
-            Was Sie von mir erwarten dürfen: <strong>zuverlässige Termine</strong>,{' '}
-            <strong>faire Preise</strong> und <strong>transparente Absprachen</strong>.
-            Keine versteckten Kosten, keine leeren Versprechen.
+            Was Sie von mir erwarten dürfen:{' '}
+            <strong>zuverlässige Termine</strong>,{' '}
+            <strong>faire Konditionen</strong> und{' '}
+            <strong>transparente Absprachen</strong>. Keine versteckten Kosten,
+            keine leeren Versprechen.
           </p>
           <p>
-            Ich arbeite in {CONTACT.region}. Schreiben Sie mir, rufen Sie an
-            oder buchen Sie direkt online ein Zeitfenster — ich melde mich
-            zeitnah zurück.
+            Ich arbeite in {CONTACT.region}. Schreiben Sie mir oder rufen Sie
+            an — ich melde mich zeitnah zurück.
           </p>
         </div>
         <div className="mt-6 flex flex-col gap-3 sm:flex-row">

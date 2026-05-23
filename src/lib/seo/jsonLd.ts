@@ -1,19 +1,11 @@
 /**
- * JSON-LD Helper (US-IT6-04). Wir liefern strukturierte Daten für:
- *   - LocalBusiness (Startseite + Pflicht für SERP-Anreicherung)
+ * JSON-LD Helper. Strukturierte Daten für:
+ *   - LocalBusiness (Startseite)
  *   - Service (eine Seite pro Service-Slug)
- *   - AggregateRating + Review (Bewertungs-Sektion)
- *
- * NEEDS INPUT: openingHours + Telefon + Adresse — Tom muss finale Werte
- * liefern. Bis dahin Platzhalter (siehe ARCHITECTURE_IT6.md §6.2).
  */
 
-import type { PublicReview } from '@/lib/schemas';
 import { CONTACT } from '@/lib/contact';
-import {
-  SERVICE_LIST,
-  type Service as ServiceSlug,
-} from '@/lib/services';
+import { SERVICE_LIST, type Service as ServiceSlug } from '@/lib/services';
 
 const DEFAULT_BASE_URL = 'https://www.baerenstark-hausservice.app';
 
@@ -32,18 +24,15 @@ export function localBusinessJsonLd(): Record<string, unknown> {
     image: `${url}/opengraph-image.png`,
     logo: `${url}/icon.png`,
     url,
-    // NEEDS INPUT — Tom liefert finale Telefonnummer.
     telephone: CONTACT.phoneTel || '+49-???-?????',
     address: {
       '@type': 'PostalAddress',
-      // NEEDS INPUT — Adresse (Tom liefert).
       streetAddress: 'Mustergasse 1',
       addressLocality: 'Darmstadt',
       postalCode: '64283',
       addressCountry: 'DE',
     },
     areaServed: ['Darmstadt', 'Darmstadt-Dieburg', 'Bergstraße'],
-    // NEEDS INPUT — finale Geschäftszeiten von Tom (Platzhalter Mo–Fr 07:00–18:00).
     openingHoursSpecification: [
       {
         '@type': 'OpeningHoursSpecification',
@@ -75,47 +64,5 @@ export function serviceJsonLd(slug: ServiceSlug): Record<string, unknown> {
       name: 'Darmstadt',
     },
     url: `${url}/services/${slug}`,
-  };
-}
-
-export function aggregateRatingJsonLd(
-  averageStars: number,
-  total: number,
-): Record<string, unknown> {
-  const url = siteUrl();
-  return {
-    '@context': 'https://schema.org',
-    '@type': 'AggregateRating',
-    itemReviewed: {
-      '@type': 'LocalBusiness',
-      '@id': `${url}/#localbusiness`,
-      name: 'Bärenstark Hausservice',
-    },
-    ratingValue: averageStars.toFixed(1),
-    bestRating: '5',
-    worstRating: '1',
-    ratingCount: String(total),
-  };
-}
-
-export function reviewJsonLd(review: PublicReview): Record<string, unknown> {
-  const url = siteUrl();
-  return {
-    '@context': 'https://schema.org',
-    '@type': 'Review',
-    author: { '@type': 'Person', name: review.customerName },
-    datePublished: review.createdAt,
-    reviewBody: review.text ?? '',
-    reviewRating: {
-      '@type': 'Rating',
-      ratingValue: String(review.stars),
-      bestRating: '5',
-      worstRating: '1',
-    },
-    itemReviewed: {
-      '@type': 'LocalBusiness',
-      '@id': `${url}/#localbusiness`,
-      name: 'Bärenstark Hausservice',
-    },
   };
 }

@@ -1,16 +1,12 @@
 /**
  * Service-Liste — Single Source of Truth für die UI.
  *
- * Slugs werden in der Datenbank persistiert und in der API als enum validiert
- * (siehe contracts/zod-schemas.ts → SERVICES). Hier ergänzen wir Anzeige-
- * Metadaten (Label, Beschreibung, Icon, Preis, Vorher/Nachher-Details) für
- * die Service-Karten (US-01), Formulare (US-04), Service-Popups (US-23) und
- * Preis-Anzeigen (US-20).
+ * Slugs werden in der API als enum validiert (siehe contracts/zod-schemas.ts
+ * → SERVICES). Hier ergänzen wir Anzeige-Metadaten (Label, Beschreibung,
+ * Icon, Vorher/Nachher-Details).
  *
- * Iteration 3:
- *  - `'sonstiges'` als individuelle Anfrage-Kategorie (US-19).
- *  - `priceFrom / priceUnit / priceNote` für Service-Preise (US-20).
- *  - `details.before / details.after / details.includes` für Service-Popups (US-23).
+ * Preise werden bewusst nicht mehr hier verwaltet — sie sind individuell
+ * und werden direkt mit dem Kunden besprochen.
  */
 
 export const SERVICES = [
@@ -20,21 +16,14 @@ export const SERVICES = [
   'gruenflaechenpflege',
   'muelltonnenservice',
   'entsorgung',
-  'sonstiges', // IT3 / US-19
+  'sonstiges',
 ] as const;
 
 export type Service = (typeof SERVICES)[number];
 
-/** US-20 — Einheit der Preisangabe. */
-export type PriceUnit = 'hour' | 'task';
-
-/** US-23 — Vorher/Nachher-Details für das Service-Popup. */
 export interface ServiceDetails {
-  /** Ausgangslage (Vorher). */
   before: string;
-  /** Ergebnis (Nachher). */
   after: string;
-  /** Was ist im Service inbegriffen — Aufzählung mit Häkchen. */
   includes: string[];
 }
 
@@ -44,14 +33,6 @@ export interface ServiceInfo {
   short: string;
   description: string;
   icon: string;
-  // US-20:
-  /** Stundenpreis bzw. Pauschalpreis (null bei "Sonstiges"). */
-  priceFrom: number | null;
-  /** Einheit für die Preis-Anzeige (`'hour'` → "ab X €/Std.", `'task'` → "ab X €/Einsatz"). */
-  priceUnit: PriceUnit | null;
-  /** Disclaimer / Hinweistext zum Preis. */
-  priceNote: string;
-  // US-23:
   details: ServiceDetails;
 }
 
@@ -63,9 +44,6 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
     description:
       'Ob Haushaltsauflösung oder Keller leer räumen — wir packen an, sortieren und entsorgen fachgerecht.',
     icon: '📦',
-    priceFrom: 35,
-    priceUnit: 'hour',
-    priceNote: 'Endpreis nach Besichtigung',
     details: {
       before:
         'Vollgestellte Räume, jahrelang gewachsene Sammlungen, schwere Möbel, kein Durchkommen mehr.',
@@ -76,7 +54,7 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
         'Demontage von Möbeln und Einbauten',
         'Fachgerechte Entsorgung (Sperrmüll, Wertstoff, Sondermüll)',
         'Besenreine Übergabe',
-        'Transparente Endabrechnung nach Aufwand',
+        'Transparente Abrechnung nach Aufwand',
       ],
     },
   },
@@ -87,9 +65,6 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
     description:
       'Vor dem Umbau: Wir entkernen Räume und Etagen, demontieren Einbauten und bereiten alles für die nächste Bauphase vor.',
     icon: '🛠️',
-    priceFrom: 45,
-    priceUnit: 'hour',
-    priceNote: 'Individuell nach Aufwand',
     details: {
       before:
         'Bestehende Innenausbauten, Bodenbeläge, sanitäre Anlagen oder abgehängte Decken stehen dem Umbau im Weg.',
@@ -111,9 +86,6 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
     description:
       'Egal ob Wohnung, Büro oder Außenbereich — wir hinterlassen Räume sauber und übergabefertig.',
     icon: '🧽',
-    priceFrom: 25,
-    priceUnit: 'hour',
-    priceNote: 'Zzgl. Reinigungsmittel falls benötigt',
     details: {
       before:
         'Bauschmutz, fettige Küchen, vernachlässigte Bäder oder verschmutzte Außenflächen.',
@@ -135,9 +107,6 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
     description:
       'Heckenschnitt, Rasenmähen, Unkraut entfernen, Laub wegräumen — wir halten deinen Garten gepflegt.',
     icon: '🌿',
-    priceFrom: 30,
-    priceUnit: 'hour',
-    priceNote: 'Inkl. Standard-Werkzeug',
     details: {
       before:
         'Wuchernde Hecken, hoher Rasen, überwachsene Beete, Laub und Astwerk auf den Wegen.',
@@ -159,9 +128,6 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
     description:
       'Verlässlicher Service zu deinem Abfuhrtermin — wir kümmern uns ums Rausstellen und Reinholen, auch bei Abwesenheit.',
     icon: '🗑️',
-    priceFrom: 20,
-    priceUnit: 'task',
-    priceNote: 'Pro Einsatz, je nach Tonnenanzahl',
     details: {
       before:
         'Du bist im Urlaub oder beruflich unterwegs — die Tonnen können nicht rechtzeitig rausgestellt werden.',
@@ -183,9 +149,6 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
     description:
       'Alteisen, Maschinen, Metallreste — wir holen ab und entsorgen ressourcenschonend.',
     icon: '♻️',
-    priceFrom: 40,
-    priceUnit: 'hour',
-    priceNote: 'Zzgl. Materialwert',
     details: {
       before:
         'Alteisen, ausgediente Maschinen, Metallreste oder kaputte Werkzeuge sammeln sich an und nehmen Platz weg.',
@@ -205,21 +168,18 @@ export const SERVICE_LIST: readonly ServiceInfo[] = [
     label: 'Sonstiges / Individuelle Anfrage',
     short: 'Dein Anliegen passt nicht in eine Kategorie?',
     description:
-      'Beschreib uns dein Anliegen — Tom prüft es individuell und meldet sich mit einem maßgeschneiderten Angebot.',
+      'Beschreib uns dein Anliegen — wir prüfen es individuell und melden uns mit einem maßgeschneiderten Angebot.',
     icon: '✏️',
-    priceFrom: null,
-    priceUnit: null,
-    priceNote: 'Auf Anfrage',
     details: {
       before:
         'Du hast ein besonderes Anliegen, das sich nicht eindeutig kategorisieren lässt — z.B. eine Mischung aus mehreren Services oder etwas ganz anderes.',
       after:
-        'Tom prüft deine Anfrage individuell und meldet sich mit einem maßgeschneiderten Angebot bei dir.',
+        'Wir prüfen deine Anfrage individuell und melden uns mit einem maßgeschneiderten Angebot bei dir.',
       includes: [
         'Individuelle Beratung',
         'Maßgeschneidertes Angebot',
         'Flexible Terminplanung',
-        'Direkte Rücksprache mit Tom',
+        'Direkte Rücksprache',
       ],
     },
   },
@@ -260,36 +220,11 @@ export function getServiceLabel(slug: Service | string): string {
   return slug;
 }
 
-/**
- * Liefert ServiceInfo zu einem unsicheren String (z. B. URL-Param).
- * Gibt `null` zurück, wenn der Slug nicht zu unseren Services gehört oder
- * `'sonstiges'` ist (das hat keine eigene Detail-Page).
- */
 export function getServiceBySlug(slug: string): ServiceInfo | null {
   if (!(SERVICES as readonly string[]).includes(slug)) return null;
   if (slug === 'sonstiges') return null;
   return SERVICE_BY_SLUG[slug as Service];
 }
 
-/**
- * Slugs, für die eine eigene `/services/[slug]`-Detail-Page existiert
- * (= alle echten Services, ohne die Anfrage-Kategorie `'sonstiges'`).
- * Wird von `generateStaticParams` und der Sitemap genutzt.
- */
 export const SERVICE_DETAIL_SLUGS: ReadonlyArray<Exclude<Service, 'sonstiges'>> =
   SERVICES.filter((s): s is Exclude<Service, 'sonstiges'> => s !== 'sonstiges');
-
-/**
- * US-20 — formatiert den Preis für die Anzeige auf Service-Karten und Popups.
- * Beispiele:
- *   priceFrom=35, priceUnit='hour' → "ab 35 €/Std."
- *   priceFrom=20, priceUnit='task' → "ab 20 €/Einsatz"
- *   priceFrom=null                  → "Auf Anfrage"
- */
-export function formatPrice(info: Pick<ServiceInfo, 'priceFrom' | 'priceUnit'>): string {
-  if (info.priceFrom == null || info.priceUnit == null) {
-    return 'Auf Anfrage';
-  }
-  const unit = info.priceUnit === 'hour' ? '€/Std.' : '€/Einsatz';
-  return `ab ${info.priceFrom} ${unit}`;
-}

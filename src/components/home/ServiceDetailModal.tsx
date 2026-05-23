@@ -15,7 +15,7 @@
 import Link from 'next/link';
 import { useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/Button';
-import { formatPrice, type ServiceInfo } from '@/lib/services';
+import { type ServiceInfo } from '@/lib/services';
 
 interface ServiceDetailModalProps {
   service: ServiceInfo | null;
@@ -89,7 +89,6 @@ export function ServiceDetailModal({ service, onClose }: ServiceDetailModalProps
 
   if (!service) return null;
 
-  const priceLabel = formatPrice(service);
   const ctaHref = `/buchung?service=${encodeURIComponent(service.slug)}`;
   // Detail-Page existiert für alle Services außer `'sonstiges'` (Anfrage-Kategorie).
   const detailHref =
@@ -143,14 +142,6 @@ export function ServiceDetailModal({ service, onClose }: ServiceDetailModalProps
             >
               {service.description}
             </p>
-            <div className="mt-3 flex flex-wrap items-baseline gap-2">
-              <span className="rounded-full bg-leaf px-3 py-1 text-sm font-semibold text-white shadow-soft">
-                {priceLabel}
-              </span>
-              <span className="text-xs text-baerenstark-bark/60">
-                {service.priceNote}
-              </span>
-            </div>
           </div>
           <button
             ref={closeButtonRef}
@@ -243,7 +234,7 @@ export function ServiceDetailModal({ service, onClose }: ServiceDetailModalProps
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-baerenstark-accent',
               ].join(' ')}
             >
-              Jetzt Termin anfragen →
+              Jetzt Anfrage stellen →
             </Link>
           </div>
         </footer>
